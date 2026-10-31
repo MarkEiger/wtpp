@@ -202,7 +202,8 @@ component TabItem inherits Rectangle {
             }
         }
         moved => {
-            if self.pressed && (root.dragging || abs(self.mouse-x - self.pressed-x) > 8px) {
+            // Sideways to reorder, or out of the row (any direction) to tear off.
+            if self.pressed && (root.dragging || abs(self.mouse-x - self.pressed-x) > 8px || abs(self.mouse-y - self.pressed-y) > 8px) {
                 root.dragging = true;
                 root.drag(self.mouse-x, self.mouse-y);
             }

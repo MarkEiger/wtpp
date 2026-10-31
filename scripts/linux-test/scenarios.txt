@@ -6,7 +6,7 @@ split: keys:ctrl+shift+equal|sleep:800|keys:ctrl+shift+minus|sleep:800|keys:alt+
 palette: keys:ctrl+shift+p|sleep:400|type:split|sleep:400|shot:list|keys:Escape
 settings: keys:ctrl+comma|sleep:1200|shot:startup
 find: type:echo hello Hello hello|keys:Return|sleep:400|keys:ctrl+shift+f|sleep:300|type:hello|sleep:400|shot:matches
-copy-paste: type:echo abc|keys:Return|sleep:400|keys:ctrl+shift+a|keys:ctrl+shift+c|clip|keys:Escape|keys:ctrl+shift+v|sleep:500|shot:pasted
+copy-paste: type:echo abc|keys:Return|sleep:400|keys:ctrl+shift+a|keys:ctrl+shift+c|clip|keys:ctrl+shift+v|sleep:500|shot:pasted
 escape-selection: type:echo abc|keys:Return|sleep:400|keys:ctrl+shift+a|keys:Escape|type:echo after|keys:Return|sleep:400|shot:clean
 zoom-font: type:echo zoom|keys:Return|keys:ctrl+equal ctrl+equal|sleep:500|shot:bigger
 unicode: type:printf '\u00e9 \u65e5\u672c \U0001F642 ok\n'|keys:Return|sleep:500|shot:text
