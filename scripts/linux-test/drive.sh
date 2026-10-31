@@ -20,6 +20,9 @@ out="${WTPP_TEST_OUT:-$HOME/wtpp-test}"
 exe="${WTPP_EXE:-$HOME/wtpp/target/release/wtpp}"
 mkdir -p "$out"
 export DISPLAY="${WTPP_TEST_DISPLAY:-:99}"
+# The user's settings bus, for features that write desktop settings
+# (default terminal).
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
 unset WAYLAND_DISPLAY XAUTHORITY
 export WTPP_INSTANCE=test WTPP_LOG_FILE="$out/wtpp.log"
 

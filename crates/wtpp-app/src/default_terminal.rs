@@ -486,6 +486,15 @@ mod imp {
         if first.as_deref() == Some(DESKTOP_ID) { Status::Default } else { Status::NotDefault }
     }
 
+    const GSETTINGS: [&str; 2] =
+        ["org.gnome.desktop.default-applications.terminal", "org.cinnamon.desktop.default-applications.terminal"];
+
+    /// The terminal a gsettings schema names, if the schema exists.
+    fn gsetting(schema: &str) -> Option<String> {
+        let out = Command::new("gsettings").args(["get", schema, "exec"]).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().trim_matches('\'').to_string())
+    }
+
     fn run(program: &str, args: &[&str]) -> bool {
         Command::new(program).args(args).output().is_ok_and(|o| o.status.success())
     }
@@ -508,10 +517,12 @@ mod imp {
         std::fs::write(&list, format!("{DESKTOP_ID}\n{}", rest.join("\n"))).map_err(|e| e.to_string())?;
 
         let exe = exe.display().to_string();
-        // GNOME (older) and Cinnamon read gsettings; KDE reads kdeglobals.
+        // Older GNOME and Cinnamon read gsettings (newer GNOME points it at
+        // xdg-terminal-exec, which follows the list above: leave that alone);
+        // KDE reads kdeglobals.
         let mut also = Vec::new();
-        for schema in ["org.gnome.desktop.default-applications.terminal", "org.cinnamon.desktop.default-applications.terminal"] {
-            if run("gsettings", &["set", schema, "exec", &exe]) {
+        for schema in GSETTINGS {
+            if gsetting(schema).is_some_and(|v| v != "xdg-terminal-exec") && run("gsettings", &["set", schema, "exec", &exe]) {
                 run("gsettings", &["set", schema, "exec-arg", "-e"]);
                 also.push(schema.split('.').nth(1).unwrap_or(schema).to_string());
             }
@@ -538,9 +549,13 @@ mod imp {
             let rest: Vec<&str> = old.lines().filter(|l| l.trim() != DESKTOP_ID).collect();
             std::fs::write(&list, rest.join("\n")).map_err(|e| e.to_string())?;
         }
-        for schema in ["org.gnome.desktop.default-applications.terminal", "org.cinnamon.desktop.default-applications.terminal"] {
-            run("gsettings", &["reset", schema, "exec"]);
-            run("gsettings", &["reset", schema, "exec-arg"]);
+        // Only where it names us (see make_default).
+        let exe = std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default();
+        for schema in GSETTINGS {
+            if gsetting(schema).as_deref() == Some(exe.as_str()) {
+                run("gsettings", &["reset", schema, "exec"]);
+                run("gsettings", &["reset", schema, "exec-arg"]);
+            }
         }
         for tool in ["kwriteconfig6", "kwriteconfig5"] {
             if run(tool, &["--file", "kdeglobals", "--group", "General", "--key", "TerminalApplication", "--delete"]) {

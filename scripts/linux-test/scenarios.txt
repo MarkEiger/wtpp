@@ -14,3 +14,5 @@ new-window: keys:ctrl+shift+n|sleep:2000|windows|shot:both
 single-instance: launch|windows
 tearoff-merge: keys:ctrl+shift+t|sleep:900|drag:340,22,340,420|sleep:800|windows|shot:torn|hdrag:120,22|sleep:800|windows|shot:merged
 tearoff-plus: keys:ctrl+shift+t|sleep:900|drag:340,22,340,420|sleep:800|windows|plusnew|sleep:800|shot:after
+default-term: keys:ctrl+comma|sleep:1200|click:968,150|sleep:800|shot:made
+default-term-restore: keys:ctrl+comma|sleep:1200|shot:before|click:968,150|sleep:800|shot:restored
