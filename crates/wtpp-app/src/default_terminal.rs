@@ -486,6 +486,14 @@ mod imp {
         if first.as_deref() == Some(DESKTOP_ID) { Status::Default } else { Status::NotDefault }
     }
 
+    /// xdg-terminal-exec caches its choice; drop it so a change applies now.
+    fn forget_cached_terminal() {
+        let cache = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
+        std::fs::remove_file(cache.join("xdg-terminal-exec")).ok();
+    }
+
     const GSETTINGS: [&str; 2] =
         ["org.gnome.desktop.default-applications.terminal", "org.cinnamon.desktop.default-applications.terminal"];
 
@@ -515,6 +523,7 @@ mod imp {
         let rest: Vec<&str> = old.lines().filter(|l| l.trim() != DESKTOP_ID).collect();
         std::fs::create_dir_all(config_home()).map_err(|e| e.to_string())?;
         std::fs::write(&list, format!("{DESKTOP_ID}\n{}", rest.join("\n"))).map_err(|e| e.to_string())?;
+        forget_cached_terminal();
 
         let exe = exe.display().to_string();
         // Older GNOME and Cinnamon read gsettings (newer GNOME points it at
@@ -547,8 +556,14 @@ mod imp {
         let list = terminals_list();
         if let Ok(old) = std::fs::read_to_string(&list) {
             let rest: Vec<&str> = old.lines().filter(|l| l.trim() != DESKTOP_ID).collect();
-            std::fs::write(&list, rest.join("\n")).map_err(|e| e.to_string())?;
+            // An empty list would still override the desktop's own choice.
+            if rest.iter().all(|l| l.trim().is_empty()) {
+                std::fs::remove_file(&list).map_err(|e| e.to_string())?;
+            } else {
+                std::fs::write(&list, rest.join("\n")).map_err(|e| e.to_string())?;
+            }
         }
+        forget_cached_terminal();
         // Only where it names us (see make_default).
         let exe = std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default();
         for schema in GSETTINGS {
@@ -615,6 +630,12 @@ mod tests {
         assert_eq!(status(), Status::NotDefault);
         let list = std::fs::read_to_string(config.join("xdg-terminals.list")).unwrap();
         assert_eq!(list.trim(), "kitty.desktop");
+
+        // A list that only had us is removed, so the desktop's default applies again.
+        std::fs::remove_file(config.join("xdg-terminals.list")).unwrap();
+        make_default().unwrap();
+        restore().unwrap();
+        assert!(!config.join("xdg-terminals.list").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
