@@ -55,6 +55,8 @@ pub(crate) struct Pane {
     last_click: Option<(Instant, Point, u8)>,
     /// Sub-line remainder of wheel scrolling.
     scroll_remainder: f32,
+    /// Lines scrolled in a mouse-mode app not yet reported (see on_scroll).
+    wheel_lines: i32,
 }
 
 /// A tab on its way to another window, with its live panes.
@@ -497,11 +499,12 @@ impl App {
         let on_event = move |event| match event {
             SessionEvent::Wakeup => {
                 if !pending.swap(true, Ordering::AcqRel) {
+                    // Clear this flag, not the current window's: the tab may
+                    // have moved to another window since.
+                    let pending = pending.clone();
                     slint::invoke_from_event_loop(move || {
-                        crate::with_pane(id, |app| {
-                            app.redraw_pending.store(false, Ordering::Release);
-                            app.render();
-                        });
+                        pending.store(false, Ordering::Release);
+                        crate::with_pane(id, |app| app.render());
                     })
                     .ok();
                 }
@@ -555,6 +558,7 @@ impl App {
                         exited: false,
                         last_click: None,
                         scroll_remainder: 0.0,
+                        wheel_lines: 0,
                     },
                 );
                 true
@@ -1686,7 +1690,8 @@ impl App {
         let Some(&id) = self.visible.get(index) else { return };
         let Some(pane) = self.panes.get(&id) else { return };
         let mode = *pane.session.term().lock().mode();
-        if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+        // A Shift+drag selection grows even while the app has mouse mode.
+        if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) && !pane.selecting {
             if let Some((col, row)) = self.report_cell(pane, x, y)
                 && let Some(bytes) = mouse_report(mode, 0, true, true, col, row, Mods::NONE)
             {
@@ -1754,9 +1759,15 @@ impl App {
 
         let mode = *pane.session.term().lock().mode();
         if mode.intersects(TermMode::MOUSE_MODE) {
+            // One wheel event per notch (3 lines), like xterm and WT; apps
+            // scroll several lines per event themselves.
+            const LINES_PER_EVENT: i32 = 3;
+            pane.wheel_lines += lines;
+            let events = pane.wheel_lines / LINES_PER_EVENT;
+            pane.wheel_lines %= LINES_PER_EVENT;
             // Wheel up is button 4 (64), down is button 5 (65).
-            let button = if lines > 0 { 64 } else { 65 };
-            for _ in 0..lines.unsigned_abs() {
+            let button = if events > 0 { 64 } else { 65 };
+            for _ in 0..events.unsigned_abs() {
                 if let Some(bytes) = mouse_report(mode, button, true, false, 1, 1, Mods::NONE) {
                     pane.session.write(bytes);
                 }

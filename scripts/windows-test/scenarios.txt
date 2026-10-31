@@ -64,3 +64,15 @@ default-term-cold: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:
 default-term-front: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|fgother|run:cmd.exe|sleep:1500|fgcheck|windows|resetdefault
 default-term-cold-front: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|kill|fgother|run:cmd.exe|sleep:4000|fgcheck|others:cold|resetdefault
 tearoff-straight-down: sleep:600|^+t|sleep:900|sdrag:2970,122,2970,450|sleep:800|windows
+# Gaps (final pass)
+vim-mouse: sleep:600|seq 1 200 > /tmp/n.txt; vim -u NONE -c 'set mouse=a' /tmp/n.txt{ENTER}|sleep:1500|click:300,300|sleep:400|shot:clicked|wheel:300,300,-3|sleep:500|shot:scrolled|:q!{ENTER}
+heavy-output: sleep:600|time seq 1 2000000{ENTER}|sleep:12000|shot:done
+link-click: sleep:600|echo https://example.com/wtpp-test{ENTER}|sleep:500|ctrl:down|click:60,71|ctrl:up|sleep:2000|shot:after
+wt-import: sleep:600|^,|sleep:1500|wclick:0,1139,487|sleep:1500|shot:imported
+settings-look: sleep:600|^,|sleep:1500|click:60,104|sleep:500|shot:interaction
+perf-small: sleep:600|time seq 1 50000 > /dev/null; time seq 1 20000{ENTER}|sleep:25000|shot:done
+perf-measure: sleep:600|seq 1 20000{ENTER}|sleep:10000
+perf-pwsh: sleep:600|^+1|sleep:2500|1..20000{ENTER}|sleep:15000|shot:done
+perf-wsl: sleep:600|seq 1 20000{ENTER}|sleep:15000|shot:done
+perf-poke: sleep:600|seq 1 20000{ENTER}|sleep:6000|shot:stalled|x|sleep:4000|shot:poked|setrect:2600,100,1000,500|sleep:4000|shot:resized
+perf-wsl-big: sleep:600|time seq 1 2000000{ENTER}|sleep:30000|shot:done

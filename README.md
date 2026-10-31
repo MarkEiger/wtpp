@@ -17,9 +17,15 @@ This installs to `%LOCALAPPDATA%\Programs\wtpp`, adds wt++ to the Start Menu
 and "Open in wt++" to Explorer's folder right-click menu.
 
 **macOS** (Apple Silicon): unzip `wtpp-<version>-macos-arm64.zip` and move
-`wt++.app` to Applications. It isn't notarized by Apple, so the first time,
-right-click it and choose **Open** (or run
-`xattr -dr com.apple.quarantine /Applications/wt++.app`).
+`wt++.app` to Applications. It isn't notarized by Apple, so macOS blocks the
+first launch: either run
+
+```sh
+xattr -dr com.apple.quarantine /Applications/wt++.app
+```
+
+or try to open it once, then click **Open Anyway** in System Settings →
+Privacy & Security.
 
 **Linux** (x86-64, glibc 2.39+: Ubuntu 24.04, Debian 13, Fedora 40 or newer):
 unpack `wtpp-<version>-linux-x64.tar.gz` and run `sh install.sh`: it installs

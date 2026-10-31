@@ -396,7 +396,7 @@ component AppearancePage inherits VerticalLayout {
         description: "Colors of the tab row, menus and settings. Terminal colors come from each profile's color scheme.";
         ComboBox {
             width: 260px;
-            model: ["Dark", "Light", "Use Windows mode"];
+            model: ["Dark", "Light", SettingsData.is-windows ? "Use Windows mode" : "Use system setting"];
             current-index <=> SettingsData.theme;
             selected => {
                 SettingsData.set-value("theme", self.current-index);
@@ -860,7 +860,7 @@ component ProfilePage inherits VerticalLayout {
 
     Card {
         title: "Environment variables";
-        description: "NAME=value pairs separated by semicolons. %VARIABLES% are expanded.";
+        description: SettingsData.is-windows ? "NAME=value pairs separated by semicolons. %VARIABLES% are expanded." : "NAME=value pairs separated by semicolons. ~ and %VARIABLES% are expanded.";
         LineEdit {
             width: 300px;
             text <=> SettingsData.p-environment;
@@ -1037,7 +1037,7 @@ component ProfilePage inherits VerticalLayout {
 
     Card {
         title: "Key encoding";
-        description: "How keys like Ctrl+Backspace and Shift+Enter reach the shell. Automatic uses Windows key events for cmd and PowerShell and VT sequences for everything else.";
+        description: SettingsData.is-windows ? "How keys like Ctrl+Backspace and Shift+Enter reach the shell. Automatic uses Windows key events for cmd and PowerShell and VT sequences for everything else." : "How keys like Ctrl+Backspace and Shift+Enter reach the shell. Automatic uses VT sequences, which every shell here understands.";
         ComboBox {
             width: 300px;
             model: ["Automatic", "VT sequences (bash, zsh, …)", "Windows key events (cmd, PowerShell)"];

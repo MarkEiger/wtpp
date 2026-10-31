@@ -11,3 +11,11 @@ This only matters for the OpenGL backend: WSLg (Mesa d3d12 → host GPU), and
 Linux machines without a Vulkan driver. Vulkan, Metal and DX12 are unaffected.
 
 Drop this once Slint ships the fix upstream.
+
+## alacritty_terminal 0.26.0
+
+Patched in `src/event_loop.rs` (search for "wtpp patch"): on Windows, the
+PTY reader thread's readiness signal can get lost, which stalled all output
+until some other event such as a keypress (`seq 1 20000` in WSL froze around
+line 12,000). While output is flowing, the event loop now wakes every 4 ms
+and reads anyway; when the shell is idle it waits as before.

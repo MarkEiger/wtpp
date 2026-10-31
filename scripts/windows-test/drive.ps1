@@ -120,6 +120,13 @@ foreach ($s in $Steps) {
     [W]::mouse_event(2,0,0,0,0); [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 60
     [W]::mouse_event(2,0,0,0,0); [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 700
   }
+  elseif ($s -like 'wheel:*') {
+    # wheel:x,y,clicks scrolls the mouse wheel at window-relative x,y
+    # (positive = up)
+    $v = $s.Substring(6).Split(',') | ForEach-Object { [int]$_ }; $r = New-Object W+RECT; [W]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+    [W]::SetCursorPos($r.L + $v[0], $r.T + $v[1]) | Out-Null; Start-Sleep -Milliseconds 80
+    [W]::mouse_event(0x0800, 0, 0, 120 * $v[2], 0); Start-Sleep -Milliseconds 500
+  }
   elseif ($s -like 'clip:*') {
     # clip:TEXT puts TEXT on the clipboard (\n becomes a newline)
     Set-Clipboard -Value ($s.Substring(5) -replace '\\n', "`n")

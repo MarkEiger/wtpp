@@ -29,7 +29,8 @@ pub fn shell_kind(program: &str, source: Option<&str>) -> ShellKind {
 }
 
 /// The text to paste for dropped paths: each quoted for `kind`, separated
-/// by spaces, with no trailing newline (like WT, nothing runs by itself).
+/// by spaces, and followed by one (so a second drop doesn't run into the
+/// first, as in Terminal and iTerm); no newline, so nothing runs by itself.
 pub fn dropped_text(paths: &[impl AsRef<Path>], kind: ShellKind) -> String {
     let quoted: Vec<String> = paths
         .iter()
@@ -43,7 +44,7 @@ pub fn dropped_text(paths: &[impl AsRef<Path>], kind: ShellKind) -> String {
             }
         })
         .collect();
-    quoted.join(" ")
+    if quoted.is_empty() { String::new() } else { quoted.join(" ") + " " }
 }
 
 /// Double-quote a Windows path when cmd or PowerShell would split or
@@ -162,15 +163,15 @@ mod tests {
         assert_eq!(msys_path(r"C:\Users\me\a b.txt"), "/c/Users/me/a b.txt");
         assert_eq!(msys_path(r"D:\"), "/d/");
         assert_eq!(msys_path(r"\\server\share"), "//server/share");
-        assert_eq!(dropped_text(&[r"C:\My Dir"], ShellKind::Msys), "'/c/My Dir'");
+        assert_eq!(dropped_text(&[r"C:\My Dir"], ShellKind::Msys), "'/c/My Dir' ");
     }
 
     #[test]
     fn joins_paths() {
         let paths = [r"C:\My Dir", r"C:\a.txt"];
-        assert_eq!(dropped_text(&paths, ShellKind::Cmd), r#""C:\My Dir" C:\a.txt"#);
-        assert_eq!(dropped_text(&paths, ShellKind::Wsl), "'/mnt/c/My Dir' /mnt/c/a.txt");
-        assert_eq!(dropped_text(&["/a b", "/c"], ShellKind::Posix), "'/a b' /c");
+        assert_eq!(dropped_text(&paths, ShellKind::Cmd), r#""C:\My Dir" C:\a.txt "#);
+        assert_eq!(dropped_text(&paths, ShellKind::Wsl), "'/mnt/c/My Dir' /mnt/c/a.txt ");
+        assert_eq!(dropped_text(&["/a b", "/c"], ShellKind::Posix), "'/a b' /c ");
         let none: [&str; 0] = [];
         assert_eq!(dropped_text(&none, ShellKind::Posix), "");
     }

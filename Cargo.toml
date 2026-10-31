@@ -48,6 +48,7 @@ lto = "thin"
 opt-level = 2
 
 [patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
 # Passes the window's display handle to wgpu so the GL backend can present
 # (needed for GPU rendering under WSLg). See vendor/README.md.
 i-slint-core = { path = "vendor/i-slint-core" }

@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The version cosmic-text uses (its font fallback API takes this Script type).
+unicode-script = "0.5"
 bytemuck.workspace = true
 cosmic-text.workspace = true
 log.workspace = true

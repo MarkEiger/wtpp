@@ -678,8 +678,11 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffe
 
 /// Fonts shipped with wt++ (SIL Open Font License, see assets/fonts), so the
 /// default looks the same everywhere, as Windows Terminal bundles them too.
-const BUNDLED_FONTS: [&[u8]; 4] = [
+const BUNDLED_FONTS: [&[u8]; 5] = [
     include_bytes!("../../../assets/fonts/CascadiaMono.ttf"),
+    // Only for the Powerline symbols (prompt arrows) the others lack; see
+    // `Fallback` below.
+    include_bytes!("../../../assets/fonts/CascadiaMonoPL.ttf"),
     include_bytes!("../../../assets/fonts/CascadiaMonoItalic.ttf"),
     include_bytes!("../../../assets/fonts/CascadiaCode.ttf"),
     include_bytes!("../../../assets/fonts/CascadiaCodeItalic.ttf"),
@@ -687,11 +690,54 @@ const BUNDLED_FONTS: [&[u8]; 4] = [
 
 /// Load the system font database, plus the bundled fonts.
 pub fn load_fonts() -> FontSystem {
-    let mut fonts = FontSystem::new();
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_system_fonts();
     for data in BUNDLED_FONTS {
-        fonts.db_mut().load_font_data(data.to_vec());
+        db.load_font_data(data.to_vec());
     }
-    fonts
+    let locale = sys_locale().unwrap_or_else(|| "en-US".into());
+    FontSystem::new_with_locale_and_db_and_fallback(locale, db, Fallback::new())
+}
+
+fn sys_locale() -> Option<String> {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|v| !v.is_empty()))
+        .map(|l| l.split(['.', '@']).next().unwrap_or_default().replace('_', "-"))
+}
+
+/// The platform's fallback fonts, with the bundled Cascadia Mono PL first:
+/// characters Cascadia Mono lacks (Powerline prompt symbols, in the private
+/// use area) would otherwise come from whatever system font claims those
+/// code points — on macOS, an Arabic one.
+struct Fallback {
+    platform: cosmic_text::PlatformFallback,
+    common: &'static [&'static str],
+}
+
+impl Fallback {
+    fn new() -> Fallback {
+        use cosmic_text::Fallback as _;
+        let platform = cosmic_text::PlatformFallback;
+        let common: Vec<&'static str> =
+            std::iter::once("Cascadia Mono PL").chain(platform.common_fallback().iter().copied()).collect();
+        // Built once per font system (one per process).
+        Fallback { platform, common: Box::leak(common.into_boxed_slice()) }
+    }
+}
+
+impl cosmic_text::Fallback for Fallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        self.common
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        self.platform.forbidden_fallback()
+    }
+
+    fn script_fallback(&self, script: unicode_script::Script, locale: &str) -> &[&'static str] {
+        self.platform.script_fallback(script, locale)
+    }
 }
 
 /// Names of the installed monospace font families, sorted.
