@@ -19,7 +19,8 @@ cp assets/fonts/LICENSE-Cascadia.txt "$win/"
 cargo build --release
 linux="dist/wtpp-$version-linux-x64"
 mkdir -p "$linux"
-cp target/release/wtpp README.md assets/fonts/LICENSE-Cascadia.txt "$linux/"
+cp target/release/wtpp README.md assets/fonts/LICENSE-Cascadia.txt scripts/linux/install.sh "$linux/"
+cp assets/wtpp.png "$linux/wtpp.png"
 tar -C dist -czf "$linux.tar.gz" "$(basename "$linux")" && rm -r "$linux"
 
 (cd dist && sha256sum ./*.zip ./*.tar.gz > SHA256SUMS)

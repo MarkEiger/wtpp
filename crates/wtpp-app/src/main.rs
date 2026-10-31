@@ -402,6 +402,15 @@ fn main() -> anyhow::Result<()> {
             attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true)
         });
     }
+    // Linux: name the app (Wayland app_id, X11 class) so desktops match its
+    // windows to wtpp.desktop (icon, dock).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use slint::winit_030::winit::platform::wayland::WindowAttributesExtWayland;
+        backend = backend.with_winit_window_attributes_hook(|attributes| {
+            WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp")
+        });
+    }
     backend.select().context("no GPU backend available")?;
     log::info!("backend selected after {:?}", started.elapsed());
 

@@ -495,7 +495,7 @@ mod imp {
         let apps = data_home().join("applications");
         std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
         let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName=wt++\nComment=Terminal\nExec={exe}\nTryExec={exe}\nIcon=utilities-terminal\nTerminal=false\nCategories=System;TerminalEmulator;\nX-TerminalArgExec=-e\nX-TerminalArgDir=--working-directory\n",
+            "[Desktop Entry]\nType=Application\nName=wt++\nGenericName=Terminal\nComment=GPU-accelerated terminal with tabs and panes\nExec={exe}\nTryExec={exe}\nIcon=wtpp\nTerminal=false\nCategories=System;TerminalEmulator;\nStartupWMClass=wtpp\nX-TerminalArgExec=-e\nX-TerminalArgDir=--working-directory\n",
             exe = exe.display()
         );
         std::fs::write(apps.join(DESKTOP_ID), desktop).map_err(|e| e.to_string())?;

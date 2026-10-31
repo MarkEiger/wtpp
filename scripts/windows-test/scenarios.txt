@@ -63,3 +63,4 @@ default-term-exit: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:
 default-term-cold: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|kill|run:cmd.exe|sleep:4000|others:cold|alive|resetdefault
 default-term-front: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|fgother|run:cmd.exe|sleep:1500|fgcheck|windows|resetdefault
 default-term-cold-front: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|kill|fgother|run:cmd.exe|sleep:4000|fgcheck|others:cold|resetdefault
+tearoff-straight-down: sleep:600|^+t|sleep:900|sdrag:2970,122,2970,450|sleep:800|windows
