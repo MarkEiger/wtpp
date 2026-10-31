@@ -31,6 +31,9 @@ export global SettingsData {
     in-out property <int> initial-cols;
     in-out property <int> initial-rows;
     in property <bool> can-import-wt;
+    // 0: not possible on this system, 1: not the default, 2: the default.
+    in property <int> default-term;
+    in property <string> default-term-description;
 
     // Interaction
     in-out property <bool> copy-on-select;
@@ -99,6 +102,7 @@ export global SettingsData {
     callback discard();
     callback open-json();
     callback import-wt();
+    callback set-default-term(bool);
     callback select-scheme(int);
     callback set-scheme-color(int, string);
     callback new-scheme();
@@ -203,6 +207,18 @@ component PageTitle inherits Text {
 
 component StartupPage inherits VerticalLayout {
     spacing: 4px;
+    if SettingsData.default-term > 0: Card {
+        title: "Default terminal application";
+        description: SettingsData.default-term == 2 ? "wt++ is the default terminal. " + SettingsData.default-term-description : SettingsData.default-term-description;
+        Button {
+            text: SettingsData.default-term == 2 ? "Restore previous" : "Make wt++ the default";
+            primary: SettingsData.default-term == 1;
+            clicked => {
+                SettingsData.set-default-term(SettingsData.default-term == 1);
+            }
+        }
+    }
+
     Card {
         title: "Default profile";
         description: "Profile that opens with the new tab button and Ctrl+Shift+T.";

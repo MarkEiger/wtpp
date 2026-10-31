@@ -83,7 +83,7 @@ foreach ($s in $Steps) {
   # Keys, clicks and screenshots go to whatever is in front. If that isn't
   # wt++ (the user is in another app, a game is fullscreen), stop rather
   # than type into it or capture it.
-  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'smove:*' -and $s -notlike 'shotall:*' -and $s -notlike 'filedrop:*' -and $s -notlike 'shotrect:*') {
+  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'run:*' -and $s -notin @('alive', 'kill', 'resetdefault') -and $s -notlike 'others:*' -and $s -notlike 'smove:*' -and $s -notlike 'shotall:*' -and $s -notlike 'filedrop:*' -and $s -notlike 'shotrect:*') {
     $fg = [W]::GetForegroundWindow(); [uint32]$fgPid = 0; [W]::GetWindowThreadProcessId($fg, [ref]$fgPid) | Out-Null
     if ($fgPid -ne $p.Id) {
       "ABORTED at '$s': another app is in the foreground"
@@ -217,6 +217,36 @@ foreach ($s in $Steps) {
     Start-Sleep -Milliseconds 400
   }
   elseif ($s -eq 'sup') { [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 1200 }
+  elseif ($s -like 'run:*') {
+    # run:PROGRAM starts a program with its own new console, like Explorer or
+    # Win+R would (to test default-terminal handoff).
+    $script:run = Start-Process $s.Substring(4) -PassThru; Start-Sleep -Milliseconds 2500
+  }
+  elseif ($s -eq 'resetdefault') {
+    # Back to "Let Windows decide" for the default terminal (and no wt++
+    # handoff server registered), so a test starts from a known state.
+    $k = 'HKCU:\Console\%%Startup'
+    Remove-ItemProperty -LiteralPath $k -Name DelegationConsole, DelegationTerminal -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'HKCU:\Software\Classes\CLSID\{1B6AF1D5-8948-4A5C-B2BB-7F7BF27CBA6A}' -Recurse -ErrorAction SilentlyContinue
+  }
+  elseif ($s -eq 'alive') {
+    # Whether the program from run: is still running.
+    $script:run.Refresh(); "run: $(if ($script:run.HasExited) { 'exited' } else { 'running' })"
+  }
+  elseif ($s -eq 'kill') {
+    # End this wt++ (e.g. to test a cold start by COM).
+    Stop-Process -Id $p.Id -Force; Start-Sleep -Milliseconds 800
+  }
+  elseif ($s -like 'others:*') {
+    # Other wt++ processes from the same exe (e.g. started by COM): their
+    # windows, screenshotted as others:NAME-N, then ended.
+    $k = 0
+    foreach ($q in Get-Process wtpp -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $p.Id -and $_.Path -eq $exe }) {
+      foreach ($h in [W]::Windows([uint32]$q.Id)) { $r = [W]::Frame($h); "other window $($r.R - $r.L)x$($r.B - $r.T)"; ShotWindow $h "$($s.Substring(7))-$k"; $k++ }
+      Stop-Process -Id $q.Id -Force
+    }
+    "others: $k windows"
+  }
   elseif ($s -eq 'launch') {
     # Start wt++ again: it should hand over to this instance and exit.
     $q = Start-Process $exe -WorkingDirectory $env:USERPROFILE -PassThru

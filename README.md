@@ -31,6 +31,19 @@ and "Open in wt++" to Explorer's folder right-click menu.
 - Ctrl+Backspace, Ctrl+Delete and Shift+Enter work in every shell, cmd included.
 - Shortcuts work on any keyboard layout, and the defaults avoid OS hotkeys.
 
+## Default terminal
+
+Settings → Startup → **Make wt++ the default**:
+
+- **Windows**: console programs started outside a terminal (Start menu, Run,
+  Explorer) open in wt++, like with Windows Terminal. Windows Terminal must be
+  installed: wt++ uses its console host for the handoff. Elevated (admin)
+  programs keep the classic console.
+- **Linux**: wt++ becomes the desktop's terminal (freedesktop
+  `xdg-terminals.list`, GNOME/Cinnamon, KDE); it accepts `-e COMMAND` and
+  `--working-directory DIR`.
+- **macOS** has no default-terminal setting.
+
 ## Keyboard shortcuts
 
 All shortcuts are editable in **⌄ → Keyboard shortcuts**.

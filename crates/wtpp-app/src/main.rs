@@ -3,6 +3,7 @@
 
 mod app;
 mod cli;
+mod default_terminal;
 mod file_drop;
 mod find;
 mod instance;
@@ -315,6 +316,9 @@ fn wire_settings(ui: &MainWindow, id: WindowId) {
     data.on_open_json(move || {
         with_window(id, |app| app.settings_open_json());
     });
+    data.on_set_default_term(move |make_default| {
+        with_window(id, |app| app.settings_set_default_term(make_default));
+    });
     data.on_import_wt(move || {
         with_window(id, |app| app.settings_import_wt());
     });
@@ -359,15 +363,24 @@ fn main() -> anyhow::Result<()> {
 
     let started = std::time::Instant::now();
 
-    // A wt++ is already running: it opens the window, so tabs can be
-    // dragged between all windows.
     let request = instance::Request { args: std::env::args().skip(1).collect(), cwd: std::env::current_dir().ok() };
-    let listener = match instance::claim(&request) {
-        instance::Claim::Forwarded => {
-            log::info!("handed the command line to the running wt++");
-            return Ok(());
+    let args = parse_args(request);
+    // Started by COM for a console handoff (wt++ is the default terminal,
+    // and no wt++ was running to take it): serve it, whatever else runs.
+    let embedding = args.embedding;
+    // Otherwise, when a wt++ is already running it opens the window, so tabs
+    // can be dragged between all windows.
+    let listener = if embedding {
+        None
+    } else {
+        let request = instance::Request { args: std::env::args().skip(1).collect(), cwd: std::env::current_dir().ok() };
+        match instance::claim(&request) {
+            instance::Claim::Forwarded => {
+                log::info!("handed the command line to the running wt++");
+                return Ok(());
+            }
+            instance::Claim::Primary(listener) => Some(listener),
         }
-        instance::Claim::Primary(listener) => listener,
     };
 
     // Settings are one small file: read them now so the window opens at
@@ -398,9 +411,22 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    create_window(settings, Some(parse_args(request)), None, Placement::First)?;
-    listener.serve(on_instance_request);
-    log::info!("window created after {:?}", started.elapsed());
+    if embedding {
+        // The window comes with the console; give up if none does.
+        slint::Timer::single_shot(std::time::Duration::from_secs(60), || {
+            if window_ids().is_empty() {
+                slint::quit_event_loop().ok();
+            }
+        });
+    } else {
+        create_window(settings, Some(args), None, Placement::First)?;
+        log::info!("window created after {:?}", started.elapsed());
+    }
+    if let Some(listener) = listener {
+        listener.serve(on_instance_request);
+    }
+    #[cfg(windows)]
+    default_terminal::serve(on_handoff, embedding);
     let _watcher = watch_settings(&settings_path);
 
     // Cursor blink, for every window.
@@ -431,9 +457,27 @@ fn parse_args(request: instance::Request) -> cli::Args {
 
 /// wt++ was launched again: open its window here.
 fn on_instance_request(request: instance::Request) {
+    let args = parse_args(request);
+    if args.embedding {
+        return;
+    }
     let settings = wtpp_config::Settings::load(&wtpp_config::settings::settings_path()).0;
-    if let Err(e) = create_window(settings, Some(parse_args(request)), None, Placement::Default) {
+    if let Err(e) = create_window(settings, Some(args), None, Placement::Default) {
         log::error!("couldn't open a window: {e:#}");
+    }
+}
+
+/// Windows handed us a console program (wt++ is the default terminal): a
+/// new window for it, like WT.
+#[cfg(windows)]
+fn on_handoff(handoff: default_terminal::Handoff) {
+    let settings = wtpp_config::Settings::load(&wtpp_config::settings::settings_path()).0;
+    let placement = if window_ids().is_empty() { Placement::First } else { Placement::Default };
+    match create_window(settings, None, None, placement) {
+        Ok(id) => {
+            with_window(id, |app| app.handoff = Some(handoff));
+        }
+        Err(e) => log::error!("couldn't open a window for a console: {e:#}"),
     }
 }
 

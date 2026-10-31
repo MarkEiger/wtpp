@@ -12,12 +12,19 @@ pub struct Args {
     pub commandline: Option<String>,
     /// Where the window opens (`--pos X,Y`, screen pixels).
     pub position: Option<(i32, i32)>,
+    /// Started by COM to receive a console from Windows (wt++ is the
+    /// default terminal): no window until one arrives.
+    pub embedding: bool,
 }
 
 impl Args {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         let mut out = Args::default();
         let mut args = args.into_iter().peekable();
+        if args.peek().is_some_and(|a| a.eq_ignore_ascii_case("-Embedding")) {
+            out.embedding = true;
+            return Ok(out);
+        }
         // Window options come before the subcommand, as in wt.exe.
         if args.peek().map(String::as_str) == Some("--pos") {
             args.next();
@@ -32,13 +39,15 @@ impl Args {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "-p" | "--profile" => out.profile = Some(args.next().ok_or("-p needs a profile name")?),
-                "-d" | "--startingDirectory" => {
+                "-d" | "--startingDirectory" | "--working-directory" => {
                     let dir = args.next().ok_or("-d needs a directory")?;
                     // Explorer passes "C:\dir\" quoted, which arrives with a
                     // trailing quote on some paths.
                     out.starting_directory = Some(PathBuf::from(dir.trim_end_matches('"')));
                 }
-                "--" => {
+                // `-e` is how Linux desktops run a command in the default
+                // terminal.
+                "--" | "-e" => {
                     rest.extend(args.by_ref());
                 }
                 a if a.starts_with('-') && rest.is_empty() => return Err(format!("unknown option {a}")),
@@ -77,6 +86,10 @@ mod tests {
         assert_eq!(a.position, Some((2600, -100)));
         assert_eq!(a.profile.as_deref(), Some("cmd"));
         assert!(parse(&["--pos", "12"]).is_err());
+        assert!(parse(&["-Embedding"]).unwrap().embedding);
+        let a = parse(&["--working-directory", "/tmp", "-e", "htop", "-d"]).unwrap();
+        assert_eq!(a.starting_directory, Some(PathBuf::from("/tmp")));
+        assert_eq!(a.commandline.as_deref(), Some("htop -d"));
         assert!(parse(&["-p"]).is_err());
     }
 }

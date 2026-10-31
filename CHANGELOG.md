@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Default terminal: Settings → Startup → "Make wt++ the default".
+  - Windows: console programs started from the Start menu, Run or Explorer
+    open in wt++ (styled with the matching profile, e.g. Command Prompt),
+    through the same handoff Windows Terminal uses. Needs Windows Terminal
+    installed (wt++ uses its console host); "Restore previous" undoes it.
+  - Linux: sets the freedesktop terminal list (xdg-terminal-exec), GNOME /
+    Cinnamon gsettings and KDE's terminal; shows the command for Debian's
+    x-terminal-emulator.
+  - macOS has no default-terminal setting.
+- `wtpp -e COMMAND…` and `--working-directory DIR`, as Linux desktops call
+  terminals.
+
 ## 0.2.0 — 2026-10-31
 
 - Drag tabs between windows like a browser: a see-through preview follows

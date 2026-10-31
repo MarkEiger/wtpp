@@ -1,13 +1,15 @@
 //! A terminal session: one child process on a PTY, plus the VT state it drives.
 //!
-//! PTY IO and VT parsing run on a background thread (alacritty_terminal's
-//! event loop). The UI thread locks [`Session::term`] to read the grid when it
+//! PTY IO and VT parsing run on background threads (alacritty_terminal's
+//! event loop, or ours for a console handed over by Windows; see [`Pipes`]). The UI thread locks [`Session::term`] to read the grid when it
 //! renders, and receives [`SessionEvent`]s through the callback it supplied.
 
 pub mod profiles;
 
 use std::borrow::Cow;
-use std::sync::{Arc, OnceLock};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -70,19 +72,80 @@ pub enum SessionEvent {
 
 type Callback = dyn Fn(SessionEvent) + Send + Sync;
 
+/// A console session handed to us by Windows when wt++ is the default
+/// terminal: the console host's pipes instead of a PTY we created.
+pub struct Pipes {
+    /// What the console host writes (VT output).
+    pub output: File,
+    /// Where we write input for it.
+    pub input: File,
+    /// Takes resize messages.
+    pub signal: File,
+    /// Waits for the client program to exit and returns its exit code.
+    pub wait_exit: Box<dyn FnOnce() -> Option<i32> + Send>,
+    /// Handles to hold for the session's lifetime: closing them tells the
+    /// console host the terminal is gone.
+    pub keep_alive: Vec<File>,
+}
+
+/// Where input and resizes go.
+#[derive(Clone)]
+enum Io {
+    Pty(EventLoopSender),
+    /// `None` on the input channel (or an empty signal) means the session
+    /// is closing: the console host exits when its pipes close.
+    Pipes { input: mpsc::Sender<Option<Cow<'static, [u8]>>>, signal: Arc<Mutex<Option<File>>> },
+}
+
+impl Io {
+    fn input(&self, bytes: Cow<'static, [u8]>) {
+        match self {
+            Io::Pty(pty) => {
+                if let Err(e) = pty.send(Msg::Input(bytes)) {
+                    log::warn!("write to pty failed: {e:?}");
+                }
+            }
+            Io::Pipes { input, .. } => {
+                let _ = input.send(Some(bytes));
+            }
+        }
+    }
+
+    fn resize(&self, size: GridSize) {
+        match self {
+            Io::Pty(pty) => {
+                let _ = pty.send(Msg::Resize(size.window_size()));
+            }
+            Io::Pipes { signal, .. } => {
+                // ConPTY's resize signal: PTY_SIGNAL_RESIZE_WINDOW (8), then
+                // columns and rows, as little-endian u16s.
+                let mut packet = [0u8; 6];
+                packet[..2].copy_from_slice(&8u16.to_le_bytes());
+                packet[2..4].copy_from_slice(&size.cols.to_le_bytes());
+                packet[4..].copy_from_slice(&size.rows.to_le_bytes());
+                if let Ok(mut signal) = signal.lock()
+                    && let Some(signal) = signal.as_mut()
+                {
+                    let _ = signal.write_all(&packet);
+                }
+            }
+        }
+    }
+}
+
 /// Bridges alacritty's events to our callback, and answers terminal queries
 /// (DSR, color requests, …) that need to be written back to the PTY.
 #[derive(Clone)]
 pub struct Listener {
     callback: Arc<Callback>,
-    pty: Arc<OnceLock<EventLoopSender>>,
+    pty: Arc<OnceLock<Io>>,
     size: Arc<FairMutex<GridSize>>,
 }
 
 impl Listener {
     fn reply(&self, text: String) {
         if let Some(pty) = self.pty.get() {
-            let _ = pty.send(Msg::Input(Cow::Owned(text.into_bytes())));
+            pty.input(Cow::Owned(text.into_bytes()));
         }
     }
 }
@@ -111,19 +174,23 @@ impl EventListener for Listener {
     }
 }
 
+type SharedTerm = Arc<FairMutex<Term<Listener>>>;
+
 pub struct Session {
-    term: Arc<FairMutex<Term<Listener>>>,
-    pty: EventLoopSender,
+    term: SharedTerm,
+    io: Io,
     size: Arc<FairMutex<GridSize>>,
     profile: Profile,
+    /// For a handed-over console (see [`Pipes::keep_alive`]).
+    _keep_alive: Vec<File>,
 }
 
 impl Session {
-    pub fn spawn(
+    fn new_term(
         profile: &Profile,
         size: GridSize,
         on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
-    ) -> anyhow::Result<Session> {
+    ) -> (SharedTerm, Listener, Arc<FairMutex<GridSize>>) {
         let shared_size = Arc::new(FairMutex::new(size));
         let listener = Listener {
             callback: Arc::new(on_event),
@@ -139,6 +206,15 @@ impl Session {
             ..Config::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
+        (term, listener, shared_size)
+    }
+
+    pub fn spawn(
+        profile: &Profile,
+        size: GridSize,
+        on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
+    ) -> anyhow::Result<Session> {
+        let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
 
         let mut env = profile.env.clone();
         env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
@@ -156,11 +232,59 @@ impl Session {
         let pty = tty::new(&options, size.window_size(), 0)?;
 
         let event_loop = EventLoop::new(term.clone(), listener.clone(), pty, true, false)?;
-        let sender = event_loop.channel();
-        let _ = listener.pty.set(sender.clone());
+        let io = Io::Pty(event_loop.channel());
+        let _ = listener.pty.set(io.clone());
         event_loop.spawn();
 
-        Ok(Session { term, pty: sender, size: shared_size, profile: profile.clone() })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), _keep_alive: Vec::new() })
+    }
+
+    /// A session on a console Windows handed over (see [`Pipes`]): a thread
+    /// parses its output, another writes input.
+    pub fn from_pipes(
+        profile: &Profile,
+        size: GridSize,
+        pipes: Pipes,
+        on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
+    ) -> anyhow::Result<Session> {
+        let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
+        let Pipes { mut output, mut input, signal, wait_exit, keep_alive } = pipes;
+
+        let (tx, rx) = mpsc::channel::<Option<Cow<'static, [u8]>>>();
+        std::thread::Builder::new().name("handoff-input".into()).spawn(move || {
+            // Ends (closing the pipe) on `None`, when the session closes.
+            while let Ok(Some(bytes)) = rx.recv() {
+                if input.write_all(&bytes).is_err() {
+                    break;
+                }
+            }
+        })?;
+
+        let reader_term = term.clone();
+        let callback = listener.callback.clone();
+        std::thread::Builder::new().name("handoff-output".into()).spawn(move || {
+            let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+            let mut buf = vec![0u8; 64 * 1024];
+            while let Ok(n @ 1..) = output.read(&mut buf) {
+                parser.advance(&mut *reader_term.lock(), &buf[..n]);
+                callback(SessionEvent::Wakeup);
+            }
+        })?;
+
+        // The program ending is the session ending (the console host may
+        // outlive it); its last output gets a moment to arrive.
+        let callback = listener.callback.clone();
+        std::thread::Builder::new().name("handoff-exit".into()).spawn(move || {
+            let code = wait_exit();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            callback(SessionEvent::Exited(code));
+        })?;
+
+        let io = Io::Pipes { input: tx, signal: Arc::new(Mutex::new(Some(signal))) };
+        let _ = listener.pty.set(io.clone());
+        // The console host starts at its own default size.
+        io.resize(size);
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), _keep_alive: keep_alive })
     }
 
     pub fn term(&self) -> &Arc<FairMutex<Term<Listener>>> {
@@ -182,9 +306,7 @@ impl Session {
         }
         // Typing snaps the viewport back to the prompt, like every terminal.
         self.term.lock().scroll_display(alacritty_terminal::grid::Scroll::Bottom);
-        if let Err(e) = self.pty.send(Msg::Input(bytes)) {
-            log::warn!("write to pty failed: {e:?}");
-        }
+        self.io.input(bytes);
     }
 
     /// Show text in the terminal as if the shell had printed it (used for
@@ -203,7 +325,7 @@ impl Session {
             *current = size;
         }
         self.term.lock().resize(size);
-        let _ = self.pty.send(Msg::Resize(size.window_size()));
+        self.io.resize(size);
     }
 
     /// Key-encoding options reflecting the profile and the modes the running
@@ -221,6 +343,62 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.pty.send(Msg::Shutdown);
+        match &self.io {
+            Io::Pty(pty) => {
+                let _ = pty.send(Msg::Shutdown);
+            }
+            // Closing the input and signal pipes makes the console host send
+            // the program a close event and exit (like ClosePseudoConsole).
+            Io::Pipes { input, signal } => {
+                let _ = input.send(None);
+                if let Ok(mut signal) = signal.lock() {
+                    signal.take();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::fd::OwnedFd;
+
+    fn pipe() -> (File, File) {
+        let (r, w) = std::io::pipe().unwrap();
+        (File::from(OwnedFd::from(r)), File::from(OwnedFd::from(w)))
+    }
+
+    #[test]
+    fn handed_over_console() {
+        let (output, mut host_output) = pipe();
+        let (mut host_input, input) = pipe();
+        let (mut host_signal, signal) = pipe();
+        let size = GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
+        let (tx, rx) = mpsc::channel();
+        let pipes = Pipes { output, input, signal, wait_exit: Box::new(|| Some(3)), keep_alive: Vec::new() };
+        let session = Session::from_pipes(&Profile::new("cmd", "cmd.exe", &[]), size, pipes, move |e| {
+            if let SessionEvent::Exited(code) = e {
+                tx.send(code).unwrap();
+            }
+        })
+        .unwrap();
+
+        // The initial size goes out as a resize signal.
+        let mut packet = [0u8; 6];
+        host_signal.read_exact(&mut packet).unwrap();
+        assert_eq!(packet, [8, 0, 80, 0, 24, 0]);
+
+        session.write(&b"dir\r"[..]);
+        let mut typed = [0u8; 4];
+        host_input.read_exact(&mut typed).unwrap();
+        assert_eq!(&typed, b"dir\r");
+
+        host_output.write_all(b"hello").unwrap();
+        drop(host_output);
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), Some(3));
+        let term = session.term().lock();
+        let line: String = (0..5).map(|c| term.grid()[alacritty_terminal::index::Line(0)][alacritty_terminal::index::Column(c)].c).collect();
+        assert_eq!(line, "hello");
     }
 }

@@ -135,6 +135,9 @@ pub struct App {
     pub(crate) dialog: Option<Dialog>,
     /// A tab moved here from another window, opened instead of a new one.
     pub(crate) adopt: Option<MovedTab>,
+    /// A console Windows handed over, opened instead of a new tab.
+    #[cfg(windows)]
+    pub(crate) handoff: Option<crate::default_terminal::Handoff>,
     /// Keyboard selection in progress (mark mode).
     pub(crate) mark: Option<crate::mark::MarkState>,
     /// Profile icons by their source (icon setting or command line).
@@ -199,6 +202,8 @@ impl App {
             find: Default::default(),
             dialog: None,
             adopt: None,
+            #[cfg(windows)]
+            handoff: None,
             mark: None,
             icon_cache: HashMap::new(),
             launch_size: None,
@@ -332,6 +337,11 @@ impl App {
         self.ui().set_loading(false);
         if let Some(moved) = self.adopt.take() {
             self.adopt_tab(moved);
+            return;
+        }
+        #[cfg(windows)]
+        if let Some(handoff) = self.handoff.take() {
+            self.open_handoff(handoff);
             return;
         }
         let args = self.startup_args.take().unwrap_or_default();
@@ -469,10 +479,22 @@ impl App {
     }
 
     fn spawn_pane(&mut self, id: PaneId, profile: ResolvedProfile, rect: Rect) -> bool {
+        self.spawn_pane_on(id, profile, rect, None)
+    }
+
+    /// Start a pane: the profile's shell, or with `pipes`, a console Windows
+    /// handed over (wt++ as the default terminal).
+    fn spawn_pane_on(
+        &mut self,
+        id: PaneId,
+        profile: ResolvedProfile,
+        rect: Rect,
+        pipes: Option<wtpp_session::Pipes>,
+    ) -> bool {
         let Some(size) = self.grid_size(&profile, rect) else { return false };
         let session_profile = self.session_profile(&profile);
         let pending = self.redraw_pending.clone();
-        let session = Session::spawn(&session_profile, size, move |event| match event {
+        let on_event = move |event| match event {
             SessionEvent::Wakeup => {
                 if !pending.swap(true, Ordering::AcqRel) {
                     slint::invoke_from_event_loop(move || {
@@ -508,7 +530,11 @@ impl App {
                 })
                 .ok();
             }
-        });
+        };
+        let session = match pipes {
+            Some(pipes) => Session::from_pipes(&session_profile, size, pipes, on_event),
+            None => Session::spawn(&session_profile, size, on_event),
+        };
         match session {
             Ok(session) => {
                 log::info!("started {} ({})", profile.name, profile.commandline);
@@ -582,6 +608,31 @@ impl App {
     pub fn new_tab(&mut self, profile_index: usize) {
         let Some(profile) = self.profiles.get(profile_index).cloned() else { return };
         self.new_tab_with(profile);
+    }
+
+    /// A console program Windows handed to us (wt++ is the default
+    /// terminal): a tab for it, styled like the profile that runs the same
+    /// program (cmd.exe → Command Prompt), or else the default profile.
+    #[cfg(windows)]
+    pub(crate) fn open_handoff(&mut self, handoff: crate::default_terminal::Handoff) {
+        let program = handoff.program().unwrap_or_else(|| "console".into());
+        let file = |s: &str| s.rsplit(['/', '\\']).next().unwrap_or(s).to_ascii_lowercase();
+        let name = file(&program);
+        let matching = self.profiles.iter().find(|p| file(&split_commandline(&expand_env(&p.commandline)).0) == name);
+        let Some(mut profile) = matching.or(self.profiles.get(self.settings.default_profile_index())).cloned() else { return };
+        if matching.is_none() {
+            profile.name = name.trim_end_matches(".exe").to_string();
+            profile.icon = None;
+        }
+        profile.commandline = format!("\"{program}\"");
+        profile.key_encoding = KeyEncoding::Windows;
+        let id = self.alloc_id();
+        if !self.spawn_pane_on(id, profile, self.content_area(), Some(handoff.into_pipes())) {
+            return;
+        }
+        self.tabs.push(Tab::new(TabKind::Terminal { root: Node::Leaf(id), focused: id, zoomed: false }));
+        self.active = self.tabs.len() - 1;
+        self.relayout();
     }
 
     fn new_tab_with(&mut self, profile: ResolvedProfile) {

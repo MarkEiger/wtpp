@@ -57,3 +57,7 @@ tearoff-twice: sleep:600|^+t|^+t|sleep:1200|sdrag:3170,122,3300,480|tile|sdrag:3
 # Like the user does it: no resizing or tiling after the tear-off.
 tearoff-plus-noresize: sleep:600|^+t|sleep:900|sdrag:2970,122,3300,300|sleep:800|windows|wclick:0,248,20|sleep:600|shotall:after
 tearoff-merge-noresize: sleep:600|^+t|sleep:900|sdrag:2970,122,3300,300|sleep:800|windows|wdrag:0,120,20,1,600,20|windows|shotall:after
+default-term-page: sleep:600|^,|sleep:1500|shot:startup
+default-term: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|shot:made|run:cmd.exe|sleep:1500|windows|echo handed over{ENTER}|sleep:600|tile|sleep:600|mode con{ENTER}|sleep:800|shotall:typed|^+w|sleep:1500|alive|windows|wclick:0,765,144|sleep:800|shot:restored
+default-term-exit: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|run:cmd.exe|sleep:1500|exit{ENTER}|sleep:1500|alive|windows|wclick:0,1097,144|sleep:600
+default-term-cold: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|kill|run:cmd.exe|sleep:4000|others:cold|alive|resetdefault

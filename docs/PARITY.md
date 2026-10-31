@@ -74,4 +74,5 @@
 - [x] Native Windows build + Start Menu shortcut; Linux build
 - [x] Command line: `wtpp [-d DIR] [-p PROFILE] [new-tab|split-pane …]`
 - [x] "Open in wt++" in Explorer's folder context menu
+- [x] Default terminal: Windows (console handoff, like WT; needs WT's OpenConsole), Linux (xdg-terminals.list, gsettings, KDE); macOS has no such setting
 - [ ] macOS build verified — **blocked**: needs a Mac or CI runner

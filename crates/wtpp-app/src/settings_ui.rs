@@ -11,7 +11,7 @@ use wtpp_config::{Action, AppTheme, TabWidthMode, BellStyle, GraphicsApi, Bindin
 use wtpp_input::{Key, Mods};
 
 use crate::app::{App, Tab, TabKind};
-use crate::{BindingRow, ColorRow, SettingsData};
+use crate::{BindingRow, ColorRow, MainWindow, SettingsData};
 
 /// Order of the bell and intense-text dropdowns in the UI.
 const BELL_STYLES: [BellStyle; 4] = [BellStyle::Audible, BellStyle::Visual, BellStyle::All, BellStyle::None];
@@ -196,6 +196,7 @@ impl App {
         data.set_initial_cols(s.initial_cols as i32);
         data.set_initial_rows(s.initial_rows as i32);
         data.set_can_import_wt(can_import);
+        refresh_default_terminal(&ui);
         data.set_copy_on_select(s.copy_on_select);
         data.set_word_delimiters(s.word_delimiters.clone().into());
         data.set_confirm_close(s.confirm_close_all_tabs);
@@ -513,6 +514,17 @@ impl App {
         }
     }
 
+    /// The "Default terminal application" button: takes effect at once (it's
+    /// a system setting, not part of settings.json).
+    pub fn settings_set_default_term(&mut self, make_default: bool) {
+        let result = if make_default { crate::default_terminal::make_default() } else { crate::default_terminal::restore() };
+        match result {
+            Ok(note) => self.set_status(&note, false),
+            Err(e) => self.set_status(&format!("Couldn't change the default terminal: {e}"), true),
+        }
+        refresh_default_terminal(&self.ui());
+    }
+
     pub fn settings_import_wt(&mut self) {
         let Some(path) = find_windows_terminal_settings() else { return };
         let (wt, error) = Settings::load(&path);
@@ -737,4 +749,23 @@ impl App {
         self.refresh_settings();
         self.ui().global::<SettingsData>().set_binding_message(message.into());
     }
+}
+
+/// Show whether wt++ is the system's default terminal.
+fn refresh_default_terminal(ui: &MainWindow) {
+    use crate::default_terminal::Status;
+    let data = ui.global::<SettingsData>();
+    data.set_default_term(match crate::default_terminal::status() {
+        Status::Unsupported => 0,
+        Status::NotDefault => 1,
+        Status::Default => 2,
+    });
+    data.set_default_term_description(
+        if cfg!(windows) {
+            "Console programs (Command Prompt, PowerShell, …) started from the Start menu, Run or Explorer open in it."
+        } else {
+            "Your desktop opens it when it needs a terminal."
+        }
+        .into(),
+    );
 }
