@@ -57,23 +57,16 @@ $env:WTPP_INSTANCE = 'test'
 
 # WTPP_EXE runs another build (e.g. while the installed one is in use).
 $exe = if ($env:WTPP_EXE) { $env:WTPP_EXE } else { "$env:LOCALAPPDATA\Programs\wtpp\wtpp.exe" }
-if ($ArgList) { $p = Start-Process $exe -ArgumentList $ArgList -WorkingDirectory $env:USERPROFILE -PassThru }
+# Open straight on the secondary monitor if there is one (`--pos`), keeping
+# the user's main screen free.
+$screen = [Windows.Forms.Screen]::AllScreens | Sort-Object Primary | Select-Object -First 1
+$launch = if ($screen.Primary) { $ArgList } else { "--pos $($screen.Bounds.X + 40),100 $ArgList" }
+if ($launch.Trim()) { $p = Start-Process $exe -ArgumentList $launch.Trim() -WorkingDirectory $env:USERPROFILE -PassThru }
 else { $p = Start-Process $exe -WorkingDirectory $env:USERPROFILE -PassThru }
 while ($p.MainWindowHandle -eq 0 -and $sw.ElapsedMilliseconds -lt 10000) { Start-Sleep -Milliseconds 20; $p.Refresh() }
 "window visible after $($sw.ElapsedMilliseconds) ms"
 while ($p.MainWindowTitle -in @('', 'wt++') -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 20; $p.Refresh() }
 "shell tab ready after $($sw.ElapsedMilliseconds) ms (title: $($p.MainWindowTitle))"
-# Run on the secondary monitor if there is one, keeping the main one free.
-# (Once started: wt++ sizes its window while it starts up.)
-$screen = [Windows.Forms.Screen]::AllScreens | Sort-Object Primary | Select-Object -First 1
-if (-not $screen.Primary) {
-  for ($try = 0; $try -lt 5; $try++) {
-    $r = New-Object W+RECT; [W]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
-    if ($r.L -ge $screen.Bounds.X) { break }
-    [W]::MoveWindow($p.MainWindowHandle, $screen.Bounds.X + 40, 100, [Math]::Min($r.R - $r.L, 1800), [Math]::Min($r.B - $r.T, 900), $true) | Out-Null
-    Start-Sleep -Milliseconds 300
-  }
-}
 $shell = New-Object -ComObject WScript.Shell
 function ShotWindow($h, $name) {
   $r = [W]::Frame($h)

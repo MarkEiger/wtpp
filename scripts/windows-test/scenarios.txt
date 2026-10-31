@@ -46,3 +46,4 @@ tab-follow: sleep:600|setrect:2600,100,900,600|shold:2700,122,3200,400|shotall:m
 file-drop-wsl: sleep:600|setrect:2600,100,900,600|filedrop:3000,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\a b.txt;C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\plain.txt|sleep:500|shot:pasted
 file-drop-cmd: sleep:600|^+2|sleep:1500|setrect:2600,100,900,600|filedrop:3000,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder|sleep:500|shot:pasted
 file-drop-split: sleep:600|^+=|sleep:1200|setrect:2600,100,900,600|filedrop:2750,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\plain.txt|sleep:500|shot:pasted
+file-drop-gitbash: sleep:600|^+4|sleep:2500|filedrop:3000,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\a b.txt|sleep:500|shot:pasted

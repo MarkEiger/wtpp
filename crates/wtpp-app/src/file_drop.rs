@@ -9,6 +9,8 @@ pub enum ShellKind {
     PowerShell,
     /// A Linux shell behind `wsl.exe`: Windows paths become `/mnt/c/...`.
     Wsl,
+    /// Git Bash / MSYS2 (a Windows `bash.exe`): Windows paths become `/c/...`.
+    Msys,
     Posix,
 }
 
@@ -21,6 +23,7 @@ pub fn shell_kind(program: &str, source: Option<&str>) -> ShellKind {
         "powershell" | "pwsh" => ShellKind::PowerShell,
         "wsl" => ShellKind::Wsl,
         _ if source == Some("Windows.Terminal.Wsl") => ShellKind::Wsl,
+        "bash" | "sh" | "zsh" | "fish" if file.ends_with(".exe") => ShellKind::Msys,
         _ => ShellKind::Posix,
     }
 }
@@ -35,6 +38,7 @@ pub fn dropped_text(paths: &[impl AsRef<Path>], kind: ShellKind) -> String {
             match kind {
                 ShellKind::Cmd | ShellKind::PowerShell => quote_windows(&path, kind == ShellKind::PowerShell),
                 ShellKind::Wsl => quote_posix(&wsl_path(&path)),
+                ShellKind::Msys => quote_posix(&msys_path(&path)),
                 ShellKind::Posix => quote_posix(&path),
             }
         })
@@ -94,6 +98,18 @@ pub fn wsl_path(path: &str) -> String {
     path.replace('\\', "/")
 }
 
+/// A Windows path as Git Bash / MSYS2 sees it: `C:\Users\me` → `/c/Users/me`.
+pub fn msys_path(path: &str) -> String {
+    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = path[2..].replace('\\', "/");
+        return format!("/{drive}/{}", rest.trim_start_matches('/'));
+    }
+    path.replace('\\', "/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,7 +122,8 @@ mod tests {
         assert_eq!(shell_kind("wsl.exe", None), ShellKind::Wsl);
         assert_eq!(shell_kind("ubuntu.exe", Some("Windows.Terminal.Wsl")), ShellKind::Wsl);
         assert_eq!(shell_kind("/bin/bash", None), ShellKind::Posix);
-        assert_eq!(shell_kind(r"C:\Program Files\Git\bin\bash.exe", None), ShellKind::Posix);
+        assert_eq!(shell_kind(r"C:\Program Files\Git\bin\bash.exe", None), ShellKind::Msys);
+        assert_eq!(shell_kind("bash", None), ShellKind::Posix);
     }
 
     #[test]
@@ -138,6 +155,14 @@ mod tests {
         assert_eq!(wsl_path(r"\\wsl.localhost\Ubuntu-22.04\etc\hosts"), "/etc/hosts");
         assert_eq!(wsl_path(r"\\WSL.LOCALHOST\Ubuntu"), "/");
         assert_eq!(wsl_path(r"\\server\share\f"), "//server/share/f");
+    }
+
+    #[test]
+    fn msys_paths() {
+        assert_eq!(msys_path(r"C:\Users\me\a b.txt"), "/c/Users/me/a b.txt");
+        assert_eq!(msys_path(r"D:\"), "/d/");
+        assert_eq!(msys_path(r"\\server\share"), "//server/share");
+        assert_eq!(dropped_text(&[r"C:\My Dir"], ShellKind::Msys), "'/c/My Dir'");
     }
 
     #[test]

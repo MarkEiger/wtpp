@@ -1,5 +1,5 @@
 //! Command-line arguments, following Windows Terminal's `wt.exe`:
-//! `wtpp [new-tab] [-p PROFILE] [-d DIR] [--] [COMMANDLINE...]`.
+//! `wtpp [--pos X,Y] [new-tab] [-p PROFILE] [-d DIR] [--] [COMMANDLINE...]`.
 
 use std::path::PathBuf;
 
@@ -10,12 +10,21 @@ pub struct Args {
     pub starting_directory: Option<PathBuf>,
     /// Run this instead of the profile's command line.
     pub commandline: Option<String>,
+    /// Where the window opens (`--pos X,Y`, screen pixels).
+    pub position: Option<(i32, i32)>,
 }
 
 impl Args {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Args, String> {
         let mut out = Args::default();
         let mut args = args.into_iter().peekable();
+        // Window options come before the subcommand, as in wt.exe.
+        if args.peek().map(String::as_str) == Some("--pos") {
+            args.next();
+            let pos = args.next().ok_or("--pos needs X,Y")?;
+            let parsed = pos.split_once(',').and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)));
+            out.position = Some(parsed.ok_or(format!("--pos needs X,Y, not {pos:?}"))?);
+        }
         if matches!(args.peek().map(String::as_str), Some("new-tab" | "nt")) {
             args.next();
         }
@@ -64,6 +73,10 @@ mod tests {
         assert_eq!(a.commandline.as_deref(), Some("ping -t localhost"));
         assert_eq!(parse(&["htop"]).unwrap().commandline.as_deref(), Some("htop"));
         assert!(parse(&["--bogus"]).is_err());
+        let a = parse(&["--pos", "2600,-100", "-p", "cmd"]).unwrap();
+        assert_eq!(a.position, Some((2600, -100)));
+        assert_eq!(a.profile.as_deref(), Some("cmd"));
+        assert!(parse(&["--pos", "12"]).is_err());
         assert!(parse(&["-p"]).is_err());
     }
 }

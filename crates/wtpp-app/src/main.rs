@@ -480,6 +480,9 @@ fn create_window(
     let custom_titlebar = cfg!(windows) && settings.show_tabs_in_titlebar;
     let mut launch_size = apply_launch_settings(&ui, &settings, matches!(placement, Placement::First));
     match placement {
+        _ if let Some((x, y)) = args.as_ref().and_then(|a| a.position) => {
+            ui.window().set_position(slint::PhysicalPosition::new(x, y));
+        }
         Placement::First => {}
         Placement::Default => {
             if let Some(position) = cascade_position() {
