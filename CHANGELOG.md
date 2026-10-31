@@ -23,6 +23,23 @@ X11) and macOS 27 (Apple Silicon). Licensed GPL-3.0-or-later.
   word.
 - Linux: `install.sh` adds wt++ to the app menu with its icon; windows carry
   the `wtpp` app id so docks show the right icon.
+- Linux: tabs in the title bar like Windows (wt++ draws the title bar, with
+  minimize, maximize and close; drag the window by it, double-click to
+  maximize, resize from the edges). Turn off "Show tabs in title bar" for the
+  desktop's own title bar.
+- Linux on Wayland desktops runs through XWayland, so files can be dropped
+  onto panes and tabs dragged between windows (Wayland supports neither for
+  wt++ yet). Set `WTPP_WAYLAND=1` to run as a Wayland app anyway.
+- Heavy output (`cat` of a huge file) no longer delays typing: output is
+  drawn at most once per frame. Ctrl+C under a flood used to take seconds on
+  X11.
+- Mouse wheel: 3 lines per notch on every font size, and mouse-mode apps
+  (vim, htop) are told the cell under the pointer.
+- Settings: shortcuts like Ctrl+Shift+W work after using a dropdown, and
+  each page opens at its top.
+- Linux default terminal: "Restore previous" puts back exactly what was
+  there before (gsettings, KDE) and leaves an installed `wtpp.desktop` as it
+  was.
 - Tabs can be torn off by dragging straight down (before, only a sideways
   drag started dragging a tab).
 - Escape with a selection clears the selection instead of reaching the shell.

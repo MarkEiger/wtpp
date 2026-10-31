@@ -29,7 +29,9 @@ Privacy & Security.
 
 **Linux** (x86-64, glibc 2.39+: Ubuntu 24.04, Debian 13, Fedora 40 or newer):
 unpack `wtpp-<version>-linux-x64.tar.gz` and run `sh install.sh`: it installs
-`~/.local/bin/wtpp` and adds wt++ to the app menu.
+`~/.local/bin/wtpp` and adds wt++ to the app menu. On Wayland desktops wt++
+runs through XWayland, which it needs for dropping files and dragging tabs
+between windows; `WTPP_WAYLAND=1` runs it as a Wayland app without those.
 
 ## Highlights
 
