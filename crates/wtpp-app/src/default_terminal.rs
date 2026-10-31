@@ -507,19 +507,55 @@ mod imp {
         Command::new(program).args(args).output().is_ok_and(|o| o.status.success())
     }
 
+    fn output(program: &str, args: &[&str]) -> Option<String> {
+        let out = Command::new(program).args(args).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    /// What make_default changed, so restore can put it back exactly.
+    fn saved_path() -> PathBuf {
+        config_home().join("wtpp").join("default-terminal-previous.json")
+    }
+
+    /// Marks a desktop entry wt++ wrote itself (not, say, the installer's).
+    const OURS: &str = "X-Wtpp-Default-Terminal=true";
+
+    fn on_kde() -> bool {
+        std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.to_ascii_uppercase().contains("KDE"))
+    }
+
+    fn kde_tools() -> Option<(&'static str, &'static str)> {
+        [("kwriteconfig6", "kreadconfig6"), ("kwriteconfig5", "kreadconfig5")]
+            .into_iter()
+            .find(|(w, _)| Command::new(w).arg("--help").output().is_ok())
+    }
+
     pub fn make_default() -> Result<String, String> {
+        use serde_json::{Value, json};
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut saved: Value =
+            std::fs::read(saved_path()).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or(json!({}));
+
+        // A desktop entry to name: the installed one if there is one (keep
+        // it: it may point at the installed copy), else our own.
         let apps = data_home().join("applications");
-        std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
-        let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName=wt++\nGenericName=Terminal\nComment=GPU-accelerated terminal with tabs and panes\nExec={exe}\nTryExec={exe}\nIcon=wtpp\nTerminal=false\nCategories=System;TerminalEmulator;\nStartupWMClass=wtpp\nX-TerminalArgExec=-e\nX-TerminalArgDir=--working-directory\n",
-            exe = exe.display()
-        );
-        std::fs::write(apps.join(DESKTOP_ID), desktop).map_err(|e| e.to_string())?;
+        let entry = apps.join(DESKTOP_ID);
+        if !entry.exists() {
+            std::fs::create_dir_all(&apps).map_err(|e| e.to_string())?;
+            let desktop = format!(
+                "[Desktop Entry]\nType=Application\nName=wt++\nGenericName=Terminal\nComment=GPU-accelerated terminal with tabs and panes\nExec={exe}\nTryExec={exe}\nIcon=wtpp\nTerminal=false\nCategories=System;TerminalEmulator;\nStartupWMClass=wtpp\nX-TerminalArgExec=-e\nX-TerminalArgDir=--working-directory\n{OURS}\n",
+                exe = exe.display()
+            );
+            std::fs::write(&entry, desktop).map_err(|e| e.to_string())?;
+        }
 
         // Put us first in xdg-terminals.list, keeping the rest.
         let list = terminals_list();
-        let old = std::fs::read_to_string(&list).unwrap_or_default();
+        let old = std::fs::read_to_string(&list).ok();
+        if saved.get("list_existed").is_none() {
+            saved["list_existed"] = json!(old.is_some());
+        }
+        let old = old.unwrap_or_default();
         let rest: Vec<&str> = old.lines().filter(|l| l.trim() != DESKTOP_ID).collect();
         std::fs::create_dir_all(config_home()).map_err(|e| e.to_string())?;
         std::fs::write(&list, format!("{DESKTOP_ID}\n{}", rest.join("\n"))).map_err(|e| e.to_string())?;
@@ -527,58 +563,80 @@ mod imp {
 
         let exe = exe.display().to_string();
         // Older GNOME and Cinnamon read gsettings (newer GNOME points it at
-        // xdg-terminal-exec, which follows the list above: leave that alone);
-        // KDE reads kdeglobals.
-        let mut also = Vec::new();
+        // xdg-terminal-exec, which follows the list above: leave that alone).
         for schema in GSETTINGS {
-            if gsetting(schema).is_some_and(|v| v != "xdg-terminal-exec") && run("gsettings", &["set", schema, "exec", &exe]) {
+            if let Some(previous) = gsetting(schema).filter(|v| v != "xdg-terminal-exec" && *v != exe)
+                && run("gsettings", &["set", schema, "exec", &exe])
+            {
+                let arg = output("gsettings", &["get", schema, "exec-arg"]).unwrap_or_default();
+                saved["gsettings"][schema] = json!({ "exec": previous, "exec-arg": arg.trim_matches('\'') });
                 run("gsettings", &["set", schema, "exec-arg", "-e"]);
-                also.push(schema.split('.').nth(1).unwrap_or(schema).to_string());
             }
         }
-        for tool in ["kwriteconfig6", "kwriteconfig5"] {
-            if run(tool, &["--file", "kdeglobals", "--group", "General", "--key", "TerminalApplication", &exe]) {
-                run(tool, &["--file", "kdeglobals", "--group", "General", "--key", "TerminalService", DESKTOP_ID]);
-                also.push("kde".into());
-                break;
+        // KDE reads kdeglobals (only on KDE: other desktops may have the
+        // tools installed too).
+        if on_kde()
+            && let Some((write, read)) = kde_tools()
+        {
+            let get = |key| output(read, &["--file", "kdeglobals", "--group", "General", "--key", key]);
+            if saved.get("kde").is_none() {
+                saved["kde"] = json!({ "app": get("TerminalApplication"), "service": get("TerminalService") });
             }
+            run(write, &["--file", "kdeglobals", "--group", "General", "--key", "TerminalApplication", &exe]);
+            run(write, &["--file", "kdeglobals", "--group", "General", "--key", "TerminalService", DESKTOP_ID]);
         }
-        let mut note = String::from("wt++ is now the default terminal for your desktop");
-        if !also.is_empty() {
-            note += &format!(" ({})", also.join(", "));
+        if let Some(dir) = saved_path().parent() {
+            std::fs::create_dir_all(dir).ok();
         }
-        note += ". For Debian's x-terminal-emulator too, run: sudo update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator ";
-        note += &format!("{exe} 60 && sudo update-alternatives --set x-terminal-emulator {exe}");
-        Ok(note)
+        std::fs::write(saved_path(), saved.to_string()).map_err(|e| e.to_string())?;
+        Ok("wt++ is now your desktop's default terminal.".into())
     }
 
     pub fn restore() -> Result<String, String> {
+        use serde_json::Value;
+        let saved: Value =
+            std::fs::read(saved_path()).ok().and_then(|d| serde_json::from_slice(&d).ok()).unwrap_or_default();
+
         let list = terminals_list();
         if let Ok(old) = std::fs::read_to_string(&list) {
             let rest: Vec<&str> = old.lines().filter(|l| l.trim() != DESKTOP_ID).collect();
-            // An empty list would still override the desktop's own choice.
-            if rest.iter().all(|l| l.trim().is_empty()) {
+            // An empty list (that wasn't there before) would still override
+            // the desktop's own choice.
+            if rest.iter().all(|l| l.trim().is_empty()) && saved["list_existed"] != Value::Bool(true) {
                 std::fs::remove_file(&list).map_err(|e| e.to_string())?;
             } else {
                 std::fs::write(&list, rest.join("\n")).map_err(|e| e.to_string())?;
             }
         }
         forget_cached_terminal();
-        // Only where it names us (see make_default).
-        let exe = std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default();
-        for schema in GSETTINGS {
-            if gsetting(schema).as_deref() == Some(exe.as_str()) {
-                run("gsettings", &["reset", schema, "exec"]);
-                run("gsettings", &["reset", schema, "exec-arg"]);
+
+        // Our own desktop entry only; an installed one stays.
+        let entry = data_home().join("applications").join(DESKTOP_ID);
+        if std::fs::read_to_string(&entry).is_ok_and(|e| e.contains(OURS)) {
+            std::fs::remove_file(&entry).ok();
+        }
+        if let Some(schemas) = saved["gsettings"].as_object() {
+            for (schema, previous) in schemas {
+                if let Some(exec) = previous["exec"].as_str() {
+                    run("gsettings", &["set", schema, "exec", exec]);
+                }
+                if let Some(arg) = previous["exec-arg"].as_str() {
+                    run("gsettings", &["set", schema, "exec-arg", arg]);
+                }
             }
         }
-        for tool in ["kwriteconfig6", "kwriteconfig5"] {
-            if run(tool, &["--file", "kdeglobals", "--group", "General", "--key", "TerminalApplication", "--delete"]) {
-                run(tool, &["--file", "kdeglobals", "--group", "General", "--key", "TerminalService", "--delete"]);
-                break;
+        if saved.get("kde").is_some()
+            && let Some((write, _)) = kde_tools()
+        {
+            for (key, field) in [("TerminalApplication", "app"), ("TerminalService", "service")] {
+                match saved["kde"][field].as_str().filter(|v| !v.is_empty()) {
+                    Some(value) => run(write, &["--file", "kdeglobals", "--group", "General", "--key", key, value]),
+                    None => run(write, &["--file", "kdeglobals", "--group", "General", "--key", key, "--delete"]),
+                };
             }
         }
-        Ok("wt++ is no longer the default terminal.".into())
+        std::fs::remove_file(saved_path()).ok();
+        Ok("The previous default terminal is back.".into())
     }
 }
 
@@ -630,6 +688,15 @@ mod tests {
         assert_eq!(status(), Status::NotDefault);
         let list = std::fs::read_to_string(config.join("xdg-terminals.list")).unwrap();
         assert_eq!(list.trim(), "kitty.desktop");
+
+        // Our own desktop entry goes with it; an installed one stays as it was.
+        assert!(!data.join("applications/wtpp.desktop").exists());
+        std::fs::create_dir_all(data.join("applications")).unwrap();
+        std::fs::write(data.join("applications/wtpp.desktop"), "[Desktop Entry]\nExec=/opt/wtpp\n").unwrap();
+        make_default().unwrap();
+        restore().unwrap();
+        assert_eq!(std::fs::read_to_string(data.join("applications/wtpp.desktop")).unwrap(), "[Desktop Entry]\nExec=/opt/wtpp\n");
+        std::fs::remove_file(data.join("applications/wtpp.desktop")).unwrap();
 
         // A list that only had us is removed, so the desktop's default applies again.
         std::fs::remove_file(config.join("xdg-terminals.list")).unwrap();

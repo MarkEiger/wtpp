@@ -333,6 +333,11 @@ fn wire_settings(ui: &MainWindow, id: WindowId) {
     data.on_open_json(move || {
         with_window(id, |app| app.settings_open_json());
     });
+    data.on_shortcut(move |text, ctrl, alt, shift, meta| {
+        // Like on_key_pressed: on macOS, Slint's "control" is ⌘.
+        let (ctrl, meta) = if cfg!(target_os = "macos") { (meta, ctrl) } else { (ctrl, meta) };
+        with_window(id, |app| app.on_shortcut_key(&text, Mods { shift, alt, ctrl, meta })).unwrap_or(false)
+    });
     data.on_set_default_term(move |make_default| {
         with_window(id, |app| app.settings_set_default_term(make_default));
     });
@@ -419,14 +424,28 @@ fn main() -> anyhow::Result<()> {
             attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true)
         });
     }
-    // Linux: name the app (Wayland app_id, X11 class) so desktops match its
-    // windows to wtpp.desktop (icon, dock).
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         use slint::winit_030::winit::platform::wayland::WindowAttributesExtWayland;
-        backend = backend.with_winit_window_attributes_hook(|attributes| {
-            WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp")
+        use slint::winit_030::winit::platform::x11::EventLoopBuilderExtX11;
+        // Name the app (Wayland app_id, X11 class) so desktops match its
+        // windows to wtpp.desktop (icon, dock); with tabs in the title bar,
+        // wt++ draws the window's title bar itself.
+        let own_titlebar = settings.show_tabs_in_titlebar;
+        backend = backend.with_winit_window_attributes_hook(move |attributes| {
+            WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp").with_decorations(!own_titlebar)
         });
+        // Prefer X11 (XWayland) where both exist: winit has no drag and drop
+        // on Wayland (file drops, tabs between windows: Wayland doesn't tell
+        // apps where their windows are). WTPP_WAYLAND=1 keeps Wayland.
+        if std::env::var_os("DISPLAY").is_some()
+            && std::env::var_os("WAYLAND_DISPLAY").is_some()
+            && std::env::var_os("WTPP_WAYLAND").is_none()
+        {
+            let mut event_loop = slint::winit_030::winit::event_loop::EventLoop::<slint::winit_030::SlintEvent>::with_user_event();
+            event_loop.with_x11();
+            backend = backend.with_winit_event_loop_builder(event_loop);
+        }
     }
     backend.select().context("no GPU backend available")?;
     log::info!("backend selected after {:?}", started.elapsed());
@@ -603,6 +622,7 @@ fn create_window(
     let id = WINDOWS.with(|w| w.borrow().len());
     let custom_titlebar = cfg!(windows) && settings.show_tabs_in_titlebar;
     ui.set_mac_titlebar(cfg!(target_os = "macos") && settings.show_tabs_in_titlebar);
+    ui.set_linux_titlebar(cfg!(all(unix, not(target_os = "macos"))) && settings.show_tabs_in_titlebar);
     let mut launch_size = apply_launch_settings(&ui, &settings, matches!(placement, Placement::First));
     match placement {
         _ if let Some((x, y)) = args.as_ref().and_then(|a| a.position) => {
@@ -677,6 +697,16 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         if let Some(e) = entry(id) {
             use slint::winit_030::WinitWindowAccessor;
             e.ui.window().with_winit_window(|w| w.drag_window().ok());
+        }
+    });
+    // Linux, own title bar: the edges resize the window (0 = west, then
+    // clockwise: NW, N, NE, E, SE, S, SW).
+    ui.on_start_window_resize(move |edge| {
+        use slint::winit_030::winit::window::ResizeDirection::*;
+        let direction = [West, NorthWest, North, NorthEast, East, SouthEast, South, SouthWest];
+        if let (Some(e), Some(&direction)) = (entry(id), direction.get(edge.max(0) as usize)) {
+            use slint::winit_030::WinitWindowAccessor;
+            e.ui.window().with_winit_window(|w| w.drag_resize_window(direction).ok());
         }
     });
     ui.on_zoom_window(move || {
@@ -786,8 +816,8 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
     ui.on_pane_moved(move |i, x, y| {
         with_window(id, |app| app.on_pointer_moved(i as usize, x, y));
     });
-    ui.on_pane_scroll(move |i, dy, ctrl| {
-        with_window(id, |app| app.on_scroll(i as usize, dy, ctrl)).unwrap_or(false)
+    ui.on_pane_scroll(move |i, x, y, dy, ctrl| {
+        with_window(id, |app| app.on_scroll(i as usize, x, y, dy, ctrl)).unwrap_or(false)
     });
     {
         use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};

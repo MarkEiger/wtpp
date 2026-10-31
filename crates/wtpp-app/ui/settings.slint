@@ -107,6 +107,8 @@ export global SettingsData {
     callback open-json();
     callback import-wt();
     callback set-default-term(bool);
+    // A key no control in Settings used: run it if it's a shortcut.
+    callback shortcut(string, bool, bool, bool, bool) -> bool;
     callback select-scheme(int);
     callback set-scheme-color(int, string);
     callback new-scheme();
@@ -1064,119 +1066,135 @@ component ProfilePage inherits VerticalLayout {
 export component SettingsPage inherits Rectangle {
     background: Theme.page-bg;
 
-    HorizontalLayout {
-        // Navigation
-        Rectangle {
-            width: 260px;
-            background: Theme.nav-bg;
+    // Each page starts at its top.
+    property <int> shown-page: SettingsData.page;
+    changed shown-page => {
+        page-scroll.content-y = 0;
+    }
+
+    // Keys a focused control doesn't use (a dropdown, a text field) bubble
+    // up to here: shortcuts like closing the tab still work.
+    FocusScope {
+        focus-on-click: false;
+        focus-on-tab-navigation: false;
+        key-pressed(e) => {
+            SettingsData.shortcut(e.text, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta) ? EventResult.accept : EventResult.reject
+        }
+
+        HorizontalLayout {
+            // Navigation
+            Rectangle {
+                width: 260px;
+                background: Theme.nav-bg;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 2px;
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalLayout {
+                            spacing: 2px;
+                            alignment: start;
+                            for item[i] in SettingsData.nav-items: VerticalLayout {
+                                if i == 6: Text {
+                                    text: "Profiles";
+                                    color: Theme.text-dim;
+                                    font-size: 12px;
+                                    height: 32px;
+                                    vertical-alignment: bottom;
+                                    x: 16px;
+                                }
+                                NavItem {
+                                    label: item;
+                                    indent: i >= 6;
+                                    selected: SettingsData.page == i;
+                                    clicked => {
+                                        SettingsData.page = i;
+                                        SettingsData.set-value("page", i);
+                                    }
+                                }
+                            }
+
+                            NavItem {
+                                label: "+  Add a new profile";
+                                indent: true;
+                                clicked => {
+                                    SettingsData.add-profile();
+                                }
+                            }
+                        }
+                    }
+
+                    NavItem {
+                        label: "Open JSON file";
+                        clicked => {
+                            SettingsData.open-json();
+                        }
+                    }
+                }
+            }
+
+            // Page
             VerticalLayout {
-                padding: 8px;
-                spacing: 2px;
-                ScrollView {
+                page-scroll := ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
-                        spacing: 2px;
+                        padding-left: 32px;
+                        padding-right: 32px;
+                        padding-top: 24px;
+                        padding-bottom: 24px;
+                        spacing: 16px;
                         alignment: start;
-                        for item[i] in SettingsData.nav-items: VerticalLayout {
-                            if i == 6: Text {
-                                text: "Profiles";
-                                color: Theme.text-dim;
-                                font-size: 12px;
-                                height: 32px;
-                                vertical-alignment: bottom;
-                                x: 16px;
-                            }
-                            NavItem {
-                                label: item;
-                                indent: i >= 6;
-                                selected: SettingsData.page == i;
+                        PageTitle {
+                            text: SettingsData.nav-items.length > SettingsData.page ? SettingsData.nav-items[SettingsData.page] : "";
+                        }
+
+                        if SettingsData.page == 0: StartupPage { }
+                        if SettingsData.page == 1: InteractionPage { }
+                        if SettingsData.page == 2: AppearancePage { }
+                        if SettingsData.page == 3: SchemesPage { }
+                        if SettingsData.page == 4: RenderingPage { }
+                        if SettingsData.page == 5: ActionsPage { }
+                        if SettingsData.page >= 6: ProfilePage { }
+                    }
+                }
+
+                // Footer
+                Rectangle {
+                    height: 60px;
+                    background: Theme.nav-bg;
+                    HorizontalLayout {
+                        padding-left: 24px;
+                        padding-right: 24px;
+                        spacing: 8px;
+                        Text {
+                            text: SettingsData.status;
+                            color: SettingsData.status-is-error ? Theme.error : Theme.text-dim;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                text: "Discard changes";
+                                enabled: SettingsData.dirty;
                                 clicked => {
-                                    SettingsData.page = i;
-                                    SettingsData.set-value("page", i);
+                                    SettingsData.discard();
                                 }
                             }
                         }
 
-                        NavItem {
-                            label: "+  Add a new profile";
-                            indent: true;
-                            clicked => {
-                                SettingsData.add-profile();
-                            }
-                        }
-                    }
-                }
-
-                NavItem {
-                    label: "Open JSON file";
-                    clicked => {
-                        SettingsData.open-json();
-                    }
-                }
-            }
-        }
-
-        // Page
-        VerticalLayout {
-            ScrollView {
-                vertical-stretch: 1;
-                VerticalLayout {
-                    padding-left: 32px;
-                    padding-right: 32px;
-                    padding-top: 24px;
-                    padding-bottom: 24px;
-                    spacing: 16px;
-                    alignment: start;
-                    PageTitle {
-                        text: SettingsData.nav-items.length > SettingsData.page ? SettingsData.nav-items[SettingsData.page] : "";
-                    }
-
-                    if SettingsData.page == 0: StartupPage { }
-                    if SettingsData.page == 1: InteractionPage { }
-                    if SettingsData.page == 2: AppearancePage { }
-                    if SettingsData.page == 3: SchemesPage { }
-                    if SettingsData.page == 4: RenderingPage { }
-                    if SettingsData.page == 5: ActionsPage { }
-                    if SettingsData.page >= 6: ProfilePage { }
-                }
-            }
-
-            // Footer
-            Rectangle {
-                height: 60px;
-                background: Theme.nav-bg;
-                HorizontalLayout {
-                    padding-left: 24px;
-                    padding-right: 24px;
-                    spacing: 8px;
-                    Text {
-                        text: SettingsData.status;
-                        color: SettingsData.status-is-error ? Theme.error : Theme.text-dim;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                        overflow: elide;
-                    }
-
-                    VerticalLayout {
-                        alignment: center;
-                        Button {
-                            text: "Discard changes";
-                            enabled: SettingsData.dirty;
-                            clicked => {
-                                SettingsData.discard();
-                            }
-                        }
-                    }
-
-                    VerticalLayout {
-                        alignment: center;
-                        Button {
-                            text: "Save";
-                            primary: true;
-                            enabled: SettingsData.dirty;
-                            clicked => {
-                                SettingsData.save();
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                text: "Save";
+                                primary: true;
+                                enabled: SettingsData.dirty;
+                                clicked => {
+                                    SettingsData.save();
+                                }
                             }
                         }
                     }

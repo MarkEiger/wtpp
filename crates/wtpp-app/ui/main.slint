@@ -535,6 +535,9 @@ export component MainWindow inherits Window {
     in property <bool> mac-titlebar;
     callback start-window-drag();
     callback zoom-window();
+    // Linux: wt++ draws the title bar (caption buttons, drag, resize edges).
+    in property <bool> linux-titlebar;
+    callback start-window-resize(int);
     // In fullscreen there are no window buttons to leave room for.
     in property <bool> window-fullscreen;
     // The terminal (rather than a text field) has the keyboard focus.
@@ -595,7 +598,8 @@ export component MainWindow inherits Window {
     // Pointer moved over a pane with no button held: index, x, y, ctrl.
     callback pane-hover(int, length, length, bool);
     // pane index, delta-y, ctrl → handled
-    callback pane-scroll(int, length, bool) -> bool;
+    // Pane index, pointer x and y, wheel delta, Ctrl held.
+    callback pane-scroll(int, length, length, length, bool) -> bool;
     callback dialog-result(bool);
     callback tab-menu(int, string);
     // An entry of a pane's right-click menu.
@@ -675,7 +679,7 @@ export component MainWindow inherits Window {
             clip: true;
             background: Colors.titlebar;
 
-            if root.mac-titlebar: TouchArea {
+            if root.mac-titlebar || root.linux-titlebar: TouchArea {
                 pointer-event(e) => {
                     if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                         root.start-window-drag();
@@ -863,7 +867,7 @@ export component MainWindow inherits Window {
                 }
               }
 
-              if root.custom-titlebar: caption-buttons := HorizontalLayout {
+              if root.custom-titlebar || root.linux-titlebar: caption-buttons := HorizontalLayout {
                 CaptionButton {
                     clicked => {
                         root.minimize-window();
@@ -877,10 +881,15 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Clicks arrive through Windows (it's a native maximize
-                // button for Snap Layouts); Rust reports hover.
+                // On Windows, clicks arrive through Windows (it's a native
+                // maximize button for Snap Layouts); Rust reports hover.
                 CaptionButton {
                     external-hover: root.max-hovered;
+                    clicked => {
+                        if root.linux-titlebar {
+                            root.zoom-window();
+                        }
+                    }
                     Path {
                         width: 10px;
                         height: 10px;
@@ -956,7 +965,7 @@ export component MainWindow inherits Window {
                         root.pane-moved(i, self.mouse-x, self.mouse-y);
                     }
                     scroll-event(e) => {
-                        root.pane-scroll(i, e.delta-y, e.modifiers.control) ? EventResult.accept : EventResult.reject
+                        root.pane-scroll(i, self.mouse-x, self.mouse-y, e.delta-y, e.modifiers.control) ? EventResult.accept : EventResult.reject
                     }
                 }
 
@@ -1334,6 +1343,122 @@ export component MainWindow inherits Window {
                             root.dialog-result(false);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Linux, own title bar: a thin frame to resize from (the desktop draws
+    // none for undecorated windows), and a hairline border.
+    if root.linux-titlebar && !root.window-maximized: Rectangle {
+        border-width: 1px;
+        border-color: Colors.divider;
+    }
+
+    if root.linux-titlebar && !root.window-maximized: Rectangle {
+        property <length> edge: 5px;
+        property <length> corner: 12px;
+        // West, then clockwise; see start-window-resize.
+        TouchArea {
+            x: 0;
+            y: parent.corner;
+            width: parent.edge;
+            height: parent.height - 2 * parent.corner;
+            mouse-cursor: ew-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.start-window-resize(0);
+                }
+            }
+        }
+
+        TouchArea {
+            x: 0;
+            y: 0;
+            width: parent.corner;
+            height: parent.corner;
+            mouse-cursor: nwse-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.start-window-resize(1);
+                }
+            }
+        }
+
+        TouchArea {
+            x: parent.corner;
+            y: 0;
+            width: parent.width - 2 * parent.corner;
+            height: parent.edge;
+            mouse-cursor: ns-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.start-window-resize(2);
+                }
+            }
+        }
+
+        TouchArea {
+            x: parent.width - parent.corner;
+            y: 0;
+            width: parent.corner;
+            height: parent.corner;
+            mouse-cursor: nesw-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.start-window-resize(3);
+                }
+            }
+        }
+
+        TouchArea {
+            x: parent.width - parent.edge;
+            y: parent.corner;
+            width: parent.edge;
+            height: parent.height - 2 * parent.corner;
+            mouse-cursor: ew-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.start-window-resize(4);
+                }
+            }
+        }
+
+        TouchArea {
+            x: parent.width - parent.corner;
+            y: parent.height - parent.corner;
+            width: parent.corner;
+            height: parent.corner;
+            mouse-cursor: nwse-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.start-window-resize(5);
+                }
+            }
+        }
+
+        TouchArea {
+            x: parent.corner;
+            y: parent.height - parent.edge;
+            width: parent.width - 2 * parent.corner;
+            height: parent.edge;
+            mouse-cursor: ns-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.start-window-resize(6);
+                }
+            }
+        }
+
+        TouchArea {
+            x: 0;
+            y: parent.height - parent.corner;
+            width: parent.corner;
+            height: parent.corner;
+            mouse-cursor: nesw-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.start-window-resize(7);
                 }
             }
         }

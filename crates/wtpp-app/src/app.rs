@@ -948,6 +948,15 @@ impl App {
     /// Recompute pane rectangles for the active tab, resize their sessions,
     /// and redraw.
     pub fn relayout(&mut self) {
+        // Linux, own title bar: the maximize button shows the real state.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use slint::winit_030::WinitWindowAccessor;
+            let ui = self.ui();
+            if ui.get_linux_titlebar() {
+                ui.set_window_maximized(ui.window().with_winit_window(|w| w.is_maximized()).unwrap_or(false));
+            }
+        }
         // macOS fullscreen (green button or ⌃⌘F) hides the window buttons.
         #[cfg(target_os = "macos")]
         {
@@ -1105,7 +1114,11 @@ impl App {
         }
         let ui = self.ui();
         ui.set_show_tab_row(
-            ui.get_custom_titlebar() || ui.get_mac_titlebar() || self.settings.always_show_tabs || self.tabs.len() > 1,
+            ui.get_custom_titlebar()
+                || ui.get_mac_titlebar()
+                || ui.get_linux_titlebar()
+                || self.settings.always_show_tabs
+                || self.tabs.len() > 1,
         );
         self.update_titlebar_geometry();
     }
@@ -1215,6 +1228,15 @@ impl App {
         }
         pane.session.write(text.as_bytes().to_vec());
         self.wake_cursor();
+    }
+
+    /// A key that bubbled up from a control in Settings: only shortcuts.
+    pub fn on_shortcut_key(&mut self, text: &str, mods: Mods) -> bool {
+        let Some((key, mods)) = keys::from_slint(text, mods) else { return false };
+        match self.keymap.lookup(key, mods).cloned() {
+            Some(action) => self.run_action(action),
+            None => false,
+        }
     }
 
     pub fn on_key(&mut self, text: &str, mods: Mods) -> bool {
@@ -1739,18 +1761,21 @@ impl App {
         }
     }
 
-    pub fn on_scroll(&mut self, index: usize, delta_y: f32, ctrl: bool) -> bool {
+    pub fn on_scroll(&mut self, index: usize, x: f32, y: f32, delta_y: f32, ctrl: bool) -> bool {
         if ctrl {
             // Ctrl+wheel zooms, like WT.
             self.set_font_zoom(self.font_zoom + delta_y.signum());
             return true;
         }
         let Some(&id) = self.visible.get(index) else { return false };
-        let Some(cell) = self.panes.get(&id).and_then(|p| self.cell_metrics(p)) else { return false };
-        let scale = self.scale();
+        // Where mouse-mode apps are told the wheel turned.
+        let cell = self.panes.get(&id).and_then(|p| self.report_cell(p, x, y)).unwrap_or((1, 1));
         let Some(pane) = self.panes.get_mut(&id) else { return false };
 
-        let lines_f = delta_y * scale / cell.height + pane.scroll_remainder;
+        // A wheel notch is 60 logical pixels: 3 lines, like WT, whatever
+        // the font size (trackpads scroll proportionally).
+        const PIXELS_PER_LINE: f32 = 20.0;
+        let lines_f = delta_y / PIXELS_PER_LINE + pane.scroll_remainder;
         let lines = lines_f.trunc() as i32;
         pane.scroll_remainder = lines_f.fract();
         if lines == 0 {
@@ -1768,7 +1793,7 @@ impl App {
             // Wheel up is button 4 (64), down is button 5 (65).
             let button = if events > 0 { 64 } else { 65 };
             for _ in 0..events.unsigned_abs() {
-                if let Some(bytes) = mouse_report(mode, button, true, false, 1, 1, Mods::NONE) {
+                if let Some(bytes) = mouse_report(mode, button, true, false, cell.0, cell.1, Mods::NONE) {
                     pane.session.write(bytes);
                 }
             }
