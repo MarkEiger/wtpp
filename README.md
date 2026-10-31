@@ -25,6 +25,9 @@ and "Open in wt++" to Explorer's folder right-click menu.
 - A settings UI like WT's; settings live in WT-format `settings.json`
   (`%LOCALAPPDATA%\wtpp` on Windows, `~/.config/wtpp` on Linux), reload live,
   and can be imported from Windows Terminal.
+- Drag tabs between windows (or out into a new one), like a browser.
+- Drop files or folders onto the terminal to paste their paths, in the right
+  form for the shell (cmd, PowerShell, WSL, Git Bash).
 - Ctrl+Backspace, Ctrl+Delete and Shift+Enter work in every shell, cmd included.
 - Shortcuts work on any keyboard layout, and the defaults avoid OS hotkeys.
 

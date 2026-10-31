@@ -1,13 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-31
 
-- Drag tabs between windows like a browser: a marker shows where the tab
-  will land; drop it outside any window for a new one; drag a window's only
-  tab to move the window, or onto another window to merge them.
+- Drag tabs between windows like a browser: a see-through preview follows
+  the pointer, and a marker shows where the tab will land. Drop it outside
+  any window for a new one; drag a window's only tab to move the window, or
+  onto another window to merge them.
 - All windows share one process: launching wt++ again opens a window in the
   running instance (so any two windows can exchange tabs).
-- New windows open next to the current one, on the same monitor.
+- Drop files or folders onto a pane to paste their paths, quoted for its
+  shell: `C:\...` for cmd and PowerShell, `/mnt/c/...` for WSL, `/c/...`
+  for Git Bash.
+- New windows open next to the current one, on the same monitor; torn-off
+  windows stay clear of the taskbar.
+- `wtpp --pos X,Y` opens the window at a screen position (as in `wt.exe`).
+- Fixed: in a torn-off window the + button and dragging its tab didn't work
+  until the window was resized.
 
 ## 0.1.0 — 2026-10-31
 
