@@ -12,14 +12,14 @@ rm -rf dist && mkdir -p dist
 cargo build --release --target x86_64-pc-windows-gnu
 win="dist/wtpp-$version-windows-x64"
 mkdir -p "$win"
-cp target/x86_64-pc-windows-gnu/release/wtpp.exe assets/wtpp.ico scripts/windows/install.ps1 README.md "$win/"
+cp target/x86_64-pc-windows-gnu/release/wtpp.exe assets/wtpp.ico scripts/windows/install.ps1 README.md LICENSE "$win/"
 cp assets/fonts/LICENSE-Cascadia.txt "$win/"
 (cd dist && python3 -m zipfile -c "$(basename "$win").zip" "$(basename "$win")" && rm -r "$(basename "$win")")
 
 cargo build --release
 linux="dist/wtpp-$version-linux-x64"
 mkdir -p "$linux"
-cp target/release/wtpp README.md assets/fonts/LICENSE-Cascadia.txt scripts/linux/install.sh "$linux/"
+cp target/release/wtpp README.md LICENSE assets/fonts/LICENSE-Cascadia.txt scripts/linux/install.sh "$linux/"
 cp assets/wtpp.png "$linux/wtpp.png"
 tar -C dist -czf "$linux.tar.gz" "$(basename "$linux")" && rm -r "$linux"
 

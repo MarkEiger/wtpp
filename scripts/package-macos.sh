@@ -11,7 +11,7 @@ cargo build --release
 app="dist/wt++.app"
 rm -rf "$app" && mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/wtpp "$app/Contents/MacOS/wtpp"
-cp assets/fonts/LICENSE-Cascadia.txt "$app/Contents/Resources/"
+cp LICENSE assets/fonts/LICENSE-Cascadia.txt "$app/Contents/Resources/"
 
 # Icon: every size macOS asks for, from the 1024px PNG (which has the margin
 # macOS icons have).

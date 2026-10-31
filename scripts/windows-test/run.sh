@@ -27,7 +27,8 @@ while IFS= read -r line; do
     steps="${steps//shotrect:/shotrect:$name-}"
     steps="${steps//others:/others:$name-}"
     echo "== $name"
-    (cd /mnt/c && powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_script" -StepList "$steps" -ArgList "$args" < /dev/null 2>&1 | tr -d '\r' | sed 's/^/   /')
+    # An aborted scenario (another app took the foreground) doesn't stop the run.
+    (cd /mnt/c && powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_script" -StepList "$steps" -ArgList "$args" < /dev/null 2>&1 | tr -d '\r' | sed 's/^/   /') || true
 done < scenarios.txt
 
 # 2x2 contact sheets for review: sheet-N.png next to the screenshots.

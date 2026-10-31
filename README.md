@@ -91,3 +91,13 @@ scripts/package-release.sh                # release packages into dist/
 The Windows build cross-compiles with MinGW (`x86_64-pc-windows-gnu`).
 `vendor/i-slint-core` is a patched copy of Slint's core (see
 [vendor/README.md](vendor/README.md)).
+
+## License
+
+wt++ is free software under the [GNU General Public License v3.0 or later](LICENSE).
+
+It's built on [Slint](https://slint.dev) (used under its GPLv3 option;
+`vendor/i-slint-core` is a patched copy), [alacritty_terminal](https://github.com/alacritty/alacritty),
+[wgpu](https://wgpu.rs) and [cosmic-text](https://github.com/pop-os/cosmic-text).
+It bundles the [Cascadia Code](https://github.com/microsoft/cascadia-code)
+fonts (SIL Open Font License, see `assets/fonts/LICENSE-Cascadia.txt`).

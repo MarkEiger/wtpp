@@ -3,6 +3,8 @@ name = "wtpp-render"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
