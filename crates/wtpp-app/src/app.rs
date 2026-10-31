@@ -427,6 +427,9 @@ impl App {
         for pane in self.panes.values().map(|p| p.profile.clone()).collect::<Vec<_>>() {
             self.ensure_icon(&pane);
         }
+        // Linux draws its own title bar or not by a window flag: switch now.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.ui().set_linux_titlebar(self.settings.show_tabs_in_titlebar);
         self.apply_chrome_settings();
         self.update_menu();
         self.relayout();

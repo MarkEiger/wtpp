@@ -50,6 +50,22 @@ fn entry(id: WindowId) -> Option<Rc<WindowEntry>> {
     WINDOWS.with(|w| w.borrow().get(id).cloned().flatten())
 }
 
+/// Once the window manager moves or resizes the window, the button release
+/// goes to it, not to us: release the button for Slint, or the TouchArea that
+/// started it keeps the pointer (and the next press on any edge resizes the
+/// way the first one did).
+fn release_pointer(id: WindowId) {
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        if let Some(e) = entry(id) {
+            use slint::platform::{PointerEventButton, WindowEvent};
+            let position = slint::LogicalPosition::new(-1.0, -1.0);
+            let window = e.ui.window();
+            window.dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
+            window.dispatch_event(WindowEvent::PointerExited);
+        }
+    });
+}
+
 fn window_ids() -> Vec<WindowId> {
     WINDOWS.with(|w| w.borrow().iter().enumerate().filter(|(_, e)| e.is_some()).map(|(i, _)| i).collect())
 }
@@ -429,11 +445,9 @@ fn main() -> anyhow::Result<()> {
         use slint::winit_030::winit::platform::wayland::WindowAttributesExtWayland;
         use slint::winit_030::winit::platform::x11::EventLoopBuilderExtX11;
         // Name the app (Wayland app_id, X11 class) so desktops match its
-        // windows to wtpp.desktop (icon, dock); with tabs in the title bar,
-        // wt++ draws the window's title bar itself.
-        let own_titlebar = settings.show_tabs_in_titlebar;
-        backend = backend.with_winit_window_attributes_hook(move |attributes| {
-            WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp").with_decorations(!own_titlebar)
+        // windows to wtpp.desktop (icon, dock).
+        backend = backend.with_winit_window_attributes_hook(|attributes| {
+            WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp")
         });
         // Prefer X11 (XWayland) where both exist: winit has no drag and drop
         // on Wayland (file drops, tabs between windows: Wayland doesn't tell
@@ -697,6 +711,7 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         if let Some(e) = entry(id) {
             use slint::winit_030::WinitWindowAccessor;
             e.ui.window().with_winit_window(|w| w.drag_window().ok());
+            release_pointer(id);
         }
     });
     // Linux, own title bar: the edges resize the window (0 = west, then
@@ -707,6 +722,7 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         if let (Some(e), Some(&direction)) = (entry(id), direction.get(edge.max(0) as usize)) {
             use slint::winit_030::WinitWindowAccessor;
             e.ui.window().with_winit_window(|w| w.drag_resize_window(direction).ok());
+            release_pointer(id);
         }
     });
     ui.on_zoom_window(move || {

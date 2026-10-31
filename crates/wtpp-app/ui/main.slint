@@ -537,6 +537,7 @@ export component MainWindow inherits Window {
     callback zoom-window();
     // Linux: wt++ draws the title bar (caption buttons, drag, resize edges).
     in property <bool> linux-titlebar;
+    no-frame: linux-titlebar;
     callback start-window-resize(int);
     // In fullscreen there are no window buttons to leave room for.
     in property <bool> window-fullscreen;
