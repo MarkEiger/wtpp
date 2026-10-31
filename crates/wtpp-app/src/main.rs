@@ -511,6 +511,12 @@ fn create_window(
 
 fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::Result<()> {
     ui.window().set_rendering_notifier(move |state, api| {
+        if custom_titlebar && matches!(state, slint::RenderingState::AfterRendering) {
+            slint::invoke_from_event_loop(move || {
+                with_window(id, |app| app.update_titlebar_geometry());
+            })
+            .ok();
+        }
         if let (slint::RenderingState::RenderingSetup, slint::GraphicsAPI::WGPU30 { device, queue, .. }) = (state, api)
         {
             let (device, queue) = (device.clone(), queue.clone());

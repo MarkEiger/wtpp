@@ -193,6 +193,23 @@ foreach ($s in $Steps) {
     $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($x, $y, 0, 0, $bmp.Size)
     $bmp.Save("$out\$($v[0]).png"); $g.Dispose(); $bmp.Dispose()
   }
+  elseif ($s -like 'wclick:*') {
+    # wclick:i,x,y clicks at x,y within this process's window i (in z-order,
+    # 0 = frontmost), relative to its visible frame. No moving or resizing.
+    $v = $s.Substring(7).Split(',') | ForEach-Object { [int]$_ }
+    $h = [W]::Windows([uint32]$p.Id)[$v[0]]; $r = [W]::Frame($h)
+    [W]::SetCursorPos($r.L + $v[1], $r.T + $v[2]) | Out-Null; Start-Sleep -Milliseconds 80
+    [W]::mouse_event(2,0,0,0,0); [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 800
+  }
+  elseif ($s -like 'wdrag:*') {
+    # wdrag:i,x,y,j,x2,y2 drags from a point in window i to a point in window j
+    $v = $s.Substring(6).Split(',') | ForEach-Object { [int]$_ }
+    $ws = [W]::Windows([uint32]$p.Id); $a = [W]::Frame($ws[$v[0]]); $b = [W]::Frame($ws[$v[3]])
+    $x1 = $a.L + $v[1]; $y1 = $a.T + $v[2]; $x2 = $b.L + $v[4]; $y2 = $b.T + $v[5]
+    [W]::SetCursorPos($x1, $y1) | Out-Null; Start-Sleep -Milliseconds 80; [W]::mouse_event(2,0,0,0,0)
+    for ($k = 1; $k -le 30; $k++) { [W]::SetCursorPos($x1 + ($x2-$x1)*$k/30, $y1 + ($y2-$y1)*$k/30) | Out-Null; Start-Sleep -Milliseconds 25 }
+    Start-Sleep -Milliseconds 300; [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 1200
+  }
   elseif ($s -like 'smove:*') {
     # smove:x1,y1,x2,y2 moves the pointer (button state unchanged)
     $v = $s.Substring(6).Split(',') | ForEach-Object { [int]$_ }

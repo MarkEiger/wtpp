@@ -941,8 +941,10 @@ impl App {
         }
     }
 
-    /// Tell the window subclass where the tab row's parts are.
-    fn update_titlebar_geometry(&self) {
+    /// Tell the window subclass where the tab row's parts are. Also called
+    /// after each frame: Slint lays out new tabs only when it draws, so
+    /// right after a tab is added these can still be the old values.
+    pub(crate) fn update_titlebar_geometry(&self) {
         use std::sync::atomic::Ordering::Release;
         let ui = self.ui();
         let scale = ui.window().scale_factor();

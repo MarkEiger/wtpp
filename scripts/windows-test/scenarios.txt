@@ -54,3 +54,6 @@ tearoff-merge-back: sleep:600|^+t|sleep:900|sdrag:2970,122,3300,480|tile|shold:2
 tearoff-return: sleep:600|^+t|sleep:900|shold:2970,122,2970,400|smove:2970,400,2750,122|sup|windows|shot:back
 tearoff-split: sleep:600|^+t|sleep:900|^+=|sleep:1200|sdrag:2970,122,3300,480|tile|windows|shotall:after
 tearoff-twice: sleep:600|^+t|^+t|sleep:1200|sdrag:3170,122,3300,480|tile|sdrag:3996,122,3200,520|windows|shotall:after
+# Like the user does it: no resizing or tiling after the tear-off.
+tearoff-plus-noresize: sleep:600|^+t|sleep:900|sdrag:2970,122,3300,300|sleep:800|windows|wclick:0,248,20|sleep:600|shotall:after
+tearoff-merge-noresize: sleep:600|^+t|sleep:900|sdrag:2970,122,3300,300|sleep:800|windows|wdrag:0,120,20,1,600,20|windows|shotall:after
