@@ -184,6 +184,8 @@ impl App {
         data.set_page(d.page as i32);
         data.set_dirty(d.dirty);
         data.set_is_windows(is_windows);
+        data.set_titlebar_tabs(cfg!(any(windows, target_os = "macos")));
+        data.set_new_tab_keys(self.keymap.chord_label(&Action::NewTab(None)).unwrap_or_default().into());
 
         // Startup / interaction / appearance
         data.set_profile_names(strings(names.clone()));

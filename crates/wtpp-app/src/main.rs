@@ -412,6 +412,8 @@ fn main() -> anyhow::Result<()> {
         });
     }
     backend.select().context("no GPU backend available")?;
+    #[cfg(target_os = "macos")]
+    macos_titlebar_clicks();
     log::info!("backend selected after {:?}", started.elapsed());
 
     // Font and shell discovery are slow (hundreds of fonts on Windows,
@@ -454,7 +456,38 @@ fn main() -> anyhow::Result<()> {
 
     // Windows come and go; `close_window` quits after the last one.
     slint::run_event_loop_until_quit()?;
+    // Quit with windows still open (⌘Q on macOS): remember the frontmost.
+    let front = FOCUS_ORDER.with(|f| f.borrow().first().copied()).or_else(|| window_ids().first().copied());
+    if let Some(e) = front.and_then(entry)
+        && e.app.try_borrow().is_ok_and(|app| app.settings.remember_window_bounds)
+    {
+        window_state::save(e.ui.window());
+    }
     Ok(())
+}
+
+/// macOS: with tabs in the (transparent) title bar, AppKit would move the
+/// window on any drag in its top 28pt, tabs included. Tell it our view
+/// doesn't move the window; the tab row's empty parts still do (via
+/// `start-window-drag`).
+#[cfg(target_os = "macos")]
+fn macos_titlebar_clicks() {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+    extern "C" fn no(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    if let Some(class) = AnyClass::get("WinitView") {
+        // SAFETY: adds a method with the right signature (BOOL return, no
+        // arguments) to winit's NSView subclass, which doesn't define it.
+        unsafe {
+            objc2::ffi::class_addMethod(
+                class as *const AnyClass as *mut _,
+                objc2::sel!(mouseDownCanMoveWindow).as_ptr(),
+                std::mem::transmute::<extern "C" fn(&AnyObject, Sel) -> Bool, objc2::ffi::IMP>(no),
+                c"B@:".as_ptr(),
+            );
+        }
+    }
 }
 
 /// Command-line arguments; a relative `-d` is relative to the launching
@@ -613,9 +646,22 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         }
     });
     ui.on_zoom_window(move || {
+        // winit knows the window's real zoom state (Slint's lags behind).
         if let Some(e) = entry(id) {
-            let window = e.ui.window();
-            window.set_maximized(!window.is_maximized());
+            use slint::winit_030::WinitWindowAccessor;
+            e.ui.window().with_winit_window(|w| w.set_maximized(!w.is_maximized()));
+        }
+    });
+    // macOS composes dead keys (⌥E then E → é) and other input methods in
+    // its text input system, which needs enabling for the terminal (Slint
+    // only does that for its text fields).
+    ui.on_terminal_focus_changed(move |focused| {
+        if cfg!(target_os = "macos")
+            && focused
+            && let Some(e) = entry(id)
+        {
+            use slint::winit_030::WinitWindowAccessor;
+            e.ui.window().with_winit_window(|w| w.set_ime_allowed(true));
         }
     });
     ui.on_content_resized(move || {
@@ -730,6 +776,18 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
                         with_window(id, |app| app.on_window_focus(active));
                     })
                     .ok();
+                }
+                // Text the input method composed (macOS dead keys, …) for the
+                // terminal; text fields get theirs from Slint.
+                WindowEvent::Ime(slint::winit_030::winit::event::Ime::Commit(text))
+                    if cfg!(target_os = "macos") && entry(id).is_some_and(|e| e.ui.get_terminal_focused()) =>
+                {
+                    let text = text.clone();
+                    slint::invoke_from_event_loop(move || {
+                        with_window(id, |app| app.on_text_input(&text));
+                    })
+                    .ok();
+                    return EventResult::PreventDefault;
                 }
                 WindowEvent::DroppedFile(path) => {
                     let first = dropped.borrow().is_empty();

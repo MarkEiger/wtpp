@@ -24,6 +24,10 @@ wtpp-input.workspace = true
 wtpp-render.workspace = true
 wtpp-session.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The same version winit uses, to adjust its view class.
+objc2 = "0.5"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",

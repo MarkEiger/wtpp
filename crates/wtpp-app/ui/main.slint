@@ -535,6 +535,14 @@ export component MainWindow inherits Window {
     in property <bool> mac-titlebar;
     callback start-window-drag();
     callback zoom-window();
+    // In fullscreen there are no window buttons to leave room for.
+    in property <bool> window-fullscreen;
+    // The terminal (rather than a text field) has the keyboard focus.
+    out property <bool> terminal-focused: keys.has-focus;
+    callback terminal-focus-changed(bool);
+    changed terminal-focused => {
+        root.terminal-focus-changed(self.terminal-focused);
+    }
     // Hidden only with `alwaysShowTabs: false`, one tab, and a native title bar.
     in property <bool> show-tab-row: true;
     in property <int> tab-width-mode;
@@ -684,7 +692,7 @@ export component MainWindow inherits Window {
                 // never widen the window.
                 min-width: 0px;
                 // Room for the red, yellow and green buttons on macOS.
-                padding-left: root.mac-titlebar ? 78px : 8px;
+                padding-left: root.mac-titlebar && !root.window-fullscreen ? 78px : 8px;
                 padding-top: 6px;
                 spacing: 2px;
                 alignment: start;

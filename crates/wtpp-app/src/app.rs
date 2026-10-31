@@ -944,6 +944,14 @@ impl App {
     /// Recompute pane rectangles for the active tab, resize their sessions,
     /// and redraw.
     pub fn relayout(&mut self) {
+        // macOS fullscreen (green button or ⌃⌘F) hides the window buttons.
+        #[cfg(target_os = "macos")]
+        {
+            use slint::winit_030::WinitWindowAccessor;
+            let ui = self.ui();
+            let fullscreen = ui.window().with_winit_window(|w| w.fullscreen().is_some()).unwrap_or(false);
+            ui.set_window_fullscreen(fullscreen);
+        }
         let show_settings = matches!(self.tabs.get(self.active), Some(Tab { kind: TabKind::Settings, .. }));
         self.ui().set_show_settings(show_settings);
         let layout = self.active_layout();
@@ -1195,6 +1203,16 @@ impl App {
 
     // ---- keyboard ---------------------------------------------------------------
 
+    /// Text an input method composed (e.g. a macOS dead key: ⌥E E → é).
+    pub fn on_text_input(&mut self, text: &str) {
+        let Some(pane) = self.focused_pane() else { return };
+        if pane.exited || text.is_empty() {
+            return;
+        }
+        pane.session.write(text.as_bytes().to_vec());
+        self.wake_cursor();
+    }
+
     pub fn on_key(&mut self, text: &str, mods: Mods) -> bool {
         let key = keys::from_slint(text, mods);
         // A non-Latin layout (Hebrew, Russian, ...) turns Ctrl+Shift+W into
@@ -1244,8 +1262,12 @@ impl App {
             return true;
         }
         // macOS: ⌘ shortcuts we don't bind belong to the system (⌘Q, ⌘H, …),
-        // never to the shell.
+        // never to the shell; ⌘M minimizes, as everywhere on a Mac.
         if cfg!(target_os = "macos") && mods.meta {
+            if key == Some((Key::Char('m'), Mods { meta: true, ..Mods::NONE })) {
+                self.ui().window().set_minimized(true);
+                return true;
+            }
             return false;
         }
         let Some(pane) = self.focused_pane() else { return false };
@@ -1267,6 +1289,9 @@ impl App {
             return true;
         }
         let bytes = match key {
+            // macOS: Option+arrows move by word, as in Terminal (ESC b / f).
+            Some((Key::Left, m)) if cfg!(target_os = "macos") && m == Mods::ALT => Some(b"\x1bb".to_vec()),
+            Some((Key::Right, m)) if cfg!(target_os = "macos") && m == Mods::ALT => Some(b"\x1bf".to_vec()),
             // macOS: Option types characters (⌥A → å), as in Terminal.
             Some((Key::Char(c), m)) if cfg!(target_os = "macos") && m.alt && !m.ctrl && !c.is_ascii() => {
                 Some(text.as_bytes().to_vec())

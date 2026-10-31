@@ -53,6 +53,10 @@ export global SettingsData {
     in-out property <bool> right-click-menu;
     in-out property <int> graphics-api;
     in property <bool> is-windows;
+    // Tabs can share the title bar (Windows, macOS).
+    in property <bool> titlebar-tabs;
+    // The new-tab shortcut, e.g. "Ctrl+Shift+T" or "⌘T".
+    in property <string> new-tab-keys;
 
     // Color schemes
     in property <[string]> scheme-names;
@@ -221,7 +225,7 @@ component StartupPage inherits VerticalLayout {
 
     Card {
         title: "Default profile";
-        description: "Profile that opens with the new tab button and Ctrl+Shift+T.";
+        description: "Profile that opens with the new tab button" + (SettingsData.new-tab-keys != "" ? " and " + SettingsData.new-tab-keys : "") + ".";
         ComboBox {
             width: 260px;
             model: SettingsData.profile-names;
@@ -425,9 +429,9 @@ component AppearancePage inherits VerticalLayout {
 
     Card {
         title: "Show tabs in title bar";
-        description: SettingsData.is-windows ? "Tabs share the row with the minimize, maximize and close buttons. Takes effect on restart." : "Only available on Windows.";
+        description: SettingsData.titlebar-tabs ? (SettingsData.is-windows ? "Tabs share the row with the minimize, maximize and close buttons." : "Tabs share the row with the window buttons.") + " Takes effect on restart." : "Only available on Windows and macOS.";
         Switch {
-            enabled: SettingsData.is-windows;
+            enabled: SettingsData.titlebar-tabs;
             checked <=> SettingsData.tabs-in-titlebar;
             toggled => {
                 SettingsData.set-value("showTabsInTitlebar", self.checked ? "true" : "false");
@@ -798,7 +802,7 @@ component ProfilePage inherits VerticalLayout {
 
     Card {
         title: "Command line";
-        description: "Program to run, with arguments. %VARIABLES% are expanded.";
+        description: SettingsData.is-windows ? "Program to run, with arguments. %VARIABLES% are expanded." : "Program to run, with arguments. ~ and %VARIABLES% are expanded.";
         LineEdit {
             width: 300px;
             text <=> SettingsData.p-commandline;
