@@ -549,6 +549,9 @@ export component MainWindow inherits Window {
     in property <string> dialog-confirm;
     out property <length> content-width: content.width;
     out property <length> content-height: content.height;
+    // Window position of the content area (for file drops).
+    out property <length> content-x: content.absolute-position.x;
+    out property <length> content-y: content.absolute-position.y;
 
     // text, ctrl, alt, shift, meta → handled
     callback key-pressed(string, bool, bool, bool, bool) -> bool;

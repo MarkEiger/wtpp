@@ -129,6 +129,37 @@ pub fn physical_key_char() -> Option<char> {
     None
 }
 
+/// The mouse position in a window, in logical coordinates, read from the
+/// OS. winit's file drops carry no position (and no mouse moves arrive
+/// during an OLE drag), so this is where a drop landed. Windows only.
+pub fn cursor_in_window(window: &slint::Window) -> Option<(f32, f32)> {
+    #[cfg(windows)]
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows_sys::Win32::Foundation::{HWND, POINT};
+        use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+        let hwnd = window.with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get() as HWND),
+            _ => None,
+        })??;
+        let mut point = POINT { x: 0, y: 0 };
+        // SAFETY: plain Win32 calls on our own window with a valid POINT.
+        if unsafe { GetCursorPos(&mut point) == 0 || ScreenToClient(hwnd, &mut point) == 0 } {
+            return None;
+        }
+        let scale = window.scale_factor();
+        Some((point.x as f32 / scale, point.y as f32 / scale))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        None
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use std::path::PathBuf;
