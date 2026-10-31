@@ -157,7 +157,7 @@ foreach ($s in $Steps) {
     # Explorer) from a small source window and drops them at screen x,y.
     $parts = $s.Substring(9).Split(',', 3); $tx = [int]$parts[0]; $ty = [int]$parts[1]
     $files = New-Object System.Collections.Specialized.StringCollection
-    foreach ($f in $parts[2].Split(';')) { [void]$files.Add($f) }
+    foreach ($f in $parts[2].Split(';')) { [void]$files.Add([Environment]::ExpandEnvironmentVariables($f)) }
     $form = New-Object Windows.Forms.Form
     $form.StartPosition = 'Manual'; $form.Location = New-Object Drawing.Point(($tx - 300), ($ty + 150)); $form.Size = New-Object Drawing.Size(160, 120)
     $form.TopMost = $true; $form.Show(); [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 300
