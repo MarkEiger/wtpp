@@ -61,3 +61,5 @@ default-term-page: sleep:600|^,|sleep:1500|shot:startup
 default-term: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|shot:made|run:cmd.exe|sleep:1500|windows|echo handed over{ENTER}|sleep:600|tile|sleep:600|mode con{ENTER}|sleep:800|shotall:typed|^+w|sleep:1500|alive|windows|wclick:0,765,144|sleep:800|shot:restored
 default-term-exit: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|run:cmd.exe|sleep:1500|exit{ENTER}|sleep:1500|alive|windows|wclick:0,1097,144|sleep:600
 default-term-cold: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|kill|run:cmd.exe|sleep:4000|others:cold|alive|resetdefault
+default-term-front: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|fgother|run:cmd.exe|sleep:1500|fgcheck|windows|resetdefault
+default-term-cold-front: resetdefault|sleep:600|^,|sleep:1500|wclick:0,1097,144|sleep:800|kill|fgother|run:cmd.exe|sleep:4000|fgcheck|others:cold|resetdefault

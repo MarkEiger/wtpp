@@ -476,6 +476,16 @@ fn on_handoff(handoff: default_terminal::Handoff) {
     match create_window(settings, None, None, placement) {
         Ok(id) => {
             with_window(id, |app| app.handoff = Some(handoff));
+            // The user started the program, so its window belongs in front
+            // (Windows won't put it there for us; see bring_to_front). Again
+            // once it has drawn, in case it wasn't ready the first time.
+            let raise = move || {
+                if let Some(e) = entry(id) {
+                    platform::bring_to_front(e.ui.window());
+                }
+            };
+            raise();
+            slint::Timer::single_shot(std::time::Duration::from_millis(250), raise);
         }
         Err(e) => log::error!("couldn't open a window for a console: {e:#}"),
     }

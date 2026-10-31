@@ -83,10 +83,10 @@ foreach ($s in $Steps) {
   # Keys, clicks and screenshots go to whatever is in front. If that isn't
   # wt++ (the user is in another app, a game is fullscreen), stop rather
   # than type into it or capture it.
-  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'run:*' -and $s -notin @('alive', 'kill', 'resetdefault') -and $s -notlike 'others:*' -and $s -notlike 'smove:*' -and $s -notlike 'shotall:*' -and $s -notlike 'filedrop:*' -and $s -notlike 'shotrect:*') {
+  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'run:*' -and $s -notin @('alive', 'kill', 'resetdefault', 'fgother', 'fgcheck') -and $s -notlike 'others:*' -and $s -notlike 'smove:*' -and $s -notlike 'shotall:*' -and $s -notlike 'filedrop:*' -and $s -notlike 'shotrect:*') {
     $fg = [W]::GetForegroundWindow(); [uint32]$fgPid = 0; [W]::GetWindowThreadProcessId($fg, [ref]$fgPid) | Out-Null
     if ($fgPid -ne $p.Id) {
-      "ABORTED at '$s': another app is in the foreground"
+      "ABORTED at '$s': another app is in the foreground ($((Get-Process -Id $fgPid -ErrorAction SilentlyContinue).ProcessName))"
       if (-not $p.HasExited) { Stop-Process -Id $p.Id }
       exit 2
     }
@@ -228,6 +228,23 @@ foreach ($s in $Steps) {
     $k = 'HKCU:\Console\%%Startup'
     Remove-ItemProperty -LiteralPath $k -Name DelegationConsole, DelegationTerminal -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath 'HKCU:\Software\Classes\CLSID\{1B6AF1D5-8948-4A5C-B2BB-7F7BF27CBA6A}' -Recurse -ErrorAction SilentlyContinue
+  }
+  elseif ($s -eq 'fgother') {
+    # Put another app in front (a small window of this script, on the
+    # secondary monitor), the way the Start menu or Explorer is when the
+    # user starts a program.
+    $screen = [Windows.Forms.Screen]::AllScreens | Sort-Object Primary | Select-Object -First 1
+    $script:other = New-Object Windows.Forms.Form
+    $script:other.StartPosition = 'Manual'; $script:other.Text = 'other app'
+    $script:other.Location = New-Object Drawing.Point(($screen.Bounds.X + 200), 600); $script:other.Size = New-Object Drawing.Size(300, 150)
+    $script:other.Show(); $script:other.Activate(); [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 500
+  }
+  elseif ($s -eq 'fgcheck') {
+    # Which process owns the foreground window now.
+    [Windows.Forms.Application]::DoEvents()
+    $fg = [W]::GetForegroundWindow(); [uint32]$fgPid = 0; [W]::GetWindowThreadProcessId($fg, [ref]$fgPid) | Out-Null
+    "foreground: $(if ($fgPid -eq $p.Id) { 'wt++' } else { (Get-Process -Id $fgPid).ProcessName })"
+    if ($script:other) { $script:other.Close(); $script:other = $null }
   }
   elseif ($s -eq 'alive') {
     # Whether the program from run: is still running.

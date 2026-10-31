@@ -167,6 +167,45 @@ pub fn work_area_at(x: i32, y: i32) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// Bring `window` to the front and focus it, even though this process isn't
+/// the foreground one: a console handed over by Windows (wt++ as the default
+/// terminal) arrives while the Start menu or Explorer has the foreground, and
+/// Windows would otherwise open the new window behind it. Attaching to the
+/// foreground thread's input is what lets us take over.
+#[cfg(windows)]
+pub fn bring_to_front(window: &slint::Window) {
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SW_SHOW, SetForegroundWindow, ShowWindow,
+        };
+        let hwnd = window.with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get() as windows_sys::Win32::Foundation::HWND),
+            _ => None,
+        });
+        let Some(Some(hwnd)) = hwnd else { return };
+        // SAFETY: plain window/thread calls on live handles; the input
+        // attachment is undone before returning.
+        unsafe {
+            let foreground = GetForegroundWindow();
+            if foreground == hwnd {
+                return;
+            }
+            let theirs = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
+            let ours = GetCurrentThreadId();
+            let attached = theirs != 0 && theirs != ours && AttachThreadInput(ours, theirs, 1) != 0;
+            ShowWindow(hwnd, SW_SHOW);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            if attached {
+                AttachThreadInput(ours, theirs, 0);
+            }
+        }
+    }
+}
+
 /// A floating, see-through snapshot of a window that follows the pointer
 /// while a tab is dragged out of it (like WT's tab drag preview). It never
 /// takes focus or the mouse. Windows only; a no-op elsewhere.
