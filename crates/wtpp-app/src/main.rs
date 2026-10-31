@@ -632,11 +632,7 @@ fn create_window(
     wire_window(&ui, id, custom_titlebar)?;
     ui.show()?;
     #[cfg(target_os = "macos")]
-    {
-        // winit defines its view class with the first window.
-        macos_titlebar_clicks();
-        macos_allow_input_method(ui.window());
-    }
+    macos_allow_input_method(ui.window());
     Ok(id)
 }
 
@@ -663,6 +659,9 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
             // Defer: the notifier runs mid-render, where touching UI
             // properties (or resizing the frame) isn't allowed.
             slint::invoke_from_event_loop(move || {
+                // winit has defined its view class by now (first window).
+                #[cfg(target_os = "macos")]
+                macos_titlebar_clicks();
                 with_window(id, |app| {
                     if custom_titlebar {
                         app.install_titlebar();

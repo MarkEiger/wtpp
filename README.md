@@ -21,8 +21,9 @@ and "Open in wt++" to Explorer's folder right-click menu.
 right-click it and choose **Open** (or run
 `xattr -dr com.apple.quarantine /Applications/wt++.app`).
 
-**Linux** (x86-64): unpack `wtpp-<version>-linux-x64.tar.gz` and run
-`sh install.sh`: it installs `~/.local/bin/wtpp` and adds wt++ to the app menu.
+**Linux** (x86-64, glibc 2.39+: Ubuntu 24.04, Debian 13, Fedora 40 or newer):
+unpack `wtpp-<version>-linux-x64.tar.gz` and run `sh install.sh`: it installs
+`~/.local/bin/wtpp` and adds wt++ to the app menu.
 
 ## Highlights
 
