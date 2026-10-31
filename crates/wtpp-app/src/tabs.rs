@@ -1,10 +1,11 @@
-//! Tab strip interactions: the right-click menu, renaming and reordering.
+//! Tab strip interactions: the right-click menu, renaming, reordering and
+//! dragging tabs between windows.
+
+use slint::ComponentHandle;
 
 use crate::app::{App, TabKind};
 
-/// Start of the tab strip (the UI passes strip-relative positions) and the
-/// gap between tabs, in logical pixels.
-const ROW_START: f32 = 0.0;
+/// The gap between tabs, in logical pixels.
 const TAB_GAP: f32 = 2.0;
 
 impl App {
@@ -43,7 +44,7 @@ impl App {
             "close" => self.close_tab(index),
             "move-to-new-window" => {
                 if let Some(moved) = self.take_tab(index) {
-                    crate::request_window(Some(moved));
+                    crate::request_window(Some(moved), crate::Placement::Default);
                 }
             }
             color if color.starts_with("color:") => {
@@ -67,13 +68,49 @@ impl App {
         self.refresh_chrome();
     }
 
-    /// A tab is being dragged; `x` is the pointer in window coordinates and
-    /// `tab_width` the width of one tab.
-    pub fn tab_drag(&mut self, index: usize, x: f32, tab_width: f32) {
+    /// A tab is being dragged: `strip_x` is the pointer within the tab strip,
+    /// `tab_width` the width of one tab, (`x`, `y`) the pointer in the
+    /// window. Within the tab row it reorders tabs. Pulled out of the row it
+    /// lifts off, to be dropped on another window's tab row or anywhere else
+    /// for a new window; the only tab in a window carries the window along.
+    pub fn tab_drag(&mut self, index: usize, strip_x: f32, tab_width: f32, x: f32, y: f32) {
         let current = *self.dragging_tab.get_or_insert(index);
         let n = self.tabs.len();
-        let slot = ((x - ROW_START) / (tab_width + TAB_GAP)).floor().clamp(0.0, (n - 1) as f32) as usize;
-        if slot == current || current >= n {
+        if current >= n {
+            return;
+        }
+        let movable = matches!(self.tabs[current].kind, TabKind::Terminal { .. });
+        let in_row = self.in_tab_row(x, y);
+        if self.tab_lift.is_none() && movable && (n == 1 || !in_row) {
+            // Hold the window by the tab: the pointer stays where it is
+            // across the tab, centred in the tab row.
+            self.tab_lift = Some(TabLift { grab: (x, self.ui().get_titlebar_height() / 2.0), screen: None });
+            self.ui().set_tab_lifted(true);
+        }
+        if self.tab_lift.is_some() {
+            let screen = crate::platform::cursor_pos().or_else(|| window_to_screen(self.ui().window(), x, y));
+            let Some(lift) = self.tab_lift.as_mut() else { return };
+            lift.screen = screen;
+            let grab = lift.grab;
+            let target = crate::tab_drop_target(self.id, screen);
+            if n == 1 {
+                if target.is_none()
+                    && let Some(screen) = screen
+                {
+                    self.move_window_to(screen, grab);
+                }
+                return;
+            }
+            if !(in_row && target.is_none()) {
+                return;
+            }
+            // Back in our own tab row: reorder again.
+            self.tab_lift = None;
+            self.ui().set_tab_lifted(false);
+        }
+
+        let slot = (strip_x / (tab_width + TAB_GAP)).floor().clamp(0.0, (n - 1) as f32) as usize;
+        if slot == current {
             return;
         }
         let tab = self.tabs.remove(current);
@@ -85,6 +122,81 @@ impl App {
     }
 
     pub fn tab_drag_end(&mut self) {
-        self.dragging_tab = None;
+        let index = self.dragging_tab.take();
+        let Some(lift) = self.tab_lift.take() else { return };
+        self.ui().set_tab_lifted(false);
+        let Some(index) = index else { return };
+        let screen = crate::platform::cursor_pos().or(lift.screen);
+        let target = crate::tab_drop_target(self.id, screen);
+        crate::tab_drop_target(self.id, None);
+        match target {
+            Some((window, slot)) => {
+                if let Some(moved) = self.take_tab(index) {
+                    crate::give_tab(window, moved, slot);
+                }
+            }
+            // The only tab carried its window here already.
+            None if self.tabs.len() == 1 => {}
+            None => {
+                let placement = screen.map(|screen| self.new_window_placement(screen));
+                if let Some(moved) = self.take_tab(index) {
+                    crate::request_window(Some(moved), placement.unwrap_or(crate::Placement::Default));
+                }
+            }
+        }
     }
+
+    /// Whether (`x`, `y`) is in (or just around) the tab row.
+    fn in_tab_row(&self, x: f32, y: f32) -> bool {
+        const SLACK: f32 = 24.0;
+        let ui = self.ui();
+        let width = ui.window().size().width as f32 / ui.window().scale_factor();
+        (-SLACK..=ui.get_titlebar_height() + SLACK).contains(&y) && (-SLACK..=width + SLACK).contains(&x)
+    }
+
+    /// Move the window so that window point `grab` is at `screen`.
+    fn move_window_to(&self, (sx, sy): (i32, i32), grab: (f32, f32)) {
+        let ui = self.ui();
+        let window = ui.window();
+        if window.is_maximized() {
+            window.set_maximized(false);
+        }
+        let (Some((left, top)), outer) = (crate::client_origin(window), window.position()) else { return };
+        let scale = window.scale_factor();
+        // The frame around the client area (invisible resize borders).
+        let (frame_x, frame_y) = (left - outer.x, top - outer.y);
+        let x = sx - (grab.0 * scale).round() as i32 - frame_x;
+        let y = sy - (grab.1 * scale).round() as i32 - frame_y;
+        window.set_position(slint::PhysicalPosition::new(x, y));
+    }
+
+    /// A tab torn off at `screen` opens in a window of this one's size, with
+    /// the tab under the pointer.
+    fn new_window_placement(&self, (sx, sy): (i32, i32)) -> crate::Placement {
+        let ui = self.ui();
+        let window = ui.window();
+        let scale = window.scale_factor();
+        let outer = window.position();
+        let (frame_x, frame_y) = crate::client_origin(window).map_or((0, 0), |(l, t)| (l - outer.x, t - outer.y));
+        let grab_x = ((ui.get_tabs_left() + 60.0) * scale).round() as i32;
+        let grab_y = (ui.get_titlebar_height() / 2.0 * scale).round() as i32;
+        let position = slint::PhysicalPosition::new(sx - grab_x - frame_x, sy - grab_y - frame_y);
+        crate::Placement::At(position, window.size())
+    }
+}
+
+/// A tab dragged out of the tab row.
+pub struct TabLift {
+    /// The point of the window held under the pointer (window coordinates).
+    grab: (f32, f32),
+    /// The pointer on screen, last we knew.
+    screen: Option<(i32, i32)>,
+}
+
+/// A window point in screen coordinates, from the window's position (when
+/// the OS can't tell us where the pointer is).
+fn window_to_screen(window: &slint::Window, x: f32, y: f32) -> Option<(i32, i32)> {
+    let (left, top) = crate::client_origin(window)?;
+    let scale = window.scale_factor();
+    Some((left + (x * scale).round() as i32, top + (y * scale).round() as i32))
 }

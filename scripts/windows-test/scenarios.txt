@@ -38,3 +38,7 @@ shortcuts-menu: sleep:600|^+ |sleep:600|shot:menu|click:370,221|sleep:1500|shot:
 layout-shortcuts: sleep:600|^+=|sleep:1200|layout:0419|chord:41|chord:44|sleep:400|shot:typed|chord:11,10,57|sleep:600|shot:closed|layout:0409
 layout-ctrl-c: sleep:600|sleep 30{ENTER}|sleep:300|layout:0419|chord:11,43|sleep:600|shot:interrupted|layout:0409
 switch-tab: sleep:600|^+t|sleep:800|%1|sleep:400|shot:first
+single-instance: sleep:600|launch|windows
+tab-tearoff: sleep:600|^+t|sleep:900|setrect:100,100,900,600|sdrag:450,122,600,520|windows|shotall:after
+tab-merge: sleep:600|^+n|sleep:2000|tile|sdrag:110,82,1100,82|windows|shotall:after
+tab-between: sleep:600|^+t|sleep:900|^+n|sleep:2000|tile|sdrag:1250,82,300,82|windows|shotall:after

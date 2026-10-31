@@ -47,6 +47,10 @@ public class W {
 $out = "$env:TEMP\wtpp-test"
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $env:WTPP_LOG_FILE = "$out\wtpp.log"
+# A separate wt++ instance: otherwise this launch would hand its window to
+# the user's running wt++.
+$env:WTPP_INSTANCE = 'test'
+
 # WTPP_EXE runs another build (e.g. while the installed one is in use).
 $exe = if ($env:WTPP_EXE) { $env:WTPP_EXE } else { "$env:LOCALAPPDATA\Programs\wtpp\wtpp.exe" }
 if ($ArgList) { $p = Start-Process $exe -ArgumentList $ArgList -WorkingDirectory $env:USERPROFILE -PassThru }
@@ -70,7 +74,7 @@ foreach ($s in $Steps) {
   # Keys, clicks and screenshots go to whatever is in front. If that isn't
   # wt++ (the user is in another app, a game is fullscreen), stop rather
   # than type into it or capture it.
-  if ($s -notlike 'sleep:*' -and $s -ne 'rect' -and $s -ne 'windows') {
+  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch')) {
     $fg = [W]::GetForegroundWindow(); [uint32]$fgPid = 0; [W]::GetWindowThreadProcessId($fg, [ref]$fgPid) | Out-Null
     if ($fgPid -ne $p.Id) {
       "ABORTED at '$s': another app is in the foreground"
@@ -110,6 +114,35 @@ foreach ($s in $Steps) {
   elseif ($s -like 'clip:*') {
     # clip:TEXT puts TEXT on the clipboard (\n becomes a newline)
     Set-Clipboard -Value ($s.Substring(5) -replace '\\n', "`n")
+  }
+  elseif ($s -eq 'tile') {
+    # Put this process's windows side by side, most recent on the left.
+    $ws = [W]::Windows([uint32]$p.Id); $k = 0
+    foreach ($h in $ws) { [W]::MoveWindow($h, 40 + $k * 860, 60, 820, 520, $true) | Out-Null; $k++ }
+    Start-Sleep -Milliseconds 600
+  }
+  elseif ($s -like 'sdrag:*') {
+    # sdrag:x1,y1,x2,y2 drags with the left button in screen coordinates
+    $v = $s.Substring(6).Split(',') | ForEach-Object { [int]$_ }
+    [W]::SetCursorPos($v[0], $v[1]) | Out-Null; Start-Sleep -Milliseconds 80; [W]::mouse_event(2,0,0,0,0)
+    for ($k = 1; $k -le 30; $k++) { [W]::SetCursorPos($v[0] + ($v[2]-$v[0])*$k/30, $v[1] + ($v[3]-$v[1])*$k/30) | Out-Null; Start-Sleep -Milliseconds 25 }
+    Start-Sleep -Milliseconds 300; [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 1200
+  }
+  elseif ($s -like 'shotall:*') {
+    # A screenshot of each of this process's windows.
+    $k = 0
+    foreach ($h in [W]::Windows([uint32]$p.Id)) {
+      $r = New-Object W+RECT; [W]::GetWindowRect($h, [ref]$r) | Out-Null
+      $bmp = New-Object Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
+      $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+      $bmp.Save("$out\$($s.Substring(8))-$k.png"); $g.Dispose(); $bmp.Dispose(); $k++
+    }
+  }
+  elseif ($s -eq 'launch') {
+    # Start wt++ again: it should hand over to this instance and exit.
+    $q = Start-Process $exe -WorkingDirectory $env:USERPROFILE -PassThru
+    if ($q.WaitForExit(5000)) { "second launch exited (code $($q.ExitCode))" } else { "second launch still running"; Stop-Process -Id $q.Id }
+    Start-Sleep -Milliseconds 1500
   }
   elseif ($s -like 'layout:*') {
     # layout:040D switches the window's keyboard layout (0409 = US English)

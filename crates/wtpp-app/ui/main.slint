@@ -156,6 +156,8 @@ component TabItem inherits Rectangle {
     in property <bool> has-color;
     in property <bool> bell;
     in property <bool> window-active: true;
+    // Dragged out of the tab row, on its way to another window.
+    in property <bool> lifted;
     in property <image> icon;
     in property <string> icon-text;
     // 0 equal, 1 title length, 2 compact (inactive tabs show only the icon).
@@ -165,8 +167,8 @@ component TabItem inherits Rectangle {
     callback close;
     callback rename();
     callback renamed(string);
-    // Pointer x in window coordinates while dragging the tab.
-    callback drag(length);
+    // Pointer position in window coordinates while dragging the tab.
+    callback drag(length, length);
     callback drag-end();
     // An entry of the right-click menu.
     callback menu(string);
@@ -178,6 +180,7 @@ component TabItem inherits Rectangle {
     max-width: icon-only ? 40px : width-mode == 1 ? 400px : 240px;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
+    opacity: lifted ? 0.45 : 1;
     background: has-color
         ? (active ? tab-color : ta.has-hover ? tab-color.darker(20%) : tab-color.darker(40%))
         : (active ? Colors.terminal : ta.has-hover ? Colors.hover : transparent);
@@ -201,7 +204,7 @@ component TabItem inherits Rectangle {
         moved => {
             if self.pressed && (root.dragging || abs(self.mouse-x - self.pressed-x) > 8px) {
                 root.dragging = true;
-                root.drag(self.absolute-position.x + self.mouse-x);
+                root.drag(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
         double-clicked => {
@@ -538,6 +541,15 @@ export component MainWindow inherits Window {
     in property <bool> window-maximized;
     in property <bool> window-active: true;
     out property <length> titlebar-height: titlebar.height;
+    // Where the first tab starts (window coordinates, scrolling included) and
+    // the distance from one tab to the next: where a tab dragged in from
+    // another window would land.
+    out property <length> tabs-left: tab-flick.absolute-position.x + tab-flick.content-x;
+    out property <length> tab-pitch: root.tabs.length > 0 ? (min(tabs-layout.width, tabs-layout.preferred-width) + 2px) / root.tabs.length : 0px;
+    // A tab from another window would be inserted before this one (-1: none).
+    in property <int> drop-index: -1;
+    // The active tab is being dragged out of this window.
+    in property <bool> tab-lifted;
     // Where the empty (draggable) part of the tab row starts, and where the
     // caption buttons start, in window coordinates.
     out property <length> drag-start: dropdown.absolute-position.x + dropdown.width + 4px;
@@ -569,7 +581,9 @@ export component MainWindow inherits Window {
     // An entry of a pane's right-click menu.
     callback pane-menu(int, string);
     callback tab-renamed(int, string);
-    callback tab-drag(int, length, length);
+    // Tab index, pointer x within the tab strip, tab width, pointer x and y
+    // in the window.
+    callback tab-drag(int, length, length, length, length);
     callback tab-drag-end();
     // Scrollbar dragged: pane index, thumb top as a fraction of the track.
     callback pane-scrollbar(int, float);
@@ -692,6 +706,7 @@ export component MainWindow inherits Window {
                                 icon-text: tab.icon-text;
                                 window-active: root.window-active;
                                 width-mode: root.tab-width-mode;
+                                lifted: root.tab-lifted && tab.active;
                                 clicked => {
                                     root.select-tab(i);
                                     if !tab.renaming {
@@ -708,9 +723,9 @@ export component MainWindow inherits Window {
                                     root.tab-renamed(i, t);
                                     keys.focus();
                                 }
-                                drag(x) => {
+                                drag(x, y) => {
                                     // Position within the scrolled strip of tabs.
-                                    root.tab-drag(i, x - tab-flick.absolute-position.x - tab-flick.content-x, self.width);
+                                    root.tab-drag(i, x - tab-flick.absolute-position.x - tab-flick.content-x, self.width, x, y);
                                 }
                                 drag-end => {
                                     root.tab-drag-end();
@@ -719,6 +734,16 @@ export component MainWindow inherits Window {
                                     root.tab-menu(i, action);
                                 }
                             }
+                        }
+
+                        // Where a tab dragged from another window will land.
+                        if root.drop-index >= 0: Rectangle {
+                            x: root.drop-index * root.tab-pitch - 2px;
+                            y: 4px;
+                            width: 3px;
+                            height: parent.height - 8px;
+                            border-radius: 1.5px;
+                            background: Colors.accent;
                         }
                     }
 

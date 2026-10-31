@@ -4,6 +4,7 @@
 mod app;
 mod cli;
 mod find;
+mod instance;
 mod keys;
 mod mark;
 mod palette;
@@ -37,6 +38,8 @@ struct WindowEntry {
 
 thread_local! {
     static WINDOWS: RefCell<Vec<Option<Rc<WindowEntry>>>> = const { RefCell::new(Vec::new()) };
+    /// Windows by how recently they were focused, most recent first.
+    static FOCUS_ORDER: RefCell<Vec<WindowId>> = const { RefCell::new(Vec::new()) };
     /// The shared font database and monospace families, once loaded.
     static FONTS: RefCell<Option<(wtpp_render::SharedFonts, Vec<String>)>> = const { RefCell::new(None) };
 }
@@ -75,10 +78,80 @@ fn for_each_window(f: impl Fn(&mut App)) {
     }
 }
 
+fn window_focused(id: WindowId) {
+    FOCUS_ORDER.with(|f| {
+        let mut f = f.borrow_mut();
+        f.retain(|&w| w != id);
+        f.insert(0, id);
+    });
+}
+
+/// Top-left of a window's client area on screen, in physical pixels.
+pub(crate) fn client_origin(window: &slint::Window) -> Option<(i32, i32)> {
+    use slint::winit_030::WinitWindowAccessor;
+    window.with_winit_window(|w| w.inner_position().ok().map(|p| (p.x, p.y))).flatten()
+}
+
+/// Where in `ui`'s tab row a tab dropped at `screen` would go: the index
+/// to insert it at, or `None` if `screen` isn't over the tab row.
+fn tab_row_slot(ui: &MainWindow, (sx, sy): (i32, i32)) -> Option<usize> {
+    let window = ui.window();
+    if !window.is_visible() || window.is_minimized() {
+        return None;
+    }
+    let (left, top) = client_origin(window)?;
+    let scale = window.scale_factor();
+    let (x, y) = ((sx - left) as f32 / scale, (sy - top) as f32 / scale);
+    let width = window.size().width as f32 / scale;
+    if x < 0.0 || x > width || y < -8.0 || y > ui.get_titlebar_height() + 8.0 {
+        return None;
+    }
+    let n = slint::Model::row_count(&ui.get_tabs());
+    let pitch = ui.get_tab_pitch();
+    let slot = if pitch > 0.0 { ((x - ui.get_tabs_left()) / pitch).round().clamp(0.0, n as f32) as usize } else { n };
+    Some(slot)
+}
+
+/// A tab from window `source` is being dragged over `screen`: the window
+/// whose tab row is there (the most recently focused one if they overlap)
+/// and the slot it would go in. Marks that slot and clears the marker
+/// everywhere else; `None` for `screen` clears them all.
+pub(crate) fn tab_drop_target(source: WindowId, screen: Option<(i32, i32)>) -> Option<(WindowId, usize)> {
+    let mut order = FOCUS_ORDER.with(|f| f.borrow().clone());
+    let rest: Vec<_> = window_ids().into_iter().filter(|id| !order.contains(id)).collect();
+    order.extend(rest);
+    let target = screen.and_then(|screen| {
+        order
+            .into_iter()
+            .filter(|&id| id != source)
+            .find_map(|id| entry(id).and_then(|e| tab_row_slot(&e.ui, screen)).map(|slot| (id, slot)))
+    });
+    for id in window_ids() {
+        if let Some(e) = entry(id) {
+            e.ui.set_drop_index(match target {
+                Some((t, slot)) if t == id => slot as i32,
+                _ => -1,
+            });
+        }
+    }
+    target
+}
+
+/// Put a tab dragged from another window into window `target` at `slot`,
+/// and bring that window to the front.
+pub(crate) fn give_tab(target: WindowId, moved: app::MovedTab, slot: usize) {
+    with_window(target, |app| app.adopt_tab_at(moved, slot));
+    if let Some(e) = entry(target) {
+        use slint::winit_030::WinitWindowAccessor;
+        e.ui.window().with_winit_window(|w| w.focus_window());
+    }
+}
+
 /// Close a window (after the current event). The app exits with the last one.
 pub fn close_window(id: WindowId) {
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         let Some(entry) = WINDOWS.with(|w| w.borrow_mut().get_mut(id).and_then(Option::take)) else { return };
+        FOCUS_ORDER.with(|f| f.borrow_mut().retain(|&w| w != id));
         let last = window_ids().is_empty();
         if last && entry.app.try_borrow().is_ok_and(|app| app.settings.remember_window_bounds) {
             window_state::save(entry.ui.window());
@@ -91,13 +164,23 @@ pub fn close_window(id: WindowId) {
     });
 }
 
+/// Where a new window opens.
+pub(crate) enum Placement {
+    /// The app's first window: configured or remembered bounds.
+    First,
+    /// Configured size, placed by the OS.
+    Default,
+    /// A tab dropped outside any window: there, at its old window's size.
+    At(slint::PhysicalPosition, slint::PhysicalSize),
+}
+
 /// Open a new window (after the current event), optionally with a tab moved
 /// from another window.
-pub(crate) fn request_window(moved: Option<app::MovedTab>) {
+pub(crate) fn request_window(moved: Option<app::MovedTab>, placement: Placement) {
     // A timer rather than invoke_from_event_loop: the moved tab isn't Send.
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         let settings = wtpp_config::Settings::load(&wtpp_config::settings::settings_path()).0;
-        if let Err(e) = create_window(settings, None, moved, false) {
+        if let Err(e) = create_window(settings, None, moved, placement) {
             log::error!("couldn't open a window: {e:#}");
         }
     });
@@ -274,6 +357,17 @@ fn main() -> anyhow::Result<()> {
 
     let started = std::time::Instant::now();
 
+    // A wt++ is already running: it opens the window, so tabs can be
+    // dragged between all windows.
+    let request = instance::Request { args: std::env::args().skip(1).collect(), cwd: std::env::current_dir().ok() };
+    let listener = match instance::claim(&request) {
+        instance::Claim::Forwarded => {
+            log::info!("handed the command line to the running wt++");
+            return Ok(());
+        }
+        instance::Claim::Primary(listener) => listener,
+    };
+
     // Settings are one small file: read them now so the window opens at
     // the right size and mode, with the chosen graphics API.
     let settings_path = wtpp_config::settings::settings_path();
@@ -302,11 +396,8 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    let args = cli::Args::parse(std::env::args().skip(1)).unwrap_or_else(|e| {
-        log::error!("{e}");
-        cli::Args::default()
-    });
-    create_window(settings, Some(args), None, true)?;
+    create_window(settings, Some(parse_args(request)), None, Placement::First)?;
+    listener.serve(on_instance_request);
     log::info!("window created after {:?}", started.elapsed());
     let _watcher = watch_settings(&settings_path);
 
@@ -321,6 +412,29 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Command-line arguments; a relative `-d` is relative to the launching
+/// process's directory.
+fn parse_args(request: instance::Request) -> cli::Args {
+    let mut args = cli::Args::parse(request.args).unwrap_or_else(|e| {
+        log::error!("{e}");
+        cli::Args::default()
+    });
+    if let (Some(dir), Some(cwd)) = (&args.starting_directory, &request.cwd)
+        && dir.is_relative()
+    {
+        args.starting_directory = Some(cwd.join(dir));
+    }
+    args
+}
+
+/// wt++ was launched again: open its window here.
+fn on_instance_request(request: instance::Request) {
+    let settings = wtpp_config::Settings::load(&wtpp_config::settings::settings_path()).0;
+    if let Err(e) = create_window(settings, Some(parse_args(request)), None, Placement::Default) {
+        log::error!("couldn't open a window: {e:#}");
+    }
+}
+
 /// The background thread finished loading fonts and finding shells.
 fn on_assets_loaded(fonts: wtpp_render::FontSystem, discovered: Vec<wtpp_session::Profile>) {
     let families = wtpp_render::monospace_families(&fonts);
@@ -333,18 +447,23 @@ fn on_assets_loaded(fonts: wtpp_render::FontSystem, discovered: Vec<wtpp_session
     }
 }
 
-/// Create and show a window. The app's `first` window opens at the
-/// configured or remembered size and gets the command-line arguments.
+/// Create and show a window, opening `args` (a command line) or `moved` (a
+/// tab from another window) in it.
 fn create_window(
     settings: wtpp_config::Settings,
     args: Option<cli::Args>,
     moved: Option<app::MovedTab>,
-    first: bool,
+    placement: Placement,
 ) -> anyhow::Result<WindowId> {
     let ui = MainWindow::new()?;
     let id = WINDOWS.with(|w| w.borrow().len());
     let custom_titlebar = cfg!(windows) && settings.show_tabs_in_titlebar;
-    let launch_size = apply_launch_settings(&ui, &settings, first);
+    let mut launch_size = apply_launch_settings(&ui, &settings, matches!(placement, Placement::First));
+    if let Placement::At(position, size) = placement {
+        ui.window().set_position(position);
+        launch_size = slint::WindowSize::Physical(size);
+        ui.window().set_size(launch_size.clone());
+    }
     let mut app = App::new(&ui, settings, wtpp_config::settings::settings_path(), id);
     app.startup_args = args;
     app.launch_size = Some(launch_size);
@@ -424,8 +543,8 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
     ui.on_tab_renamed(move |i, name| {
         with_window(id, |app| app.tab_renamed(i.max(0) as usize, &name));
     });
-    ui.on_tab_drag(move |i, x, width| {
-        with_window(id, |app| app.tab_drag(i.max(0) as usize, x, width));
+    ui.on_tab_drag(move |i, strip_x, width, x, y| {
+        with_window(id, |app| app.tab_drag(i.max(0) as usize, strip_x, width, x, y));
     });
     ui.on_tab_drag_end(move || {
         with_window(id, |app| app.tab_drag_end());
@@ -476,6 +595,9 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
             if let WindowEvent::Focused(active) = event {
                 let active = *active;
                 slint::invoke_from_event_loop(move || {
+                    if active {
+                        window_focused(id);
+                    }
                     with_window(id, |app| app.on_window_focus(active));
                 })
                 .ok();

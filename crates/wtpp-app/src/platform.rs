@@ -129,6 +129,20 @@ pub fn physical_key_char() -> Option<char> {
     None
 }
 
+/// The mouse pointer in screen coordinates (physical pixels), where the OS
+/// tells us. Elsewhere callers work it out from the window position.
+pub fn cursor_pos() -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        let mut p = POINT { x: 0, y: 0 };
+        // SAFETY: `p` is a valid out pointer.
+        (unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 #[cfg(windows)]
 mod imp {
     use std::path::PathBuf;

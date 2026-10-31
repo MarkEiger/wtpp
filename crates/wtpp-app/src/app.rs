@@ -127,6 +127,8 @@ pub struct App {
     pub(crate) cursor_on: bool,
     /// Index of the tab being dragged in the tab row.
     pub(crate) dragging_tab: Option<usize>,
+    /// The dragged tab left the tab row (see tabs.rs).
+    pub(crate) tab_lift: Option<crate::tabs::TabLift>,
     /// Command palette entries currently listed.
     pub(crate) palette: Vec<Action>,
     pub(crate) find: crate::find::FindState,
@@ -192,6 +194,7 @@ impl App {
             draft: None,
             cursor_on: true,
             dragging_tab: None,
+            tab_lift: None,
             palette: Vec::new(),
             find: Default::default(),
             dialog: None,
@@ -693,12 +696,19 @@ impl App {
     }
 
     pub(crate) fn adopt_tab(&mut self, moved: MovedTab) {
+        self.adopt_tab_at(moved, usize::MAX);
+    }
+
+    /// Add a tab from another window before tab `slot` (or last), and
+    /// select it.
+    pub(crate) fn adopt_tab_at(&mut self, moved: MovedTab, slot: usize) {
         for (id, pane) in moved.panes {
             self.ensure_icon(&pane.profile);
             self.panes.insert(id, pane);
         }
-        self.tabs.push(moved.tab);
-        self.active = self.tabs.len() - 1;
+        let slot = slot.min(self.tabs.len());
+        self.tabs.insert(slot, moved.tab);
+        self.active = slot;
         self.relayout();
     }
 
@@ -1278,7 +1288,7 @@ impl App {
             }
             Action::OpenNewTabDropdown => self.ui().invoke_open_new_tab_menu(),
             Action::OpenSettings => self.open_settings(),
-            Action::NewWindow => crate::request_window(None),
+            Action::NewWindow => crate::request_window(None, crate::Placement::Default),
             Action::MarkMode => self.toggle_mark_mode(),
             Action::SelectAll => self.select_all(),
             Action::TogglePaneZoom => {
