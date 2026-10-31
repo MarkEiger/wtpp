@@ -21,6 +21,10 @@ public class W {
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int a, out RECT r, int n);
+  // The visible frame, without the invisible resize borders (which would
+  // capture whatever is behind the window).
+  public static RECT Frame(IntPtr h) { RECT r; if (DwmGetWindowAttribute(h, 9, out r, 16) != 0) GetWindowRect(h, out r); return r; }
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, int e);
@@ -59,13 +63,25 @@ while ($p.MainWindowHandle -eq 0 -and $sw.ElapsedMilliseconds -lt 10000) { Start
 "window visible after $($sw.ElapsedMilliseconds) ms"
 while ($p.MainWindowTitle -in @('', 'wt++') -and $sw.ElapsedMilliseconds -lt 15000) { Start-Sleep -Milliseconds 20; $p.Refresh() }
 "shell tab ready after $($sw.ElapsedMilliseconds) ms (title: $($p.MainWindowTitle))"
+# Run on the secondary monitor if there is one, keeping the main one free.
+# (Once started: wt++ sizes its window while it starts up.)
+$screen = [Windows.Forms.Screen]::AllScreens | Sort-Object Primary | Select-Object -First 1
+if (-not $screen.Primary) {
+  for ($try = 0; $try -lt 5; $try++) {
+    $r = New-Object W+RECT; [W]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+    if ($r.L -ge $screen.Bounds.X) { break }
+    [W]::MoveWindow($p.MainWindowHandle, $screen.Bounds.X + 40, 100, [Math]::Min($r.R - $r.L, 1800), [Math]::Min($r.B - $r.T, 900), $true) | Out-Null
+    Start-Sleep -Milliseconds 300
+  }
+}
 $shell = New-Object -ComObject WScript.Shell
-function Shot($name) {
-  $r = New-Object W+RECT; [W]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+function ShotWindow($h, $name) {
+  $r = [W]::Frame($h)
   $bmp = New-Object Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
   $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
   $bmp.Save("$out\$name.png"); $g.Dispose(); $bmp.Dispose()
 }
+function Shot($name) { ShotWindow $p.MainWindowHandle $name }
 Start-Sleep -Milliseconds 800
 [W]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
 Start-Sleep -Milliseconds 300
@@ -74,7 +90,7 @@ foreach ($s in $Steps) {
   # Keys, clicks and screenshots go to whatever is in front. If that isn't
   # wt++ (the user is in another app, a game is fullscreen), stop rather
   # than type into it or capture it.
-  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch')) {
+  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'shotall:*') {
     $fg = [W]::GetForegroundWindow(); [uint32]$fgPid = 0; [W]::GetWindowThreadProcessId($fg, [ref]$fgPid) | Out-Null
     if ($fgPid -ne $p.Id) {
       "ABORTED at '$s': another app is in the foreground"
@@ -117,8 +133,11 @@ foreach ($s in $Steps) {
   }
   elseif ($s -eq 'tile') {
     # Put this process's windows side by side, most recent on the left.
+    # On the secondary monitor if there is one (the user may be using the
+    # main one): left edge + 40, then + 940.
+    $screen = [Windows.Forms.Screen]::AllScreens | Sort-Object Primary | Select-Object -First 1
     $ws = [W]::Windows([uint32]$p.Id); $k = 0
-    foreach ($h in $ws) { [W]::MoveWindow($h, 40 + $k * 860, 60, 820, 520, $true) | Out-Null; $k++ }
+    foreach ($h in $ws) { [W]::MoveWindow($h, $screen.Bounds.X + 40 + $k * 940, 100, 900, 520, $true) | Out-Null; $k++ }
     Start-Sleep -Milliseconds 600
   }
   elseif ($s -like 'sdrag:*') {
@@ -131,13 +150,16 @@ foreach ($s in $Steps) {
   elseif ($s -like 'shotall:*') {
     # A screenshot of each of this process's windows.
     $k = 0
-    foreach ($h in [W]::Windows([uint32]$p.Id)) {
-      $r = New-Object W+RECT; [W]::GetWindowRect($h, [ref]$r) | Out-Null
-      $bmp = New-Object Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
-      $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
-      $bmp.Save("$out\$($s.Substring(8))-$k.png"); $g.Dispose(); $bmp.Dispose(); $k++
-    }
+    foreach ($h in [W]::Windows([uint32]$p.Id)) { ShotWindow $h "$($s.Substring(8))-$k"; $k++ }
   }
+  elseif ($s -like 'shold:*') {
+    # shold:x1,y1,x2,y2 like sdrag, but keeps the button down (until 'sup')
+    $v = $s.Substring(6).Split(',') | ForEach-Object { [int]$_ }
+    [W]::SetCursorPos($v[0], $v[1]) | Out-Null; Start-Sleep -Milliseconds 80; [W]::mouse_event(2,0,0,0,0)
+    for ($k = 1; $k -le 30; $k++) { [W]::SetCursorPos($v[0] + ($v[2]-$v[0])*$k/30, $v[1] + ($v[3]-$v[1])*$k/30) | Out-Null; Start-Sleep -Milliseconds 25 }
+    Start-Sleep -Milliseconds 400
+  }
+  elseif ($s -eq 'sup') { [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 1200 }
   elseif ($s -eq 'launch') {
     # Start wt++ again: it should hand over to this instance and exit.
     $q = Start-Process $exe -WorkingDirectory $env:USERPROFILE -PassThru

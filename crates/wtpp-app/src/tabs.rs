@@ -7,6 +7,9 @@ use crate::app::{App, TabKind};
 
 /// The gap between tabs, in logical pixels.
 const TAB_GAP: f32 = 2.0;
+/// How far below the pointer a dragged window hangs over another window's
+/// tab row, in logical pixels.
+const HANG_BELOW: f32 = 48.0;
 
 impl App {
     pub fn tab_menu(&mut self, index: usize, action: &str) {
@@ -85,7 +88,7 @@ impl App {
             // Hold the window by the tab: the pointer stays where it is
             // across the tab, centred in the tab row.
             self.tab_lift = Some(TabLift { grab: (x, self.ui().get_titlebar_height() / 2.0), screen: None });
-            self.ui().set_tab_lifted(true);
+            self.ui().set_tab_lifted(n > 1);
         }
         if self.tab_lift.is_some() {
             let screen = crate::platform::cursor_pos().or_else(|| window_to_screen(self.ui().window(), x, y));
@@ -94,11 +97,14 @@ impl App {
             let grab = lift.grab;
             let target = crate::tab_drop_target(self.id, screen);
             if n == 1 {
-                if target.is_none()
-                    && let Some(screen) = screen
-                {
-                    self.move_window_to(screen, grab);
+                // Over another window's tab row the window hangs below the
+                // pointer, so that row (and where the tab will go) stays
+                // visible; the tab dims as it's about to leave.
+                let hold = if target.is_some() { (grab.0, -HANG_BELOW) } else { grab };
+                if let Some(screen) = screen {
+                    self.move_window_to(screen, hold);
                 }
+                self.ui().set_tab_lifted(target.is_some());
                 return;
             }
             if !(in_row && target.is_none()) {
@@ -180,8 +186,15 @@ impl App {
         let (frame_x, frame_y) = crate::client_origin(window).map_or((0, 0), |(l, t)| (l - outer.x, t - outer.y));
         let grab_x = ((ui.get_tabs_left() + 60.0) * scale).round() as i32;
         let grab_y = (ui.get_titlebar_height() / 2.0 * scale).round() as i32;
-        let position = slint::PhysicalPosition::new(sx - grab_x - frame_x, sy - grab_y - frame_y);
-        crate::Placement::At(position, window.size())
+        let size = window.size();
+        let (mut x, mut y) = (sx - grab_x - frame_x, sy - grab_y - frame_y);
+        // Keep it on the monitor it was dropped on, clear of the taskbar.
+        if let Some((left, top, right, bottom)) = crate::platform::work_area_at(sx, sy) {
+            let (width, height) = (size.width as i32 + 2 * frame_x, size.height as i32 + frame_y + frame_x);
+            x = x.min(right - width).max(left - frame_x);
+            y = y.min(bottom - height).max(top);
+        }
+        crate::Placement::At(slint::PhysicalPosition::new(x, y), size)
     }
 }
 

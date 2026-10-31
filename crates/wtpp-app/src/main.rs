@@ -168,7 +168,8 @@ pub fn close_window(id: WindowId) {
 pub(crate) enum Placement {
     /// The app's first window: configured or remembered bounds.
     First,
-    /// Configured size, placed by the OS.
+    /// Configured size, cascaded from the most recently focused window (so
+    /// it opens on the monitor you're working on).
     Default,
     /// A tab dropped outside any window: there, at its old window's size.
     At(slint::PhysicalPosition, slint::PhysicalSize),
@@ -447,6 +448,24 @@ fn on_assets_loaded(fonts: wtpp_render::FontSystem, discovered: Vec<wtpp_session
     }
 }
 
+/// Down and to the right of the most recently focused window, like WT;
+/// back to the top-left of its monitor once that would run off the bottom
+/// or right.
+fn cascade_position() -> Option<slint::PhysicalPosition> {
+    let id = FOCUS_ORDER.with(|f| f.borrow().first().copied()).or_else(|| window_ids().first().copied())?;
+    let e = entry(id)?;
+    let window = e.ui.window();
+    let (outer, size) = (window.position(), window.size());
+    let step = (32.0 * window.scale_factor()).round() as i32;
+    let (mut x, mut y) = (outer.x + step, outer.y + step);
+    if let Some((left, top, right, bottom)) = platform::work_area_at(outer.x + size.width as i32 / 2, outer.y + 8) {
+        if x + size.width as i32 > right || y + size.height as i32 > bottom {
+            (x, y) = (left, top);
+        }
+    }
+    Some(slint::PhysicalPosition::new(x, y))
+}
+
 /// Create and show a window, opening `args` (a command line) or `moved` (a
 /// tab from another window) in it.
 fn create_window(
@@ -459,10 +478,18 @@ fn create_window(
     let id = WINDOWS.with(|w| w.borrow().len());
     let custom_titlebar = cfg!(windows) && settings.show_tabs_in_titlebar;
     let mut launch_size = apply_launch_settings(&ui, &settings, matches!(placement, Placement::First));
-    if let Placement::At(position, size) = placement {
-        ui.window().set_position(position);
-        launch_size = slint::WindowSize::Physical(size);
-        ui.window().set_size(launch_size.clone());
+    match placement {
+        Placement::First => {}
+        Placement::Default => {
+            if let Some(position) = cascade_position() {
+                ui.window().set_position(position);
+            }
+        }
+        Placement::At(position, size) => {
+            ui.window().set_position(position);
+            launch_size = slint::WindowSize::Physical(size);
+            ui.window().set_size(launch_size.clone());
+        }
     }
     let mut app = App::new(&ui, settings, wtpp_config::settings::settings_path(), id);
     app.startup_args = args;

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Drag tabs between windows like a browser: a marker shows where the tab
+  will land; drop it outside any window for a new one; drag a window's only
+  tab to move the window, or onto another window to merge them.
+- All windows share one process: launching wt++ again opens a window in the
+  running instance (so any two windows can exchange tabs).
+- New windows open next to the current one, on the same monitor.
+
 ## 0.1.0 — 2026-10-31
 
 First stable release.

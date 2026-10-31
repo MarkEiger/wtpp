@@ -20,6 +20,9 @@
 - [x] Tab color (context menu color picker, `tabColor` per profile)
 - [x] Tabs shrink, then scroll (‹ › buttons) when they overflow the row
 - [x] Multiple windows (`newWindow`, Ctrl+Shift+N), move tab to new window
+- [x] One process for all windows (launching again opens a window in the running wt++)
+- [x] Drag tabs between windows (drop marker), tear off into a new window, drag a lone tab to move/merge its window
+- [x] New windows cascade from the current one, on its monitor
 - [x] Unfocused window look (dimmed tab row)
 - [~] Bell indicator on tab — done; progress indicator (OSC 9;4) **blocked**: alacritty_terminal's parser drops OSC 9 (needs a vendored patch)
 - [x] Launch position (`initialPosition`) and window size/position persisted

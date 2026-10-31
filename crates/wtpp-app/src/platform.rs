@@ -143,6 +143,30 @@ pub fn cursor_pos() -> Option<(i32, i32)> {
     None
 }
 
+/// The usable area (without the taskbar) of the monitor at screen point
+/// (`x`, `y`): left, top, right, bottom in physical pixels. Windows only.
+pub fn work_area_at(x: i32, y: i32) -> Option<(i32, i32, i32, i32)> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
+        // SAFETY: plain value arguments; `info` is a valid out pointer with
+        // its size set.
+        unsafe {
+            let monitor = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = size_of::<MONITORINFO>() as u32;
+            (GetMonitorInfoW(monitor, &mut info) != 0)
+                .then_some((info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (x, y);
+        None
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use std::path::PathBuf;

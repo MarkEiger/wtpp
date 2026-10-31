@@ -738,7 +738,9 @@ export component MainWindow inherits Window {
 
                         // Where a tab dragged from another window will land.
                         if root.drop-index >= 0: Rectangle {
-                            x: root.drop-index * root.tab-pitch - 2px;
+                            // Kept inside the strip, which ends right
+                            // after the last tab.
+                            x: max(0px, min(root.drop-index * root.tab-pitch - 2px, parent.width - self.width));
                             y: 4px;
                             width: 3px;
                             height: parent.height - 8px;

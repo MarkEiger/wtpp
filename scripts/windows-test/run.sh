@@ -23,6 +23,7 @@ while IFS= read -r line; do
     if [[ $# -gt 0 ]] && [[ ! " $* " == *" $name "* ]]; then continue; fi
     # Prefix screenshot names with the scenario name.
     steps="${steps//shot:/shot:$name-}"
+    steps="${steps//shotall:/shotall:$name-}"
     echo "== $name"
     (cd /mnt/c && powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$win_script" -StepList "$steps" -ArgList "$args" < /dev/null 2>&1 | tr -d '\r' | sed 's/^/   /')
 done < scenarios.txt
