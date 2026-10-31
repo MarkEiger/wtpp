@@ -88,6 +88,23 @@ fn window_focused(id: WindowId) {
     });
 }
 
+/// Save window `id`'s bounds once it has stopped moving or resizing for a
+/// moment (when "remember window size and position" is on).
+fn remember_bounds_soon(id: WindowId) {
+    thread_local! {
+        static PENDING: slint::Timer = slint::Timer::default();
+    }
+    PENDING.with(|timer| {
+        timer.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(500), move || {
+            if let Some(e) = entry(id)
+                && e.app.try_borrow().is_ok_and(|app| app.settings.remember_window_bounds)
+            {
+                window_state::save(e.ui.window());
+            }
+        });
+    });
+}
+
 /// Top-left of a window's client area on screen, in physical pixels.
 pub(crate) fn client_origin(window: &slint::Window) -> Option<(i32, i32)> {
     use slint::winit_030::WinitWindowAccessor;
@@ -412,8 +429,6 @@ fn main() -> anyhow::Result<()> {
         });
     }
     backend.select().context("no GPU backend available")?;
-    #[cfg(target_os = "macos")]
-    macos_titlebar_clicks();
     log::info!("backend selected after {:?}", started.elapsed());
 
     // Font and shell discovery are slow (hundreds of fonts on Windows,
@@ -469,14 +484,19 @@ fn main() -> anyhow::Result<()> {
 /// macOS: with tabs in the (transparent) title bar, AppKit would move the
 /// window on any drag in its top 28pt, tabs included. Tell it our view
 /// doesn't move the window; the tab row's empty parts still do (via
-/// `start-window-drag`).
+/// `start-window-drag`). Once winit has defined the view class (with the
+/// first window); later calls change nothing.
 #[cfg(target_os = "macos")]
 fn macos_titlebar_clicks() {
     use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
     extern "C" fn no(_: &AnyObject, _: Sel) -> Bool {
         Bool::NO
     }
-    if let Some(class) = AnyClass::get("WinitView") {
+    let Some(class) = AnyClass::get("WinitView") else {
+        log::warn!("winit's view class isn't defined yet: tabs at the top of the window may move it");
+        return;
+    };
+    {
         // SAFETY: adds a method with the right signature (BOOL return, no
         // arguments) to winit's NSView subclass, which doesn't define it.
         unsafe {
@@ -611,7 +631,22 @@ fn create_window(
     }
     wire_window(&ui, id, custom_titlebar)?;
     ui.show()?;
+    #[cfg(target_os = "macos")]
+    {
+        // winit defines its view class with the first window.
+        macos_titlebar_clicks();
+        macos_allow_input_method(ui.window());
+    }
     Ok(id)
+}
+
+/// macOS composes dead keys (⌥E then E → é) and other input methods in its
+/// text input system, which needs enabling for the terminal (Slint only does
+/// that for its text fields, and turns it off again when they lose focus).
+#[cfg(target_os = "macos")]
+fn macos_allow_input_method(window: &slint::Window) {
+    use slint::winit_030::WinitWindowAccessor;
+    window.with_winit_window(|w| w.set_ime_allowed(true));
 }
 
 fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::Result<()> {
@@ -652,16 +687,11 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
             e.ui.window().with_winit_window(|w| w.set_maximized(!w.is_maximized()));
         }
     });
-    // macOS composes dead keys (⌥E then E → é) and other input methods in
-    // its text input system, which needs enabling for the terminal (Slint
-    // only does that for its text fields).
-    ui.on_terminal_focus_changed(move |focused| {
-        if cfg!(target_os = "macos")
-            && focused
-            && let Some(e) = entry(id)
-        {
-            use slint::winit_030::WinitWindowAccessor;
-            e.ui.window().with_winit_window(|w| w.set_ime_allowed(true));
+    // Back from a text field (see macos_allow_input_method).
+    ui.on_terminal_focus_changed(move |_focused| {
+        #[cfg(target_os = "macos")]
+        if _focused && let Some(e) = entry(id) {
+            macos_allow_input_method(e.ui.window());
         }
     });
     ui.on_content_resized(move || {
@@ -772,6 +802,10 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
                     slint::invoke_from_event_loop(move || {
                         if active {
                             window_focused(id);
+                            #[cfg(target_os = "macos")]
+                            if let Some(e) = entry(id).filter(|e| e.ui.get_terminal_focused()) {
+                                macos_allow_input_method(e.ui.window());
+                            }
                         }
                         with_window(id, |app| app.on_window_focus(active));
                     })
@@ -788,6 +822,11 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
                     })
                     .ok();
                     return EventResult::PreventDefault;
+                }
+                // macOS: ⌘Q ends the process without returning from the event
+                // loop, so remember the bounds as they change instead.
+                WindowEvent::Moved(_) | WindowEvent::Resized(_) if cfg!(target_os = "macos") => {
+                    remember_bounds_soon(id);
                 }
                 WindowEvent::DroppedFile(path) => {
                     let first = dropped.borrow().is_empty();
