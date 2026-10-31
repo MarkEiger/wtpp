@@ -16,7 +16,13 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 This installs to `%LOCALAPPDATA%\Programs\wtpp`, adds wt++ to the Start Menu
 and "Open in wt++" to Explorer's folder right-click menu.
 
-**Linux**: unpack `wtpp-<version>-linux-x64.tar.gz` and run `wtpp`.
+**macOS** (Apple Silicon): unzip `wtpp-<version>-macos-arm64.zip` and move
+`wt++.app` to Applications. It isn't notarized by Apple, so the first time,
+right-click it and choose **Open** (or run
+`xattr -dr com.apple.quarantine /Applications/wt++.app`).
+
+**Linux** (x86-64): unpack `wtpp-<version>-linux-x64.tar.gz` and run
+`sh install.sh`: it installs `~/.local/bin/wtpp` and adds wt++ to the app menu.
 
 ## Highlights
 
@@ -48,23 +54,27 @@ Settings → Startup → **Make wt++ the default**:
 
 All shortcuts are editable in **⌄ → Keyboard shortcuts**.
 
-| Keys | Action |
-|---|---|
-| Ctrl+Shift+T / Ctrl+Shift+1..9 | New tab (default / profile N) |
-| Ctrl+Shift+N | New window |
-| Ctrl+Shift+W | Close pane |
-| Ctrl+Tab, Ctrl+Shift+Tab, Alt+1..9 | Switch tabs |
-| Ctrl+Shift+Plus / Ctrl+Shift+Minus | Split pane right / down |
-| Alt+Arrows | Move between panes |
-| Ctrl+Shift+Arrows | Resize pane |
-| Ctrl+Shift+P | Command palette |
-| Ctrl+Shift+F | Find |
-| Ctrl+Shift+M / Ctrl+Shift+A | Mark mode / select all |
-| Ctrl+, | Settings |
-| Ctrl+= / Ctrl+- / Ctrl+0 | Font size |
-| Alt+Enter, F11 | Full screen |
+| Windows / Linux | macOS | Action |
+|---|---|---|
+| Ctrl+Shift+T / Ctrl+Shift+1..9 | ⌘T / ⇧⌘1..9 | New tab (default / profile N) |
+| Ctrl+Shift+N | ⌘N | New window |
+| Ctrl+Shift+W | ⌘W | Close pane |
+| Ctrl+Tab, Ctrl+Shift+Tab, Alt+1..9 | ⌃Tab, ⇧⌘] / ⇧⌘[, ⌘1..9 | Switch tabs |
+| Ctrl+Shift+Plus / Ctrl+Shift+Minus | ⌘D / ⇧⌘D | Split pane right / down |
+| Alt+Arrows | ⌥⌘Arrows | Move between panes |
+| Ctrl+Shift+Arrows | ⌃⌘Arrows | Resize pane |
+| Ctrl+Shift+P | ⇧⌘P | Command palette |
+| Ctrl+Shift+F | ⌘F | Find |
+| Ctrl+Shift+M / Ctrl+Shift+A | ⇧⌘M / ⌘A | Mark mode / select all |
+| Ctrl+Shift+C / Ctrl+Shift+V | ⌘C / ⌘V | Copy / paste |
+| Ctrl+, | ⌘, | Settings |
+| Ctrl+= / Ctrl+- / Ctrl+0 | ⌘= / ⌘- / ⌘0 | Font size |
+| Alt+Enter, F11 | ⌃⌘F | Full screen |
 
-They differ from Windows Terminal's in two places: WT's Alt+Shift pane keys
+On macOS, Ctrl always goes to the shell (Ctrl+C interrupts) and Option types
+characters (⌥A → å), as in Terminal.
+
+On Windows and Linux they differ from Windows Terminal's in two places: WT's Alt+Shift pane keys
 are Windows' keyboard-layout switch, and its Ctrl+Alt+N tab keys are AltGr on
 many layouts.
 

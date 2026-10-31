@@ -13,6 +13,15 @@
   - macOS has no default-terminal setting.
 - `wtpp -e COMMAND…` and `--working-directory DIR`, as Linux desktops call
   terminals.
+- macOS: a proper `wt++.app` (icon, ad-hoc signed); tabs in the title bar
+  next to the window buttons; ⌘ shortcuts like Terminal and iTerm (⌘T, ⌘W,
+  ⌘D…), Ctrl always reaches the shell, Option types characters.
+- Linux: `install.sh` adds wt++ to the app menu with its icon; windows carry
+  the `wtpp` app id so docks show the right icon.
+- Tabs can be torn off by dragging straight down (before, only a sideways
+  drag started dragging a tab).
+- Escape with a selection clears the selection instead of reaching the shell.
+- Default terminal opens handed-over consoles in front of other windows.
 
 ## 0.2.0 — 2026-10-31
 
