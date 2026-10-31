@@ -87,7 +87,11 @@ impl App {
         if self.tab_lift.is_none() && movable && (n == 1 || !in_row) {
             // Hold the window by the tab: the pointer stays where it is
             // across the tab, centred in the tab row.
-            self.tab_lift = Some(TabLift { grab: (x, self.ui().get_titlebar_height() / 2.0), screen: None });
+            let grab = (x, self.ui().get_titlebar_height() / 2.0);
+            // A tab leaving a window with others gets a floating preview
+            // (snapshotted before the tab dims); a lone tab moves its window.
+            let preview = (n > 1).then(|| self.capture_preview(grab)).flatten();
+            self.tab_lift = Some(TabLift { grab, screen: None, preview });
             self.ui().set_tab_lifted(n > 1);
         }
         if self.tab_lift.is_some() {
@@ -95,6 +99,7 @@ impl App {
             let Some(lift) = self.tab_lift.as_mut() else { return };
             lift.screen = screen;
             let grab = lift.grab;
+            let lift = &*lift;
             let target = crate::tab_drop_target(self.id, screen);
             if n == 1 {
                 // Over another window's tab row the window hangs below the
@@ -106,6 +111,10 @@ impl App {
                 }
                 self.ui().set_tab_lifted(target.is_some());
                 return;
+            }
+            if let (Some((preview, (ox, oy))), Some((sx, sy))) = (&lift.preview, screen) {
+                // Out of the way over a tab row, where the marker shows.
+                preview.show_at(target.is_none().then_some((sx - ox, sy - oy)));
             }
             if !(in_row && target.is_none()) {
                 return;
@@ -150,6 +159,20 @@ impl App {
                 }
             }
         }
+    }
+
+    /// A see-through snapshot of this window to drag along, and the point
+    /// on it matching window point `grab`.
+    fn capture_preview(&self, grab: (f32, f32)) -> Option<(crate::platform::DragPreview, (i32, i32))> {
+        const WIDTH: f32 = 360.0;
+        let ui = self.ui();
+        let window = ui.window();
+        let scale = window.scale_factor();
+        let full = window.size().width as f32;
+        let width = (WIDTH * scale).min(full);
+        let preview = crate::platform::DragPreview::capture(window, width as u32)?;
+        let k = scale * width / full;
+        Some((preview, ((grab.0 * k).round() as i32, (grab.1 * k).round() as i32)))
     }
 
     /// Whether (`x`, `y`) is in (or just around) the tab row.
@@ -204,6 +227,8 @@ pub struct TabLift {
     grab: (f32, f32),
     /// The pointer on screen, last we knew.
     screen: Option<(i32, i32)>,
+    /// The floating snapshot, and where the pointer sits on it.
+    preview: Option<(crate::platform::DragPreview, (i32, i32))>,
 }
 
 /// A window point in screen coordinates, from the window's position (when

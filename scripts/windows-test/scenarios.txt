@@ -47,3 +47,10 @@ file-drop-wsl: sleep:600|setrect:2600,100,900,600|filedrop:3000,400,C:\Users\use
 file-drop-cmd: sleep:600|^+2|sleep:1500|setrect:2600,100,900,600|filedrop:3000,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder|sleep:500|shot:pasted
 file-drop-split: sleep:600|^+=|sleep:1200|setrect:2600,100,900,600|filedrop:2750,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\plain.txt|sleep:500|shot:pasted
 file-drop-gitbash: sleep:600|^+4|sleep:2500|filedrop:3000,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\a b.txt|sleep:500|shot:pasted
+# Tear-off follow-ups (user report): new window's + works, preview shows, merging back works.
+tearoff-plus: sleep:600|^+t|sleep:900|sdrag:2970,122,3300,480|tile|sclick:2856,120|sleep:600|windows|shotall:after
+tearoff-preview: sleep:600|^+t|sleep:900|shold:2970,122,3300,480|shotrect:preview,3050,380,600,180|sup|windows
+tearoff-merge-back: sleep:600|^+t|sleep:900|sdrag:2970,122,3300,480|tile|shold:2726,122,3940,122|shotall:hover|sup|windows|shotall:after
+tearoff-return: sleep:600|^+t|sleep:900|shold:2970,122,2970,400|smove:2970,400,2750,122|sup|windows|shot:back
+tearoff-split: sleep:600|^+t|sleep:900|^+=|sleep:1200|sdrag:2970,122,3300,480|tile|windows|shotall:after
+tearoff-twice: sleep:600|^+t|^+t|sleep:1200|sdrag:3170,122,3300,480|tile|sdrag:3996,122,3200,520|windows|shotall:after

@@ -167,7 +167,7 @@ component TabItem inherits Rectangle {
     callback close;
     callback rename();
     callback renamed(string);
-    // Pointer position in window coordinates while dragging the tab.
+    // Pointer position within the tab while dragging it.
     callback drag(length, length);
     callback drag-end();
     // An entry of the right-click menu.
@@ -204,7 +204,7 @@ component TabItem inherits Rectangle {
         moved => {
             if self.pressed && (root.dragging || abs(self.mouse-x - self.pressed-x) > 8px) {
                 root.dragging = true;
-                root.drag(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
+                root.drag(self.mouse-x, self.mouse-y);
             }
         }
         double-clicked => {
@@ -544,7 +544,10 @@ export component MainWindow inherits Window {
     // Where the first tab starts (window coordinates, scrolling included) and
     // the distance from one tab to the next: where a tab dragged in from
     // another window would land.
-    out property <length> tabs-left: tab-flick.absolute-position.x + tab-flick.content-x;
+    // (Sums of layout positions: `absolute-position` isn't updated when only
+    // the layout changes, which left these stale in new windows.)
+    out property <length> tabs-left: titlebar.x + tab-row.x + tab-area.x + tab-flick.x + tab-flick.content-x;
+    out property <length> tabs-top: titlebar.y + tab-row.y + tab-area.y + tab-flick.y;
     out property <length> tab-pitch: root.tabs.length > 0 ? (min(tabs-layout.width, tabs-layout.preferred-width) + 2px) / root.tabs.length : 0px;
     // A tab from another window would be inserted before this one (-1: none).
     in property <int> drop-index: -1;
@@ -552,7 +555,7 @@ export component MainWindow inherits Window {
     in property <bool> tab-lifted;
     // Where the empty (draggable) part of the tab row starts, and where the
     // caption buttons start, in window coordinates.
-    out property <length> drag-start: dropdown.absolute-position.x + dropdown.width + 4px;
+    out property <length> drag-start: titlebar.x + tab-row.x + dropdown-box.x + dropdown-box.width + 4px;
     out property <length> buttons-start: root.width - (root.custom-titlebar ? 3 * 46px : 0px);
     // Confirmation dialog ("Close all tabs?", paste warnings).
     in property <bool> dialog-visible;
@@ -727,8 +730,8 @@ export component MainWindow inherits Window {
                                     keys.focus();
                                 }
                                 drag(x, y) => {
-                                    // Position within the scrolled strip of tabs.
-                                    root.tab-drag(i, x - tab-flick.absolute-position.x - tab-flick.content-x, self.width, x, y);
+                                    // Within the scrolled strip of tabs, and within the window.
+                                    root.tab-drag(i, self.x + x, self.width, root.tabs-left + self.x + x, root.tabs-top + self.y + y);
                                 }
                                 drag-end => {
                                     root.tab-drag-end();
@@ -791,7 +794,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                VerticalLayout {
+                dropdown-box := VerticalLayout {
                     alignment: center;
                     dropdown := IconButton {
                         width: 28px;

@@ -83,7 +83,7 @@ foreach ($s in $Steps) {
   # Keys, clicks and screenshots go to whatever is in front. If that isn't
   # wt++ (the user is in another app, a game is fullscreen), stop rather
   # than type into it or capture it.
-  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'shotall:*' -and $s -notlike 'filedrop:*') {
+  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'smove:*' -and $s -notlike 'shotall:*' -and $s -notlike 'filedrop:*' -and $s -notlike 'shotrect:*') {
     $fg = [W]::GetForegroundWindow(); [uint32]$fgPid = 0; [W]::GetWindowThreadProcessId($fg, [ref]$fgPid) | Out-Null
     if ($fgPid -ne $p.Id) {
       "ABORTED at '$s': another app is in the foreground"
@@ -130,7 +130,7 @@ foreach ($s in $Steps) {
     # main one): left edge + 40, then + 940.
     $screen = [Windows.Forms.Screen]::AllScreens | Sort-Object Primary | Select-Object -First 1
     $ws = [W]::Windows([uint32]$p.Id); $k = 0
-    foreach ($h in $ws) { [W]::MoveWindow($h, $screen.Bounds.X + 40 + $k * 940, 100, 900, 520, $true) | Out-Null; $k++ }
+    foreach ($h in $ws) { [W]::MoveWindow($h, $screen.Bounds.X + 40 + $k * 940, 100, 900, 460, $true) | Out-Null; $k++ }
     Start-Sleep -Milliseconds 600
   }
   elseif ($s -like 'sdrag:*') {
@@ -178,6 +178,26 @@ foreach ($s in $Steps) {
     $result = $form.DoDragDrop($data, [Windows.Forms.DragDropEffects]::Copy)
     $mover.EndInvoke($job) | Out-Null; $form.Close()
     "file drop: $result"; Start-Sleep -Milliseconds 800
+  }
+  elseif ($s -like 'sclick:*') {
+    # sclick:x,y clicks at screen coordinates
+    $v = $s.Substring(7).Split(',') | ForEach-Object { [int]$_ }
+    [W]::SetCursorPos($v[0], $v[1]) | Out-Null; Start-Sleep -Milliseconds 80
+    [W]::mouse_event(2,0,0,0,0); [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 800
+  }
+  elseif ($s -like 'shotrect:*') {
+    # shotrect:name,x,y,w,h captures a screen region (keep it on the
+    # secondary monitor: never capture the user's main screen)
+    $v = $s.Substring(9).Split(','); $x = [int]$v[1]; $y = [int]$v[2]; $w = [int]$v[3]; $h = [int]$v[4]
+    $bmp = New-Object Drawing.Bitmap $w, $h
+    $g = [Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($x, $y, 0, 0, $bmp.Size)
+    $bmp.Save("$out\$($v[0]).png"); $g.Dispose(); $bmp.Dispose()
+  }
+  elseif ($s -like 'smove:*') {
+    # smove:x1,y1,x2,y2 moves the pointer (button state unchanged)
+    $v = $s.Substring(6).Split(',') | ForEach-Object { [int]$_ }
+    for ($k = 1; $k -le 30; $k++) { [W]::SetCursorPos($v[0] + ($v[2]-$v[0])*$k/30, $v[1] + ($v[3]-$v[1])*$k/30) | Out-Null; Start-Sleep -Milliseconds 25 }
+    Start-Sleep -Milliseconds 400
   }
   elseif ($s -eq 'sup') { [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 1200 }
   elseif ($s -eq 'launch') {

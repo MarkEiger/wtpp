@@ -167,9 +167,53 @@ pub fn work_area_at(x: i32, y: i32) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// A floating, see-through snapshot of a window that follows the pointer
+/// while a tab is dragged out of it (like WT's tab drag preview). It never
+/// takes focus or the mouse. Windows only; a no-op elsewhere.
+pub struct DragPreview {
+    #[cfg(windows)]
+    hwnd: windows_sys::Win32::Foundation::HWND,
+}
+
+impl DragPreview {
+    /// Snapshot `window`'s client area as it is on screen, `width` physical
+    /// pixels wide. Hidden until `show_at`.
+    pub fn capture(window: &slint::Window, width: u32) -> Option<DragPreview> {
+        #[cfg(windows)]
+        {
+            imp::preview_capture(window, width).map(|hwnd| DragPreview { hwnd })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (window, width);
+            None
+        }
+    }
+
+    /// Show it with its top-left at screen (`x`, `y`), or hide it.
+    pub fn show_at(&self, at: Option<(i32, i32)>) {
+        #[cfg(windows)]
+        imp::preview_show(self.hwnd, at);
+        #[cfg(not(windows))]
+        let _ = at;
+    }
+}
+
+impl Drop for DragPreview {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        // SAFETY: our own window, destroyed once.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.hwnd);
+        }
+    }
+}
+
 #[cfg(windows)]
 mod imp {
     use std::path::PathBuf;
+
+    use windows_sys::Win32::Foundation::HWND;
 
     use windows_sys::Win32::Graphics::Gdi::{
         BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits, GetObjectW,
@@ -248,4 +292,100 @@ mod imp {
     }
 
     use std::os::windows::ffi::OsStrExt;
+
+    pub fn preview_capture(window: &slint::Window, width: u32) -> Option<HWND> {
+        use windows_sys::Win32::Foundation::{POINT, SIZE};
+        use windows_sys::Win32::Graphics::Gdi::{
+            AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION, CreateCompatibleDC, CreateDIBSection, DeleteDC, HALFTONE,
+            SRCCOPY, SelectObject, SetStretchBltMode, StretchBlt,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, RegisterClassW, ULW_ALPHA, UpdateLayeredWindow, WNDCLASSW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        };
+
+        let (left, top) = crate::client_origin(window)?;
+        let size = window.size();
+        let (src_w, src_h) = (size.width as i32, size.height as i32);
+        if src_w <= 0 || src_h <= 0 {
+            return None;
+        }
+        let w = (width as i32).min(src_w);
+        let h = (src_h as i64 * w as i64 / src_w as i64) as i32;
+        let class: Vec<u16> = "wtpp-drag-preview\0".encode_utf16().collect();
+        // SAFETY: plain GDI/window calls on handles created and released
+        // here; the DIB's pixels are `w * h` BGRA words.
+        unsafe {
+            let wc = WNDCLASSW { lpfnWndProc: Some(DefWindowProcW), lpszClassName: class.as_ptr(), ..std::mem::zeroed() };
+            RegisterClassW(&wc); // Fails harmlessly once registered.
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_POPUP,
+                0,
+                0,
+                w,
+                h,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            if hwnd.is_null() {
+                return None;
+            }
+            let screen = GetDC(std::ptr::null_mut());
+            let mem = CreateCompatibleDC(screen);
+            let mut info: BITMAPINFO = std::mem::zeroed();
+            info.bmiHeader = BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..std::mem::zeroed()
+            };
+            let mut bits = std::ptr::null_mut();
+            let dib = CreateDIBSection(mem, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            let old = SelectObject(mem, dib as _);
+            SetStretchBltMode(mem, HALFTONE);
+            StretchBlt(mem, 0, 0, w, h, screen, left, top, src_w, src_h, SRCCOPY);
+            // GDI leaves alpha at 0: make the snapshot opaque, then fade
+            // the whole window with the blend below.
+            if !bits.is_null() {
+                for px in std::slice::from_raw_parts_mut(bits as *mut u32, (w * h) as usize) {
+                    *px |= 0xFF00_0000;
+                }
+            }
+            let blend =
+                BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 210, AlphaFormat: AC_SRC_ALPHA as u8 };
+            let (origin, extent) = (POINT { x: 0, y: 0 }, SIZE { cx: w, cy: h });
+            UpdateLayeredWindow(hwnd, screen, std::ptr::null(), &extent, mem, &origin, 0, &blend, ULW_ALPHA);
+            SelectObject(mem, old);
+            DeleteObject(dib as _);
+            DeleteDC(mem);
+            ReleaseDC(std::ptr::null_mut(), screen);
+            Some(hwnd)
+        }
+    }
+
+    pub fn preview_show(hwnd: HWND, at: Option<(i32, i32)>) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowPos, ShowWindow,
+        };
+        // SAFETY: our own window.
+        unsafe {
+            match at {
+                Some((x, y)) => {
+                    SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+                    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
+                None => {
+                    ShowWindow(hwnd, SW_HIDE);
+                }
+            }
+        }
+    }
 }
