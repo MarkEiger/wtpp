@@ -503,8 +503,14 @@ impl App {
                     // have moved to another window since.
                     let pending = pending.clone();
                     slint::invoke_from_event_loop(move || {
-                        pending.store(false, Ordering::Release);
-                        crate::with_pane(id, |app| app.render());
+                        // Draw once per frame, on a timer: redrawing on every
+                        // burst of output kept the event loop so busy under a
+                        // flood (`cat` of a big file) that keys arrived seconds
+                        // late on X11.
+                        slint::Timer::single_shot(FRAME, move || {
+                            pending.store(false, Ordering::Release);
+                            crate::with_pane(id, |app| app.render());
+                        });
                     })
                     .ok();
                 }
@@ -1810,6 +1816,9 @@ impl App {
         true
     }
 }
+
+/// How often output is drawn at most (120 Hz).
+const FRAME: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// The profile of a tab's focused pane.
 fn tab_profile<'a>(app: &'a App, tab: &Tab) -> Option<&'a ResolvedProfile> {
