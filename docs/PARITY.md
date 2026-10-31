@@ -52,6 +52,7 @@
 - [x] Font weight, line height, intense text style, ligatures (+ toggle); Cascadia Mono/Code bundled like WT
 - [x] OSC 52 clipboard writes (setting-gated); visual bell
 - [x] Mark mode / keyboard selection (Ctrl+Shift+M), select all (Ctrl+Shift+A)
+- [x] Drag and drop files/folders onto a pane pastes their quoted paths (`/mnt/c/...` in WSL)
 
 ## Keyboard
 - [x] Ctrl+Backspace, Ctrl+Delete (incl. cmd), Shift+Enter in every shell

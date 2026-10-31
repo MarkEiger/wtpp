@@ -3,6 +3,7 @@
 
 mod app;
 mod cli;
+mod file_drop;
 mod find;
 mod instance;
 mod keys;
@@ -618,16 +619,39 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
     });
     {
         use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
-        ui.window().on_winit_window_event(move |_, event| {
-            if let WindowEvent::Focused(active) = event {
-                let active = *active;
-                slint::invoke_from_event_loop(move || {
-                    if active {
-                        window_focused(id);
+        // Dropping several files sends one event per file: collect them and
+        // paste once, after the batch.
+        let dropped: Rc<RefCell<Vec<std::path::PathBuf>>> = Rc::default();
+        ui.window().on_winit_window_event(move |window, event| {
+            match event {
+                WindowEvent::Focused(active) => {
+                    let active = *active;
+                    slint::invoke_from_event_loop(move || {
+                        if active {
+                            window_focused(id);
+                        }
+                        with_window(id, |app| app.on_window_focus(active));
+                    })
+                    .ok();
+                }
+                WindowEvent::DroppedFile(path) => {
+                    let first = dropped.borrow().is_empty();
+                    dropped.borrow_mut().push(path.clone());
+                    if first {
+                        // Drops carry no position (and no mouse moves arrive
+                        // during one), so ask the OS where the pointer is.
+                        let at = platform::cursor_pos().zip(client_origin(window)).map(|((x, y), (left, top))| {
+                            let scale = window.scale_factor();
+                            ((x - left) as f32 / scale, (y - top) as f32 / scale)
+                        });
+                        let dropped = dropped.clone();
+                        slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                            let paths = std::mem::take(&mut *dropped.borrow_mut());
+                            with_window(id, |app| app.on_files_dropped(paths, at));
+                        });
                     }
-                    with_window(id, |app| app.on_window_focus(active));
-                })
-                .ok();
+                }
+                _ => {}
             }
             EventResult::Propagate
         });

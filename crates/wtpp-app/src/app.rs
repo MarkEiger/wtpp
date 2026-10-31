@@ -1370,6 +1370,31 @@ impl App {
         }
     }
 
+    /// Files dropped on the window: paste their paths into the pane under
+    /// `at` (window logical coordinates; the focused pane when unknown) and
+    /// focus it. Like WT, this skips the paste warnings.
+    pub fn on_files_dropped(&mut self, paths: Vec<PathBuf>, at: Option<(f32, f32)>) {
+        if paths.is_empty() || self.dialog.is_some() {
+            return;
+        }
+        let ui = self.ui();
+        let under = at.and_then(|(x, y)| {
+            let (x, y) = (x - ui.get_content_x(), y - ui.get_content_y());
+            self.active_layout()
+                .into_iter()
+                .find(|(_, r)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+                .map(|(id, _)| id)
+        });
+        let Some(id) = under.or_else(|| self.active_terminal().map(|(_, id)| id)) else { return };
+        self.focus_pane(id);
+        let Some(pane) = self.panes.get(&id) else { return };
+        let (program, _) = split_commandline(&expand_env(&pane.profile.commandline));
+        let kind = crate::file_drop::shell_kind(&program, pane.profile.source.as_deref());
+        let text = crate::file_drop::dropped_text(&paths, kind);
+        let bracketed = pane.session.term().lock().mode().contains(TermMode::BRACKETED_PASTE);
+        pane.session.write(paste_bytes(&text, bracketed));
+    }
+
     fn show_dialog(&mut self, dialog: Dialog, title: &str, body: &str, confirm: &str) {
         let ui = self.ui();
         ui.set_dialog_title(title.into());
