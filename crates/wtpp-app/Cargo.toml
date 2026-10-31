@@ -1,0 +1,39 @@
+[package]
+name = "wtpp-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "wtpp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+arboard.workspace = true
+env_logger.workspace = true
+log.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+slint.workspace = true
+wtpp-config.workspace = true
+wtpp-input.workspace = true
+wtpp-render.workspace = true
+wtpp-session.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+slint-build.workspace = true

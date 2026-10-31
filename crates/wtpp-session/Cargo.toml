@@ -1,0 +1,11 @@
+[package]
+name = "wtpp-session"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+anyhow.workspace = true
+log.workspace = true
+wtpp-input.workspace = true

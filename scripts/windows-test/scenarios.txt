@@ -1,0 +1,40 @@
+# name: steps   (see drive.ps1 for the step syntax; window is ~1232x785 at 100%)
+startup: sleep:600|rect|shot:start
+tabs-resize: sleep:600|rect|^+t|sleep:900|rect|^+t|sleep:900|rect|^+w|sleep:600|rect|^+w|sleep:600|rect|shot:end
+tab-dropdown: sleep:600|^+ |sleep:600|shot:menu|{ESC}
+profiles: sleep:600|^+2|sleep:1500|ver{ENTER}|^+3|sleep:3000|uname -a{ENTER}|sleep:800|shot:three-tabs
+keys-pwsh: sleep:600|one two three|^{BACKSPACE}|{HOME}|^{DELETE}|sleep:400|shot:line
+keys-cmd: sleep:600|^+2|sleep:1500|one two three|^{BACKSPACE}|{HOME}|^{DELETE}|sleep:400|shot:line
+split: sleep:600|^+=|sleep:1000|^+-|sleep:1000|%{LEFT}|^+{RIGHT}^+{RIGHT}^+{RIGHT}|sleep:600|shot:panes
+zoom: sleep:600|^+=|sleep:1000|^+p|zoom|{ENTER}|sleep:600|shot:zoomed
+scrollback: sleep:600|foreach {(}$i in 1..80{)} {{}"line $i"{}}{ENTER}|sleep:800|^+{PGUP}|sleep:300|shot:paged
+find: sleep:600|foreach {(}$i in 1..60{)} {{}"line $i hello"{}}{ENTER}|sleep:800|^+f|hello|sleep:400|{ENTER}{ENTER}|sleep:400|shot:third
+palette: sleep:600|^+p|sleep:300|split|sleep:400|shot:list|{DOWN}{DOWN}|shot:moved|{ESC}
+settings-pages: sleep:600|^,|sleep:1200|shot:startup|click:60,104|shot:interaction|click:60,142|shot:appearance|click:60,180|shot:schemes|click:60,218|shot:rendering|click:60,256|shot:actions|click:100,349|shot:profile
+tab-menu: sleep:600|^+t|sleep:800|rclick:120,22|sleep:400|shot:menu|{ESC}
+tab-rename: sleep:600|dclick:120,22|sleep:400|renamed{ENTER}|sleep:300|shot:renamed
+tab-drag: sleep:600|^+2|sleep:1200|drag:120,22,600,22|sleep:300|shot:moved
+titlebar: sleep:600|move:1140,20|sleep:1200|shot:snap|move:600,300|dclick:800,20|sleep:800|shot:max|dclick:800,10|sleep:800|rect
+zoom-font: sleep:600|^=^=|sleep:500|shot:bigger|^0|sleep:400|rect
+paste-warning: sleep:600|^+2|sleep:1500|clip:echo one\necho two|^v|sleep:500|shot:dialog|{ESC}|sleep:300|click:0,0
+exit-code: sleep:600|^+2|sleep:1500|exit 3{ENTER}|sleep:800|shot:exited|{ENTER}|sleep:1500|shot:restarted
+divider-drag: sleep:600|^+=|sleep:1200|drag:616,300,400,300|sleep:400|shot:dragged
+tab-color: sleep:600|rclick:120,22|sleep:400|{DOWN}{DOWN}{DOWN}{RIGHT}|sleep:300|shot:submenu|{ENTER}|sleep:400|^+t|sleep:800|shot:colored
+cli-args [-d C:\Windows -p "Command Prompt"]: sleep:1500|shot:started
+find-toggles: sleep:600|echo Hello hello HELLO{ENTER}|sleep:500|^+f|hello|sleep:400|shot:all|click:991,72|sleep:500|shot:case
+link-hover: sleep:600|echo 'see https://example.com/docs here'{ENTER}|sleep:600|move:120,71|ctrl:down|move:124,71|sleep:400|shot:hover|ctrl:up
+swap-pane: sleep:600|echo left{ENTER}|^+=|sleep:1200|echo right{ENTER}|^+p|swap pane left|{ENTER}|sleep:600|shot:swapped
+remember-save: sleep:600|setrect:200,150,900,560|rect|close
+remember-load: sleep:900|rect
+mark-mode: sleep:600|echo alpha beta{ENTER}|sleep:400|^+m|{UP}{UP}|+{RIGHT}+{RIGHT}+{RIGHT}+{RIGHT}|sleep:300|shot:marked|{ENTER}|^v|sleep:400|shot:pasted
+select-all: sleep:600|echo one{ENTER}echo two{ENTER}|sleep:500|^+a|sleep:300|shot:all|{ESC}
+pane-menu-off-pastes: sleep:600|rclick:400,300|sleep:500|shot:menu|{ESC}
+unicode: sleep:600|-join{(}[char]0x65,[char]0x301,' ',[char]0x65E5,[char]0x672C,' ',[char]::ConvertFromUtf32{(}0x1F642{)},' ok'{)}{ENTER}|sleep:600|shot:text
+tabs-overflow: sleep:600|^+t|^+t|^+t|^+t|^+t|^+t|^+t|^+t|^+t|^+t|^+t|^+t|^+t|sleep:1500|shot:many|rect|click:20,22|sleep:300|click:20,22|sleep:300|shot:scrolled-left
+ligatures: sleep:600|echo '-> != === => <= >= :: www'{ENTER}|sleep:600|shot:text
+new-window: sleep:600|^+n|sleep:2000|windows
+move-tab: sleep:600|^+2|sleep:1500|rclick:330,22|sleep:400|{UP}{UP}{UP}{UP}{ENTER}|sleep:2000|windows
+shortcuts-menu: sleep:600|^+ |sleep:600|shot:menu|click:370,221|sleep:1500|shot:page
+layout-shortcuts: sleep:600|^+=|sleep:1200|layout:0419|chord:41|chord:44|sleep:400|shot:typed|chord:11,10,57|sleep:600|shot:closed|layout:0409
+layout-ctrl-c: sleep:600|sleep 30{ENTER}|sleep:300|layout:0419|chord:11,43|sleep:600|shot:interrupted|layout:0409
+switch-tab: sleep:600|^+t|sleep:800|%1|sleep:400|shot:first

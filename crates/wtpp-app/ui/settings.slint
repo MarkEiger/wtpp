@@ -1,0 +1,1167 @@
+import { Button, LineEdit, SpinBox, Switch, ComboBox, ScrollView, Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export struct ColorRow {
+    name: string,
+    hex: string,
+    color: color,
+}
+
+export struct BindingRow {
+    action: string,
+    keys: string,
+    // `sendInput` bindings carry editable text.
+    has-input: bool,
+    input: string,
+}
+
+/// Everything the settings page shows and edits. Rust fills these in and
+/// handles the callbacks; widgets bind two-way so Rust can also reset them.
+export global SettingsData {
+    in property <[string]> nav-items;
+    in-out property <int> page;
+    in property <bool> dirty;
+    in property <string> status;
+    in property <bool> status-is-error;
+
+    // Startup
+    in property <[string]> profile-names;
+    in-out property <int> default-profile;
+    in-out property <int> launch-mode;
+    in-out property <int> initial-cols;
+    in-out property <int> initial-rows;
+    in property <bool> can-import-wt;
+
+    // Interaction
+    in-out property <bool> copy-on-select;
+    in-out property <string> word-delimiters;
+    in-out property <bool> confirm-close;
+    in-out property <bool> multi-line-paste-warning;
+    in-out property <bool> focus-follow-mouse;
+    in-out property <bool> allow-osc52;
+    in-out property <bool> remember-bounds;
+    in-out property <bool> large-paste-warning;
+
+    // Appearance
+    in-out property <bool> tabs-in-titlebar;
+    in-out property <int> theme;
+    in-out property <int> tab-width-mode;
+    in-out property <bool> always-show-tabs;
+    in-out property <bool> right-click-menu;
+    in-out property <int> graphics-api;
+    in property <bool> is-windows;
+
+    // Color schemes
+    in property <[string]> scheme-names;
+    in-out property <int> scheme-index;
+    in property <[ColorRow]> scheme-colors;
+    in property <bool> scheme-builtin;
+    in-out property <string> scheme-name;
+
+    // Actions
+    in property <[BindingRow]> bindings;
+    in property <[string]> action-catalog;
+    in-out property <int> catalog-index;
+    in property <int> recording: -1;
+    in property <string> binding-message;
+    in-out property <string> binding-filter;
+
+    // Profile page (also used for "Defaults")
+    in property <bool> p-is-defaults;
+    in property <bool> p-discovered;
+    in-out property <string> p-name;
+    in-out property <string> p-commandline;
+    in-out property <string> p-startdir;
+    in-out property <bool> p-hidden;
+    in-out property <int> p-scheme;
+    in property <[string]> font-families;
+    in-out property <int> p-font;
+    in-out property <int> p-font-size;
+    in-out property <int> p-cursor;
+    in property <[string]> cursor-shapes;
+    in-out property <string> p-padding;
+    in-out property <int> p-history;
+    in-out property <int> p-encoding;
+    in-out property <int> p-close-on-exit;
+    in-out property <string> p-tab-title;
+    in-out property <bool> p-suppress-title;
+    in-out property <int> p-bell;
+    in-out property <int> p-intense;
+    in-out property <int> p-weight;
+    in property <[string]> font-weights;
+    in-out property <string> p-cell-height;
+    in-out property <bool> p-ligatures;
+    in-out property <string> p-environment;
+    in-out property <string> p-icon;
+
+    callback set-value(string, string);
+    callback save();
+    callback discard();
+    callback open-json();
+    callback import-wt();
+    callback select-scheme(int);
+    callback set-scheme-color(int, string);
+    callback new-scheme();
+    callback delete-scheme();
+    callback record-binding(int);
+    callback delete-binding(int);
+    callback add-binding();
+    callback reset-bindings();
+    callback set-binding-input(int, string);
+    callback add-profile();
+    callback delete-profile();
+}
+
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    in property <bool> indent;
+    callback clicked;
+    height: 36px;
+    border-radius: 4px;
+    background: selected ? Theme.nav-selected : ta.has-hover ? Theme.nav-hover : transparent;
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    if root.selected: Rectangle {
+        x: 0;
+        width: 3px;
+        height: 16px;
+        border-radius: 1.5px;
+        background: Theme.accent;
+    }
+    Text {
+        x: root.indent ? 32px : 16px;
+        text: root.label;
+        color: Theme.text;
+        font-size: 13px;
+        vertical-alignment: center;
+        overflow: elide;
+        width: parent.width - self.x - 8px;
+    }
+}
+
+component Card inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    background: Theme.card;
+    border-radius: 6px;
+    min-height: 64px;
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 16px;
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: 14px;
+                wrap: word-wrap;
+            }
+
+            if root.description != "": Text {
+                text: root.description;
+                color: Theme.text-dim;
+                font-size: 12px;
+                wrap: word-wrap;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            @children
+        }
+    }
+}
+
+component Section inherits VerticalLayout {
+    in property <string> text;
+    padding-top: 20px;
+    padding-bottom: 4px;
+    Text {
+        text: root.text;
+        color: Theme.text;
+        font-size: 14px;
+        font-weight: 600;
+    }
+}
+
+component PageTitle inherits Text {
+    color: Theme.text;
+    font-size: 28px;
+    font-weight: 600;
+}
+
+component StartupPage inherits VerticalLayout {
+    spacing: 4px;
+    Card {
+        title: "Default profile";
+        description: "Profile that opens with the new tab button and Ctrl+Shift+T.";
+        ComboBox {
+            width: 260px;
+            model: SettingsData.profile-names;
+            current-index <=> SettingsData.default-profile;
+            selected => {
+                SettingsData.set-value("defaultProfile", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Launch mode";
+        description: "How the window opens.";
+        ComboBox {
+            width: 260px;
+            model: ["Default", "Maximized", "Full screen"];
+            current-index <=> SettingsData.launch-mode;
+            selected => {
+                SettingsData.set-value("launchMode", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Launch size";
+        description: "Columns and rows of a new window.";
+        HorizontalLayout {
+            spacing: 8px;
+            SpinBox {
+                width: 120px;
+                minimum: 10;
+                maximum: 999;
+                value <=> SettingsData.initial-cols;
+                edited(v) => {
+                    SettingsData.set-value("initialCols", v);
+                }
+            }
+
+            SpinBox {
+                width: 120px;
+                minimum: 5;
+                maximum: 999;
+                value <=> SettingsData.initial-rows;
+                edited(v) => {
+                    SettingsData.set-value("initialRows", v);
+                }
+            }
+        }
+    }
+
+    Card {
+        title: "Remember window size and position";
+        description: "Open where the window was when it was last closed.";
+        Switch {
+            checked <=> SettingsData.remember-bounds;
+            toggled => {
+                SettingsData.set-value("rememberWindowBounds", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    if SettingsData.can-import-wt: Card {
+        title: "Import from Windows Terminal";
+        description: "Copy profiles, color schemes, key bindings and defaults from your Windows Terminal settings.";
+        Button {
+            text: "Import";
+            clicked => {
+                SettingsData.import-wt();
+            }
+        }
+    }
+}
+
+component InteractionPage inherits VerticalLayout {
+    spacing: 4px;
+    Card {
+        title: "Right-click menu in the terminal";
+        description: "Off: right-click copies the selection, or pastes. On: it opens a menu.";
+        Switch {
+            checked <=> SettingsData.right-click-menu;
+            toggled => {
+                SettingsData.set-value("rightClickContextMenu", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Automatically copy selection to clipboard";
+        Switch {
+            checked <=> SettingsData.copy-on-select;
+            toggled => {
+                SettingsData.set-value("copyOnSelect", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Word delimiters";
+        description: "Characters that end a word when you double-click to select.";
+        LineEdit {
+            width: 260px;
+            text <=> SettingsData.word-delimiters;
+            edited(t) => {
+                SettingsData.set-value("wordDelimiters", t);
+            }
+        }
+    }
+
+    Card {
+        title: "Focus follows mouse";
+        description: "Hovering over a pane focuses it.";
+        Switch {
+            checked <=> SettingsData.focus-follow-mouse;
+            toggled => {
+                SettingsData.set-value("focusFollowMouse", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Allow apps to set the clipboard";
+        description: "OSC 52, used by vim, tmux and SSH sessions to copy to your clipboard.";
+        Switch {
+            checked <=> SettingsData.allow-osc52;
+            toggled => {
+                SettingsData.set-value("allowOSC52", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Warn when pasting more than one line";
+        description: "Each line would otherwise run as a command.";
+        Switch {
+            checked <=> SettingsData.multi-line-paste-warning;
+            toggled => {
+                SettingsData.set-value("multiLinePasteWarning", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Warn when pasting a lot of text";
+        description: "More than 5 KiB.";
+        Switch {
+            checked <=> SettingsData.large-paste-warning;
+            toggled => {
+                SettingsData.set-value("largePasteWarning", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Warn when closing more than one tab";
+        Switch {
+            checked <=> SettingsData.confirm-close;
+            toggled => {
+                SettingsData.set-value("confirmCloseAllTabs", self.checked ? "true" : "false");
+            }
+        }
+    }
+}
+
+component AppearancePage inherits VerticalLayout {
+    spacing: 4px;
+    Card {
+        title: "Theme";
+        description: "Colors of the tab row, menus and settings. Terminal colors come from each profile's color scheme.";
+        ComboBox {
+            width: 260px;
+            model: ["Dark", "Light", "Use Windows mode"];
+            current-index <=> SettingsData.theme;
+            selected => {
+                SettingsData.set-value("theme", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Tab width";
+        ComboBox {
+            width: 260px;
+            model: ["Equal", "Fit the title", "Compact (inactive tabs show only the icon)"];
+            current-index <=> SettingsData.tab-width-mode;
+            selected => {
+                SettingsData.set-value("tabWidthMode", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Always show tabs";
+        description: "Off: with one tab and the native title bar, the tab row is hidden.";
+        Switch {
+            checked <=> SettingsData.always-show-tabs;
+            toggled => {
+                SettingsData.set-value("alwaysShowTabs", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Show tabs in title bar";
+        description: SettingsData.is-windows ? "Tabs share the row with the minimize, maximize and close buttons. Takes effect on restart." : "Only available on Windows.";
+        Switch {
+            enabled: SettingsData.is-windows;
+            checked <=> SettingsData.tabs-in-titlebar;
+            toggled => {
+                SettingsData.set-value("showTabsInTitlebar", self.checked ? "true" : "false");
+            }
+        }
+    }
+}
+
+component SchemePreview inherits Rectangle {
+    in property <[ColorRow]> colors;
+    border-radius: 6px;
+    background: colors.length > 1 ? colors[1].color : black;
+    height: 132px;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: 0;
+            alignment: start;
+            Text {
+                text: "user@wtpp";
+                color: colors.length > 6 ? colors[6].color : white;
+                font-family: "monospace";
+            }
+
+            Text {
+                text: ":";
+                color: colors.length > 0 ? colors[0].color : white;
+                font-family: "monospace";
+            }
+
+            Text {
+                text: "~/project";
+                color: colors.length > 8 ? colors[8].color : white;
+                font-family: "monospace";
+            }
+
+            Text {
+                text: "$ ls";
+                color: colors.length > 0 ? colors[0].color : white;
+                font-family: "monospace";
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+            for i in 8: Text {
+                text: ["black", "red", "green", "yellow", "blue", "purple", "cyan", "white"][i];
+                color: colors.length > i + 4 ? colors[i + 4].color : white;
+                font-family: "monospace";
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: start;
+            for i in 8: Text {
+                text: ["black", "red", "green", "yellow", "blue", "purple", "cyan", "white"][i];
+                color: colors.length > i + 12 ? colors[i + 12].color : white;
+                font-family: "monospace";
+            }
+        }
+
+        HorizontalLayout {
+            alignment: start;
+            Rectangle {
+                width: 9px;
+                height: 18px;
+                background: colors.length > 2 ? colors[2].color : white;
+            }
+        }
+    }
+}
+
+component ColorEditor inherits Rectangle {
+    in property <int> index;
+    property <ColorRow> data: SettingsData.scheme-colors.length > index ? SettingsData.scheme-colors[index] : { name: "", hex: "", color: black };
+    height: 44px;
+    // Equal columns regardless of the color name's length.
+    min-width: 0;
+    preferred-width: 100px;
+    horizontal-stretch: 1;
+    background: Theme.card;
+    border-radius: 6px;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 22px;
+                height: 22px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: Theme.border;
+                background: root.data.color;
+            }
+        }
+
+        Text {
+            text: root.data.name;
+            color: Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            LineEdit {
+                width: 110px;
+                enabled: !SettingsData.scheme-builtin;
+                text: root.data.hex;
+                accepted(t) => {
+                    SettingsData.set-scheme-color(root.index, t);
+                }
+                edited(t) => {
+                    if t.character-count == 7 {
+                        SettingsData.set-scheme-color(root.index, t);
+                    }
+                }
+            }
+        }
+    }
+}
+
+component SchemesPage inherits VerticalLayout {
+    spacing: 12px;
+    HorizontalLayout {
+        spacing: 8px;
+        ComboBox {
+            width: 280px;
+            model: SettingsData.scheme-names;
+            current-index <=> SettingsData.scheme-index;
+            selected => {
+                SettingsData.select-scheme(self.current-index);
+            }
+        }
+
+        Button {
+            text: "Duplicate";
+            clicked => {
+                SettingsData.new-scheme();
+            }
+        }
+
+        Button {
+            text: "Delete";
+            enabled: !SettingsData.scheme-builtin;
+            clicked => {
+                SettingsData.delete-scheme();
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+
+    if !SettingsData.scheme-builtin: Card {
+        title: "Name";
+        LineEdit {
+            width: 260px;
+            text <=> SettingsData.scheme-name;
+            edited(t) => {
+                SettingsData.set-value("schemeName", t);
+            }
+        }
+    }
+
+    SchemePreview {
+        colors: SettingsData.scheme-colors;
+    }
+
+    if SettingsData.scheme-builtin: Text {
+        text: "Built-in schemes can't be changed. Use Duplicate to make an editable copy.";
+        color: Theme.text-dim;
+        font-size: 12px;
+    }
+
+    for r in 10: HorizontalLayout {
+        spacing: 6px;
+        ColorEditor {
+            index: r * 2;
+        }
+
+        ColorEditor {
+            index: r * 2 + 1;
+        }
+    }
+}
+
+component RenderingPage inherits VerticalLayout {
+    spacing: 4px;
+    Card {
+        title: "Graphics API";
+        description: "Takes effect on restart. Software rendering is slower but works without a GPU driver (e.g. in some remote sessions).";
+        ComboBox {
+            width: 260px;
+            model: ["Automatic", "Direct3D 12", "Vulkan", "Metal", "OpenGL", "Software"];
+            current-index <=> SettingsData.graphics-api;
+            selected => {
+                SettingsData.set-value("graphicsAPI", self.current-index);
+            }
+        }
+    }
+}
+
+component KeyChip inherits Rectangle {
+    in property <string> keys;
+    in property <bool> recording;
+    callback clicked;
+    min-width: 150px;
+    height: 32px;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: recording ? Theme.accent : Theme.border;
+    background: ta.has-hover ? Theme.chip-hover : Theme.chip;
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.recording ? "Press a key combination…" : root.keys == "" ? "Not bound" : root.keys;
+            color: root.recording ? Theme.accent : root.keys == "" ? Theme.text-dim : Theme.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+component ActionsPage inherits VerticalLayout {
+    spacing: 8px;
+    Text {
+        text: "Click a key combination to change it, then press the new keys. Esc cancels; Backspace on its own clears.";
+        color: Theme.text-dim;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        LineEdit {
+            placeholder-text: "Search actions or keys";
+            horizontal-stretch: 1;
+            text <=> SettingsData.binding-filter;
+            edited(t) => {
+                SettingsData.set-value("bindingFilter", t);
+            }
+        }
+
+        ComboBox {
+            width: 280px;
+            model: SettingsData.action-catalog;
+            current-index <=> SettingsData.catalog-index;
+        }
+
+        Button {
+            text: "Add";
+            primary: true;
+            clicked => {
+                SettingsData.add-binding();
+            }
+        }
+
+        Button {
+            text: "Reset all";
+            clicked => {
+                SettingsData.reset-bindings();
+            }
+        }
+    }
+
+    if SettingsData.binding-message != "": Text {
+        text: SettingsData.binding-message;
+        color: Theme.accent;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+
+    for b[i] in SettingsData.bindings: Rectangle {
+        height: 48px;
+        border-radius: 6px;
+        background: Theme.card;
+        HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 8px;
+            spacing: 12px;
+            Text {
+                text: b.action;
+                color: Theme.text;
+                font-size: 13px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+
+            if b.has-input: VerticalLayout {
+                alignment: center;
+                LineEdit {
+                    width: 180px;
+                    placeholder-text: "Text, e.g. \\e\\r";
+                    text: b.input;
+                    edited(t) => {
+                        SettingsData.set-binding-input(i, t);
+                    }
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                KeyChip {
+                    keys: b.keys;
+                    recording: SettingsData.recording == i;
+                    clicked => {
+                        SettingsData.record-binding(i);
+                    }
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                del := Rectangle {
+                    width: 32px;
+                    height: 32px;
+                    border-radius: 4px;
+                    background: del-ta.has-hover ? Theme.chip-hover : transparent;
+                    Path {
+                        width: 10px;
+                        height: 10px;
+                        stroke: Theme.text-dim;
+                        stroke-width: 1.2px;
+                        commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+                    }
+
+                    del-ta := TouchArea {
+                        clicked => {
+                            SettingsData.delete-binding(i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component ProfilePage inherits VerticalLayout {
+    spacing: 4px;
+    if !SettingsData.p-is-defaults: Card {
+        title: "Name";
+        LineEdit {
+            width: 300px;
+            text <=> SettingsData.p-name;
+            edited(t) => {
+                SettingsData.set-value("p.name", t);
+            }
+        }
+    }
+
+    Card {
+        title: "Command line";
+        description: "Program to run, with arguments. %VARIABLES% are expanded.";
+        LineEdit {
+            width: 300px;
+            text <=> SettingsData.p-commandline;
+            edited(t) => {
+                SettingsData.set-value("p.commandline", t);
+            }
+        }
+    }
+
+    Card {
+        title: "Starting directory";
+        description: "Leave empty to start in your home folder.";
+        LineEdit {
+            width: 300px;
+            text <=> SettingsData.p-startdir;
+            edited(t) => {
+                SettingsData.set-value("p.startingDirectory", t);
+            }
+        }
+    }
+
+    Card {
+        title: "Icon";
+        description: "An image file, or an emoji. Leave empty to use the program's own icon.";
+        LineEdit {
+            width: 300px;
+            text <=> SettingsData.p-icon;
+            edited(t) => {
+                SettingsData.set-value("p.icon", t);
+            }
+        }
+    }
+
+    Card {
+        title: "Tab title";
+        description: "Shown until the shell sets its own title. Leave empty to use the profile name.";
+        LineEdit {
+            width: 300px;
+            text <=> SettingsData.p-tab-title;
+            edited(t) => {
+                SettingsData.set-value("p.tabTitle", t);
+            }
+        }
+    }
+
+    Card {
+        title: "Ignore title changes from the shell";
+        Switch {
+            checked <=> SettingsData.p-suppress-title;
+            toggled => {
+                SettingsData.set-value("p.suppressApplicationTitle", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Environment variables";
+        description: "NAME=value pairs separated by semicolons. %VARIABLES% are expanded.";
+        LineEdit {
+            width: 300px;
+            text <=> SettingsData.p-environment;
+            edited(t) => {
+                SettingsData.set-value("p.environment", t);
+            }
+        }
+    }
+
+    if !SettingsData.p-is-defaults: Card {
+        title: "Hide from the dropdown";
+        Switch {
+            checked <=> SettingsData.p-hidden;
+            toggled => {
+                SettingsData.set-value("p.hidden", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Section {
+        text: "Appearance";
+    }
+
+    Card {
+        title: "Color scheme";
+        ComboBox {
+            width: 300px;
+            model: SettingsData.scheme-names;
+            current-index <=> SettingsData.p-scheme;
+            selected => {
+                SettingsData.set-value("p.colorScheme", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Font face";
+        ComboBox {
+            width: 300px;
+            model: SettingsData.font-families;
+            current-index <=> SettingsData.p-font;
+            selected => {
+                SettingsData.set-value("p.fontFace", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Font size";
+        SpinBox {
+            width: 140px;
+            minimum: 6;
+            maximum: 72;
+            value <=> SettingsData.p-font-size;
+            edited(v) => {
+                SettingsData.set-value("p.fontSize", v);
+            }
+        }
+    }
+
+    Card {
+        title: "Font weight";
+        ComboBox {
+            width: 300px;
+            model: SettingsData.font-weights;
+            current-index <=> SettingsData.p-weight;
+            selected => {
+                SettingsData.set-value("p.fontWeight", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Ligatures";
+        description: "Join sequences like -> and != into single symbols, if the font has them (e.g. Cascadia Code).";
+        Switch {
+            checked <=> SettingsData.p-ligatures;
+            toggled => {
+                SettingsData.set-value("p.ligatures", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Line height";
+        description: "As a multiple of the font size (1.2 is the default).";
+        LineEdit {
+            width: 140px;
+            text <=> SettingsData.p-cell-height;
+            edited(t) => {
+                SettingsData.set-value("p.cellHeight", t);
+            }
+        }
+    }
+
+    Card {
+        title: "Intense text style";
+        description: "How text the shell marks as bold or intense is drawn.";
+        ComboBox {
+            width: 300px;
+            model: ["Bright colors", "Bold font", "Bold font and bright colors", "Normal"];
+            current-index <=> SettingsData.p-intense;
+            selected => {
+                SettingsData.set-value("p.intenseTextStyle", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Cursor shape";
+        ComboBox {
+            width: 300px;
+            model: SettingsData.cursor-shapes;
+            current-index <=> SettingsData.p-cursor;
+            selected => {
+                SettingsData.set-value("p.cursorShape", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Padding";
+        description: "Space around the text, in pixels: left, top, right, bottom.";
+        LineEdit {
+            width: 300px;
+            text <=> SettingsData.p-padding;
+            edited(t) => {
+                SettingsData.set-value("p.padding", t);
+            }
+        }
+    }
+
+    Section {
+        text: "Advanced";
+    }
+
+    Card {
+        title: "History size";
+        description: "Lines of scrollback kept.";
+        SpinBox {
+            width: 140px;
+            minimum: 0;
+            maximum: 1000000;
+            value <=> SettingsData.p-history;
+            edited(v) => {
+                SettingsData.set-value("p.historySize", v);
+            }
+        }
+    }
+
+    Card {
+        title: "Bell notification style";
+        ComboBox {
+            width: 300px;
+            model: ["Sound", "Flash the pane and mark the tab", "Sound and flash", "None"];
+            current-index <=> SettingsData.p-bell;
+            selected => {
+                SettingsData.set-value("p.bellStyle", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "When the shell exits";
+        ComboBox {
+            width: 300px;
+            model: ["Close if it exited successfully", "Always close", "Keep the pane open"];
+            current-index <=> SettingsData.p-close-on-exit;
+            selected => {
+                SettingsData.set-value("p.closeOnExit", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Key encoding";
+        description: "How keys like Ctrl+Backspace and Shift+Enter reach the shell. Automatic uses Windows key events for cmd and PowerShell and VT sequences for everything else.";
+        ComboBox {
+            width: 300px;
+            model: ["Automatic", "VT sequences (bash, zsh, …)", "Windows key events (cmd, PowerShell)"];
+            current-index <=> SettingsData.p-encoding;
+            selected => {
+                SettingsData.set-value("p.keyEncoding", self.current-index);
+            }
+        }
+    }
+
+    if !SettingsData.p-is-defaults: HorizontalLayout {
+        padding-top: 12px;
+        alignment: start;
+        Button {
+            text: SettingsData.p-discovered ? "Delete profile (it will come back; hide it instead)" : "Delete profile";
+            enabled: !SettingsData.p-discovered;
+            clicked => {
+                SettingsData.delete-profile();
+            }
+        }
+    }
+}
+
+export component SettingsPage inherits Rectangle {
+    background: Theme.page-bg;
+
+    HorizontalLayout {
+        // Navigation
+        Rectangle {
+            width: 260px;
+            background: Theme.nav-bg;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 2px;
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: start;
+                        for item[i] in SettingsData.nav-items: VerticalLayout {
+                            if i == 6: Text {
+                                text: "Profiles";
+                                color: Theme.text-dim;
+                                font-size: 12px;
+                                height: 32px;
+                                vertical-alignment: bottom;
+                                x: 16px;
+                            }
+                            NavItem {
+                                label: item;
+                                indent: i >= 6;
+                                selected: SettingsData.page == i;
+                                clicked => {
+                                    SettingsData.page = i;
+                                    SettingsData.set-value("page", i);
+                                }
+                            }
+                        }
+
+                        NavItem {
+                            label: "+  Add a new profile";
+                            indent: true;
+                            clicked => {
+                                SettingsData.add-profile();
+                            }
+                        }
+                    }
+                }
+
+                NavItem {
+                    label: "Open JSON file";
+                    clicked => {
+                        SettingsData.open-json();
+                    }
+                }
+            }
+        }
+
+        // Page
+        VerticalLayout {
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-left: 32px;
+                    padding-right: 32px;
+                    padding-top: 24px;
+                    padding-bottom: 24px;
+                    spacing: 16px;
+                    alignment: start;
+                    PageTitle {
+                        text: SettingsData.nav-items.length > SettingsData.page ? SettingsData.nav-items[SettingsData.page] : "";
+                    }
+
+                    if SettingsData.page == 0: StartupPage { }
+                    if SettingsData.page == 1: InteractionPage { }
+                    if SettingsData.page == 2: AppearancePage { }
+                    if SettingsData.page == 3: SchemesPage { }
+                    if SettingsData.page == 4: RenderingPage { }
+                    if SettingsData.page == 5: ActionsPage { }
+                    if SettingsData.page >= 6: ProfilePage { }
+                }
+            }
+
+            // Footer
+            Rectangle {
+                height: 60px;
+                background: Theme.nav-bg;
+                HorizontalLayout {
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    spacing: 8px;
+                    Text {
+                        text: SettingsData.status;
+                        color: SettingsData.status-is-error ? Theme.error : Theme.text-dim;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Discard changes";
+                            enabled: SettingsData.dirty;
+                            clicked => {
+                                SettingsData.discard();
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Save";
+                            primary: true;
+                            enabled: SettingsData.dirty;
+                            clicked => {
+                                SettingsData.save();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

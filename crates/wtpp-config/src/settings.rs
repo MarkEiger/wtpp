@@ -1,0 +1,1159 @@
+//! `settings.json`: Windows Terminal's format, plus a few wt++ additions.
+//!
+//! Unknown keys are preserved through load/save so a WT settings file can be
+//! used as-is and edited without losing anything.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::{Map, Value};
+
+use crate::actions::Chord;
+use crate::keymap::Keymap;
+use crate::schemes::{DEFAULT_SCHEME, Scheme, builtin_schemes};
+
+pub const DEFAULT_FONT_FACE: &str = "Cascadia Mono";
+pub const DEFAULT_FONT_SIZE: f32 = 12.0;
+pub const DEFAULT_PADDING: [f32; 4] = [8.0, 4.0, 8.0, 8.0];
+pub const DEFAULT_HISTORY: u32 = 9001;
+pub const DEFAULT_CELL_HEIGHT: f32 = 1.2;
+/// Marks profiles wt++ found on the machine (shells, WSL distros).
+pub const DISCOVERED_SOURCE: &str = "wtpp.discovered";
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchMode {
+    #[default]
+    Default,
+    Maximized,
+    Fullscreen,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CursorShape {
+    #[default]
+    Bar,
+    Vintage,
+    Underscore,
+    DoubleUnderscore,
+    FilledBox,
+    EmptyBox,
+}
+
+impl CursorShape {
+    pub const ALL: [CursorShape; 6] = [
+        CursorShape::Bar,
+        CursorShape::Underscore,
+        CursorShape::DoubleUnderscore,
+        CursorShape::FilledBox,
+        CursorShape::EmptyBox,
+        CursorShape::Vintage,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CursorShape::Bar => "Bar ( ┃ )",
+            CursorShape::Underscore => "Underscore ( ▁ )",
+            CursorShape::DoubleUnderscore => "Double underscore ( ‗ )",
+            CursorShape::FilledBox => "Filled box ( █ )",
+            CursorShape::EmptyBox => "Empty box ( ▯ )",
+            CursorShape::Vintage => "Vintage ( ▃ )",
+        }
+    }
+}
+
+/// What happens to a pane when its shell exits (WT's `closeOnExit`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CloseOnExit {
+    /// Close when the shell exits successfully; otherwise keep the output.
+    #[default]
+    Graceful,
+    Always,
+    Never,
+}
+
+/// App chrome theme (WT's built-in `theme` names).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AppTheme {
+    #[default]
+    Dark,
+    Light,
+    /// Follow the system's app mode.
+    System,
+}
+
+/// How wide tabs are (WT's `tabWidthMode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TabWidthMode {
+    #[default]
+    Equal,
+    TitleLength,
+    /// Inactive tabs show only their icon.
+    Compact,
+}
+
+/// Graphics API used for rendering; applies on restart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GraphicsApi {
+    #[default]
+    Automatic,
+    Direct3d12,
+    Vulkan,
+    Metal,
+    #[serde(rename = "opengl")]
+    OpenGl,
+    /// CPU rendering, for broken GPU drivers or remote sessions.
+    Software,
+}
+
+/// How the terminal bell is shown (WT's `bellStyle`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BellStyle {
+    #[default]
+    Audible,
+    /// Flash the pane and mark the tab.
+    Visual,
+    All,
+    None,
+}
+
+/// How "intense" (bold) text is drawn (WT's `intenseTextStyle`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IntenseTextStyle {
+    /// Bright colors and bold font.
+    All,
+    #[default]
+    Bright,
+    Bold,
+    None,
+}
+
+impl IntenseTextStyle {
+    pub fn bright(self) -> bool {
+        matches!(self, IntenseTextStyle::All | IntenseTextStyle::Bright)
+    }
+
+    pub fn bold_font(self) -> bool {
+        matches!(self, IntenseTextStyle::All | IntenseTextStyle::Bold)
+    }
+}
+
+/// How keys are encoded for this profile's shell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyEncoding {
+    /// Windows key events for cmd/PowerShell, VT sequences for everything else.
+    #[default]
+    Auto,
+    Unix,
+    Windows,
+}
+
+/// Terminal padding: left, top, right, bottom. WT writes it as a string
+/// ("8, 8, 8, 8", "8, 4" or "8") or a number.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Padding(pub [f32; 4]);
+
+impl Padding {
+    pub fn parse(s: &str) -> Option<Padding> {
+        let parts: Vec<f32> = s.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+        Some(Padding(match parts[..] {
+            [a] => [a; 4],
+            [x, y] => [x, y, x, y],
+            [l, t, r, b] => [l, t, r, b],
+            _ => return None,
+        }))
+    }
+}
+
+impl std::fmt::Display for Padding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [l, t, r, b] = self.0;
+        write!(f, "{l}, {t}, {r}, {b}")
+    }
+}
+
+impl Serialize for Padding {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Padding {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Value::deserialize(d)? {
+            Value::Number(n) => Ok(Padding([n.as_f64().unwrap_or(8.0) as f32; 4])),
+            Value::String(s) => Padding::parse(&s).ok_or_else(|| serde::de::Error::custom("invalid padding")),
+            _ => Err(serde::de::Error::custom("invalid padding")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FontSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub face: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    /// "normal", "bold", … or a number (100–950).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight: Option<FontWeight>,
+    /// Line height as a multiple of the font size, e.g. "1.2" (WT writes a string).
+    #[serde(skip_serializing_if = "Option::is_none", with = "opt_number_string", default)]
+    pub cell_height: Option<f32>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl FontSettings {
+    /// `Some(false)` when `features` turns off contextual alternates or
+    /// ligatures (WT: `"features": { "calt": 0, "liga": 0 }`).
+    pub fn ligatures(&self) -> Option<bool> {
+        let features = self.extra.get("features")?.as_object()?;
+        let off = |k: &str| features.get(k).and_then(Value::as_i64) == Some(0);
+        let on = |k: &str| features.get(k).and_then(Value::as_i64).is_some_and(|v| v != 0);
+        if off("calt") || off("liga") {
+            Some(false)
+        } else if on("calt") || on("liga") {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    pub fn set_ligatures(&mut self, enabled: bool) {
+        let features = self.extra.entry("features").or_insert_with(|| Value::Object(Map::new()));
+        if let Some(features) = features.as_object_mut() {
+            for k in ["calt", "liga"] {
+                if enabled {
+                    features.remove(k);
+                } else {
+                    features.insert(k.into(), Value::from(0));
+                }
+            }
+            if features.is_empty() {
+                self.extra.remove("features");
+            }
+        }
+    }
+}
+
+/// One profile entry (or `profiles.defaults`). Every field is optional:
+/// unset fields inherit from the defaults, then from built-in values.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProfileSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commandline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starting_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<FontSettings>,
+    /// Pre-1.10 WT spelling of `font.face`; read, never written.
+    #[serde(skip_serializing)]
+    pub font_face: Option<String>,
+    /// Pre-1.10 WT spelling of `font.size`; read, never written.
+    #[serde(skip_serializing)]
+    pub font_size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_shape: Option<CursorShape>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub padding: Option<Padding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_size: Option<u32>,
+    #[serde(rename = "wtpp.keyEncoding", skip_serializing_if = "Option::is_none")]
+    pub key_encoding: Option<KeyEncoding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub close_on_exit: Option<CloseOnExit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab_color: Option<crate::schemes::Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tab_title: Option<String>,
+    /// Image path, or an emoji / short text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_application_title: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bell_style: Option<BellStyle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intense_text_style: Option<IntenseTextStyle>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl ProfileSettings {
+    /// Move legacy `fontFace`/`fontSize` into `font`.
+    fn migrate(&mut self) {
+        if self.font_face.is_some() || self.font_size.is_some() {
+            let font = self.font.get_or_insert_with(Default::default);
+            font.face = font.face.take().or(self.font_face.take());
+            font.size = font.size.or(self.font_size.take());
+        }
+    }
+
+    pub fn font_face(&self) -> Option<&str> {
+        self.font.as_ref()?.face.as_deref()
+    }
+
+    pub fn font_size(&self) -> Option<f32> {
+        self.font.as_ref()?.size
+    }
+
+    pub fn set_font_face(&mut self, face: Option<String>) {
+        self.font.get_or_insert_with(Default::default).face = face;
+    }
+
+    pub fn set_font_size(&mut self, size: Option<f32>) {
+        self.font.get_or_insert_with(Default::default).size = size;
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Profiles {
+    pub defaults: ProfileSettings,
+    pub list: Vec<ProfileSettings>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl<'de> Deserialize<'de> for Profiles {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // WT accepts either `"profiles": [...]` or `{ "defaults", "list" }`.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        #[allow(clippy::large_enum_variant)] // short-lived, only while parsing
+        enum Repr {
+            List(Vec<ProfileSettings>),
+            Object {
+                #[serde(default)]
+                defaults: ProfileSettings,
+                #[serde(default)]
+                list: Vec<ProfileSettings>,
+                #[serde(flatten)]
+                extra: Map<String, Value>,
+            },
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::List(list) => Profiles { list, ..Default::default() },
+            Repr::Object { defaults, list, extra } => Profiles { defaults, list, extra },
+        })
+    }
+}
+
+/// Font weight: WT accepts names or numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FontWeight(pub u16);
+
+impl FontWeight {
+    pub const NAMES: [(&'static str, u16); 9] = [
+        ("thin", 100),
+        ("extra-light", 200),
+        ("light", 300),
+        ("semi-light", 350),
+        ("normal", 400),
+        ("medium", 500),
+        ("semi-bold", 600),
+        ("bold", 700),
+        ("extra-bold", 800),
+    ];
+}
+
+impl Serialize for FontWeight {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match FontWeight::NAMES.iter().find(|(_, w)| *w == self.0) {
+            Some((name, _)) => s.serialize_str(name),
+            None => s.serialize_u16(self.0),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FontWeight {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match Value::deserialize(d)? {
+            Value::Number(n) => Ok(FontWeight(n.as_u64().unwrap_or(400).clamp(100, 950) as u16)),
+            Value::String(s) => {
+                let s = s.to_ascii_lowercase();
+                let named = FontWeight::NAMES.iter().find(|(n, _)| *n == s || n.replace('-', "") == s);
+                match (named, s.parse::<u16>()) {
+                    (Some((_, w)), _) => Ok(FontWeight(*w)),
+                    (None, Ok(w)) => Ok(FontWeight(w.clamp(100, 950))),
+                    _ => Err(serde::de::Error::custom(format!("unknown font weight {s:?}"))),
+                }
+            }
+            _ => Err(serde::de::Error::custom("invalid font weight")),
+        }
+    }
+}
+
+/// `Option<f32>` stored as a string ("1.2"), as WT does for cell sizes;
+/// numbers are accepted when reading.
+mod opt_number_string {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde_json::Value;
+
+    pub fn serialize<S: Serializer>(v: &Option<f32>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => s.collect_str(v),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
+        Ok(match Value::deserialize(d)? {
+            Value::Number(n) => n.as_f64().map(|v| v as f32),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        })
+    }
+}
+
+/// One entry of `actions`: a command and the key(s) bound to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionEntry {
+    pub command: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "one_or_many", serialize_with = "one_or_many_out")]
+    pub keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl ActionEntry {
+    pub fn new(command: Value, chord: Chord) -> ActionEntry {
+        ActionEntry { command, keys: vec![chord.to_wt_string()], id: None, extra: Map::new() }
+    }
+}
+
+fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(s) => vec![s],
+        Value::Array(a) => a.into_iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        _ => Vec::new(),
+    })
+}
+
+/// A single key combination is written as a plain string, like WT does.
+fn one_or_many_out<S: Serializer>(keys: &[String], s: S) -> Result<S::Ok, S::Error> {
+    match keys {
+        [one] => s.serialize_str(one),
+        many => many.serialize(s),
+    }
+}
+
+/// WT 1.21+ splits bindings out of `actions`: `{ "id": ..., "keys": ... }`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KeybindingEntry {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub keys: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Settings {
+    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+    #[serde(skip_serializing_if = "is_default")]
+    pub launch_mode: LaunchMode,
+    pub initial_cols: u16,
+    pub initial_rows: u16,
+    pub copy_on_select: bool,
+    pub word_delimiters: String,
+    pub confirm_close_all_tabs: bool,
+    pub focus_follow_mouse: bool,
+    /// Let apps set the clipboard with OSC 52.
+    #[serde(rename = "compatibility.allowOSC52")]
+    pub allow_osc52: bool,
+    /// "x,y" in screen pixels; empty means let the system decide.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_position: Option<String>,
+    /// Restore the last window position and size (wt++ addition).
+    #[serde(rename = "wtpp.rememberWindowBounds")]
+    pub remember_window_bounds: bool,
+    pub multi_line_paste_warning: bool,
+    pub large_paste_warning: bool,
+    pub show_tabs_in_titlebar: bool,
+    pub theme: AppTheme,
+    pub tab_width_mode: TabWidthMode,
+    /// Show the tab row even with a single tab (only matters with the native
+    /// title bar; tabs in the title bar are always shown).
+    pub always_show_tabs: bool,
+    /// Right-click in a terminal opens a menu instead of copy/paste.
+    #[serde(rename = "experimental.rightClickContextMenu")]
+    pub right_click_context_menu: bool,
+    #[serde(rename = "rendering.graphicsAPI")]
+    pub graphics_api: GraphicsApi,
+    pub profiles: Profiles,
+    pub schemes: Vec<Scheme>,
+    pub actions: Vec<ActionEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keybindings: Vec<KeybindingEntry>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            schema: None,
+            default_profile: None,
+            launch_mode: LaunchMode::Default,
+            initial_cols: 120,
+            initial_rows: 30,
+            copy_on_select: false,
+            word_delimiters: " /\\()\"'-.,:;<>~!@#$%^&*|+=[]{}~?\u{2502}".into(),
+            confirm_close_all_tabs: true,
+            focus_follow_mouse: false,
+            allow_osc52: true,
+            initial_position: None,
+            remember_window_bounds: true,
+            multi_line_paste_warning: true,
+            large_paste_warning: true,
+            show_tabs_in_titlebar: true,
+            theme: AppTheme::Dark,
+            tab_width_mode: TabWidthMode::Equal,
+            always_show_tabs: true,
+            right_click_context_menu: false,
+            graphics_api: GraphicsApi::Automatic,
+            profiles: Profiles::default(),
+            schemes: Vec::new(),
+            actions: Vec::new(),
+            keybindings: Vec::new(),
+            extra: Map::new(),
+        }
+    }
+}
+
+/// A profile with everything inherited and defaulted, ready to use.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedProfile {
+    pub guid: String,
+    pub name: String,
+    pub commandline: String,
+    pub starting_directory: Option<String>,
+    pub hidden: bool,
+    pub source: Option<String>,
+    pub color_scheme: String,
+    pub font_face: String,
+    pub font_size: f32,
+    pub cursor_shape: CursorShape,
+    pub padding: [f32; 4],
+    pub history_size: u32,
+    pub key_encoding: KeyEncoding,
+    pub close_on_exit: CloseOnExit,
+    pub tab_color: Option<crate::schemes::Color>,
+    pub tab_title: Option<String>,
+    pub icon: Option<String>,
+    pub suppress_application_title: bool,
+    pub environment: std::collections::BTreeMap<String, String>,
+    pub bell_style: BellStyle,
+    pub intense_text_style: IntenseTextStyle,
+    pub font_weight: u16,
+    pub cell_height: f32,
+    /// False when `font.features` turns off `calt` or `liga`.
+    pub ligatures: bool,
+}
+
+/// A shell found on this machine.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscoveredProfile {
+    pub name: String,
+    pub commandline: String,
+    pub icon: Option<String>,
+}
+
+impl Settings {
+    /// Parse settings JSON (comments and trailing commas allowed).
+    pub fn parse(text: &str) -> Result<Settings, String> {
+        let value: Value = serde_json::from_str(&strip_jsonc(text)).map_err(|e| e.to_string())?;
+        let mut settings: Settings = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        settings.profiles.defaults.migrate();
+        for p in &mut settings.profiles.list {
+            p.migrate();
+        }
+        Ok(settings)
+    }
+
+    pub fn to_json(&self) -> String {
+        let mut out = Vec::new();
+        let formatter = serde_json::ser::PrettyFormatter::with_indent(b"    ");
+        let mut ser = serde_json::Serializer::with_formatter(&mut out, formatter);
+        self.serialize(&mut ser).expect("settings always serialize");
+        String::from_utf8(out).expect("serde_json writes UTF-8") + "\n"
+    }
+
+    /// Load from `path`. A missing file gives defaults; a broken file gives
+    /// defaults plus the error, so the app still starts.
+    pub fn load(path: &Path) -> (Settings, Option<String>) {
+        match std::fs::read_to_string(path) {
+            Ok(text) => match Settings::parse(&text) {
+                Ok(s) => (s, None),
+                Err(e) => (Settings::default(), Some(format!("{}: {e}", path.display()))),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Settings::default(), None),
+            Err(e) => (Settings::default(), Some(format!("{}: {e}", path.display()))),
+        }
+    }
+
+    /// Write atomically (temp file + rename) so a crash can't truncate it.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, self.to_json())?;
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Add shells found on this machine that the file doesn't list yet.
+    /// Returns whether anything was added.
+    pub fn merge_discovered(&mut self, found: &[DiscoveredProfile]) -> bool {
+        let mut changed = false;
+        for d in found {
+            let known = self.profiles.list.iter_mut().find(|p| {
+                p.name.as_deref() == Some(&d.name) || p.commandline.as_deref() == Some(&d.commandline)
+            });
+            if let Some(known) = known {
+                // Profiles found by an older version may lack an icon.
+                if known.source.as_deref() == Some(DISCOVERED_SOURCE) && known.icon.is_none() && d.icon.is_some() {
+                    known.icon = d.icon.clone();
+                    changed = true;
+                }
+            } else {
+                self.profiles.list.push(ProfileSettings {
+                    guid: Some(guid_for(&d.name)),
+                    name: Some(d.name.clone()),
+                    commandline: Some(d.commandline.clone()),
+                    icon: d.icon.clone(),
+                    source: Some(DISCOVERED_SOURCE.into()),
+                    ..Default::default()
+                });
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// All schemes: built-ins, overridden/extended by the file's.
+    pub fn all_schemes(&self) -> Vec<Scheme> {
+        let mut all = builtin_schemes();
+        for s in &self.schemes {
+            match all.iter_mut().find(|b| b.name == s.name) {
+                Some(slot) => *slot = s.clone(),
+                None => all.push(s.clone()),
+            }
+        }
+        all
+    }
+
+    pub fn scheme(&self, name: &str) -> Scheme {
+        let all = self.all_schemes();
+        all.iter().find(|s| s.name == name).or_else(|| all.iter().find(|s| s.name == DEFAULT_SCHEME)).cloned().unwrap()
+    }
+
+    pub fn resolve(&self, p: &ProfileSettings) -> ResolvedProfile {
+        let d = &self.profiles.defaults;
+        let name = p.name.clone().unwrap_or_else(|| "Profile".into());
+        ResolvedProfile {
+            guid: p.guid.clone().unwrap_or_else(|| guid_for(&name)),
+            commandline: p.commandline.clone().or_else(|| d.commandline.clone()).unwrap_or_else(default_shell),
+            starting_directory: p.starting_directory.clone().or_else(|| d.starting_directory.clone()),
+            hidden: p.hidden.unwrap_or(false),
+            source: p.source.clone(),
+            color_scheme: p.color_scheme.clone().or_else(|| d.color_scheme.clone()).unwrap_or_else(|| DEFAULT_SCHEME.into()),
+            font_face: p.font_face().or(d.font_face()).unwrap_or(DEFAULT_FONT_FACE).to_string(),
+            font_size: p.font_size().or(d.font_size()).unwrap_or(DEFAULT_FONT_SIZE),
+            cursor_shape: p.cursor_shape.or(d.cursor_shape).unwrap_or_default(),
+            padding: p.padding.or(d.padding).map_or(DEFAULT_PADDING, |p| p.0),
+            history_size: p.history_size.or(d.history_size).unwrap_or(DEFAULT_HISTORY),
+            key_encoding: p.key_encoding.or(d.key_encoding).unwrap_or_default(),
+            close_on_exit: p.close_on_exit.or(d.close_on_exit).unwrap_or_default(),
+            tab_color: p.tab_color.or(d.tab_color),
+            tab_title: p.tab_title.clone().or_else(|| d.tab_title.clone()).filter(|t| !t.is_empty()),
+            icon: p.icon.clone().or_else(|| d.icon.clone()).filter(|i| !i.trim().is_empty()),
+            suppress_application_title: p.suppress_application_title.or(d.suppress_application_title).unwrap_or(false),
+            // Defaults' variables, overridden per profile.
+            environment: d.environment.iter().chain(p.environment.iter()).flatten().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            bell_style: p.bell_style.or(d.bell_style).unwrap_or_default(),
+            intense_text_style: p.intense_text_style.or(d.intense_text_style).unwrap_or_default(),
+            font_weight: p.font.as_ref().and_then(|f| f.weight).or(d.font.as_ref().and_then(|f| f.weight)).map_or(400, |w| w.0),
+            cell_height: p.font.as_ref().and_then(|f| f.cell_height).or(d.font.as_ref().and_then(|f| f.cell_height)).unwrap_or(DEFAULT_CELL_HEIGHT),
+            ligatures: p.font.as_ref().and_then(FontSettings::ligatures).or(d.font.as_ref().and_then(FontSettings::ligatures)).unwrap_or(true),
+            name,
+        }
+    }
+
+    /// Profiles shown in the new-tab menu, in order.
+    pub fn visible_profiles(&self) -> Vec<ResolvedProfile> {
+        self.profiles.list.iter().map(|p| self.resolve(p)).filter(|p| !p.hidden).collect()
+    }
+
+    /// Index into [`Settings::visible_profiles`] of the default profile.
+    pub fn default_profile_index(&self) -> usize {
+        let Some(wanted) = &self.default_profile else { return 0 };
+        self.visible_profiles()
+            .iter()
+            .position(|p| p.guid.eq_ignore_ascii_case(wanted) || &p.name == wanted)
+            .unwrap_or(0)
+    }
+
+    pub fn keymap(&self) -> (Keymap, Vec<String>) {
+        // WT 1.21+: commands carry an `id`; bindings live in `keybindings`.
+        let mut entries = self.actions.clone();
+        for kb in &self.keybindings {
+            if let Some(entry) = kb.id.as_ref().and_then(|id| entries.iter_mut().find(|e| e.id.as_ref() == Some(id))) {
+                entry.keys.extend(kb.keys.iter().cloned());
+            }
+        }
+        Keymap::from_user_actions(&entries)
+    }
+
+    /// Store `keymap` as the user's bindings (as a diff from the defaults).
+    pub fn set_keymap(&mut self, keymap: &Keymap) {
+        // Keep commands without keys (palette-only entries) and anything we
+        // don't understand; replace everything we generate.
+        self.actions.retain(|a| a.keys.is_empty() && a.id.is_some());
+        self.keybindings.clear();
+        self.actions.extend(keymap.to_user_actions());
+    }
+
+    /// Import a Windows Terminal settings file: profiles (matched by name),
+    /// color schemes, key bindings and the default profile.
+    pub fn import_windows_terminal(&mut self, wt: &Settings) {
+        for p in &wt.profiles.list {
+            let Some(name) = &p.name else { continue };
+            match self.profiles.list.iter_mut().find(|q| q.name.as_ref() == Some(name)) {
+                Some(existing) => {
+                    let guid = existing.guid.clone();
+                    let source = existing.source.clone();
+                    *existing = p.clone();
+                    existing.guid = guid.or(p.guid.clone());
+                    existing.source = source;
+                }
+                None if p.commandline.is_some() => self.profiles.list.push(p.clone()),
+                // WT's dynamic profiles (no commandline) only make sense with
+                // WT's generators; skip ones we didn't discover ourselves.
+                None => {}
+            }
+        }
+        self.profiles.defaults = wt.profiles.defaults.clone();
+        for s in &wt.schemes {
+            self.schemes.retain(|x| x.name != s.name);
+            self.schemes.push(s.clone());
+        }
+        let (keymap, _) = wt.keymap();
+        self.set_keymap(&keymap);
+        if let Some(default) = &wt.default_profile {
+            let name = wt.profiles.list.iter().find(|p| p.guid.as_ref() == Some(default)).and_then(|p| p.name.clone());
+            self.default_profile = name.or(Some(default.clone()));
+        }
+        self.copy_on_select = wt.copy_on_select;
+        self.word_delimiters = wt.word_delimiters.clone();
+        self.launch_mode = wt.launch_mode;
+        self.initial_cols = wt.initial_cols;
+        self.initial_rows = wt.initial_rows;
+    }
+}
+
+fn default_shell() -> String {
+    if cfg!(windows) { "powershell.exe".into() } else { std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()) }
+}
+
+/// Stable GUID for a discovered profile, derived from its name (FNV-1a).
+pub fn guid_for(name: &str) -> String {
+    let fnv = |seed: u64| {
+        name.bytes().fold(seed, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+    };
+    let (a, b) = (fnv(0xcbf29ce484222325), fnv(0x84222325cbf29ce4));
+    format!(
+        "{{{:08x}-{:04x}-{:04x}-{:04x}-{:012x}}}",
+        a >> 32,
+        (a >> 16) & 0xFFFF,
+        a & 0xFFFF,
+        b >> 48,
+        b & 0xFFFF_FFFF_FFFF
+    )
+}
+
+/// Split a command line into program and arguments (double quotes group).
+pub fn split_commandline(s: &str) -> (String, Vec<String>) {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for c in s.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    parts.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        parts.push(cur);
+    }
+    let mut parts = parts.into_iter();
+    (parts.next().unwrap_or_default(), parts.collect())
+}
+
+/// Quote program and arguments back into a command line.
+pub fn join_commandline(program: &str, args: &[String]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .map(|p| if p.contains(char::is_whitespace) || p.is_empty() { format!("\"{p}\"") } else { p.to_string() })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Expand Windows-style `%VAR%` references (and a leading `~` to the home
+/// directory), as WT does for command lines and starting directories.
+pub fn expand_env(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end) if end > 0 => {
+                let name = &after[..end];
+                match std::env::var(name) {
+                    Ok(v) => out.push_str(&v),
+                    Err(_) => out.push_str(&rest[start..start + end + 2]),
+                }
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    if let Some(tail) = out.strip_prefix('~')
+        && (tail.is_empty() || tail.starts_with(['/', '\\']))
+        && let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+    {
+        return format!("{}{tail}", home.to_string_lossy());
+    }
+    out
+}
+
+/// Remove `//` and `/* */` comments and trailing commas, outside strings.
+pub fn strip_jsonc(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            match c {
+                '\\' => {
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                }
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut prev = ' ';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+            }
+            (',', _) => {
+                // Drop the comma if the next non-space char closes a container.
+                let rest: String = chars.clone().collect();
+                let next = strip_leading_comments(&rest);
+                if !next.starts_with(['}', ']']) {
+                    out.push(c);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn strip_leading_comments(mut s: &str) -> &str {
+    loop {
+        s = s.trim_start();
+        if let Some(rest) = s.strip_prefix("//") {
+            s = rest.split_once('\n').map_or("", |(_, r)| r);
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = rest.split_once("*/").map_or("", |(_, r)| r);
+        } else {
+            return s;
+        }
+    }
+}
+
+/// Where wt++ keeps its settings.
+pub fn settings_path() -> PathBuf {
+    config_dir().join("settings.json")
+}
+
+fn config_dir() -> PathBuf {
+    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if cfg!(windows) {
+        env("LOCALAPPDATA").unwrap_or_else(|| PathBuf::from(".")).join("wtpp")
+    } else if cfg!(target_os = "macos") {
+        env("HOME").unwrap_or_default().join("Library/Application Support/wtpp")
+    } else {
+        env("XDG_CONFIG_HOME").unwrap_or_else(|| env("HOME").unwrap_or_default().join(".config")).join("wtpp")
+    }
+}
+
+/// Windows Terminal's settings file (store, preview or unpackaged install).
+pub fn find_windows_terminal_settings() -> Option<PathBuf> {
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    [
+        "Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json",
+        "Packages/Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe/LocalState/settings.json",
+        "Microsoft/Windows Terminal/settings.json",
+    ]
+    .iter()
+    .map(|p| local.join(p))
+    .find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::Action;
+
+    const WT_SAMPLE: &str = r##"
+    // This file was initially generated by Windows Terminal
+    {
+        "$schema": "https://aka.ms/terminal-profiles-schema",
+        "defaultProfile": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}",
+        "copyOnSelect": true,
+        "theme": "light",
+        "launchWindowAnimation": true, /* unknown to us, must survive */
+        "profiles": {
+            "defaults": { "font": { "face": "Cascadia Code", "size": 11 }, "padding": "4" },
+            "list": [
+                { "guid": "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}", "name": "Windows PowerShell",
+                  "commandline": "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "hidden": false },
+                { "guid": "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}", "name": "Command Prompt",
+                  "commandline": "%SystemRoot%\\System32\\cmd.exe", "fontFace": "Consolas", "colorScheme": "Vintage" },
+                { "guid": "{2c4de342-38b7-51cf-b940-2309a097f518}", "name": "Ubuntu", "source": "Windows.Terminal.Wsl", "hidden": false },
+            ],
+        },
+        "schemes": [
+            { "name": "Mine", "foreground": "#FFFFFF", "background": "#000000",
+              "black": "#000000", "red": "#FF0000", "green": "#00FF00", "yellow": "#FFFF00",
+              "blue": "#0000FF", "purple": "#FF00FF", "cyan": "#00FFFF", "white": "#FFFFFF",
+              "brightBlack": "#000000", "brightRed": "#FF0000", "brightGreen": "#00FF00", "brightYellow": "#FFFF00",
+              "brightBlue": "#0000FF", "brightPurple": "#FF00FF", "brightCyan": "#00FFFF", "brightWhite": "#FFFFFF" }
+        ],
+        "actions": [
+            { "command": { "action": "copy", "singleLine": false }, "id": "User.copy.644BA8F2" },
+            { "command": "unbound", "keys": "ctrl+v" },
+            { "command": { "action": "splitPane", "split": "auto", "splitMode": "duplicate" }, "id": "User.split" }
+        ],
+        "keybindings": [
+            { "id": "User.copy.644BA8F2", "keys": "ctrl+c" },
+            { "id": "User.split", "keys": "alt+shift+s" }
+        ]
+    }"##;
+
+    #[test]
+    fn parses_windows_terminal_file() {
+        let s = Settings::parse(WT_SAMPLE).unwrap();
+        assert!(s.copy_on_select);
+        assert_eq!(s.theme, AppTheme::Light);
+        assert_eq!(s.extra.get("launchWindowAnimation"), Some(&Value::from(true)));
+        assert_eq!(s.profiles.list.len(), 3);
+        assert_eq!(s.profiles.list[1].font_face(), Some("Consolas"));
+
+        let cmd = s.resolve(&s.profiles.list[1]);
+        assert_eq!(cmd.color_scheme, "Vintage");
+        assert_eq!(cmd.font_size, 11.0);
+        assert_eq!(cmd.padding, [4.0; 4]);
+
+        let (keymap, warnings) = s.keymap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let alt_shift = wtpp_input::Mods { alt: true, shift: true, ..Default::default() };
+        assert_eq!(
+            keymap.lookup(wtpp_input::Key::Char('S'), alt_shift),
+            Some(&Action::SplitPane { side: None, duplicate: true })
+        );
+        assert_eq!(keymap.lookup(wtpp_input::Key::Char('v'), wtpp_input::Mods::CTRL), None);
+    }
+
+    #[test]
+    fn save_round_trip_keeps_unknown_keys() {
+        let s = Settings::parse(WT_SAMPLE).unwrap();
+        let again = Settings::parse(&s.to_json()).unwrap();
+        assert_eq!(again, s);
+        assert!(s.to_json().contains("\"launchWindowAnimation\": true"));
+        assert!(Settings { actions: vec![ActionEntry::new(Value::from("paste"), Chord::parse("ctrl+v").unwrap())], ..Default::default() }
+            .to_json()
+            .contains("\"keys\": \"ctrl+v\""));
+        // Legacy spelling is migrated, not duplicated.
+        assert!(!s.to_json().contains("fontFace"));
+    }
+
+    #[test]
+    fn import_from_windows_terminal() {
+        let wt = Settings::parse(WT_SAMPLE).unwrap();
+        let mut ours = Settings::default();
+        ours.merge_discovered(&[
+            DiscoveredProfile { name: "Windows PowerShell".into(), commandline: "powershell.exe".into(), icon: None },
+            DiscoveredProfile { name: "Command Prompt".into(), commandline: "cmd.exe".into(), icon: None },
+        ]);
+        ours.import_windows_terminal(&wt);
+
+        // Matched by name, our GUID kept, settings imported; WSL generator profile skipped.
+        assert_eq!(ours.profiles.list.len(), 2);
+        assert_eq!(ours.profiles.list[0].guid, Some(guid_for("Windows PowerShell")));
+        assert_eq!(ours.profiles.list[1].color_scheme.as_deref(), Some("Vintage"));
+        assert_eq!(ours.default_profile.as_deref(), Some("Windows PowerShell"));
+        assert!(ours.all_schemes().iter().any(|s| s.name == "Mine"));
+        let (keymap, _) = ours.keymap();
+        assert_eq!(keymap.lookup(wtpp_input::Key::Char('v'), wtpp_input::Mods::CTRL), None);
+    }
+
+    #[test]
+    fn discovered_profiles_merge_once() {
+        let mut s = Settings::default();
+        let found = [DiscoveredProfile { name: "bash".into(), commandline: "/bin/bash -l".into(), icon: None }];
+        assert!(s.merge_discovered(&found));
+        assert!(!s.merge_discovered(&found));
+        assert_eq!(s.visible_profiles()[0].commandline, "/bin/bash -l");
+        s.profiles.list[0].hidden = Some(true);
+        assert!(s.visible_profiles().is_empty());
+    }
+
+    #[test]
+    fn jsonc() {
+        let src = "{\"a\": \"// not a comment\", // comment\n \"b\": [1, 2,], /* c */ \"c\": {\"d\": 1,},\n}";
+        let v: Value = serde_json::from_str(&strip_jsonc(src)).unwrap();
+        assert_eq!(v["a"], "// not a comment");
+        assert_eq!(v["b"], serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn commandlines() {
+        assert_eq!(
+            split_commandline(r#""C:\Program Files\Git\bin\bash.exe" -i -l"#),
+            (r"C:\Program Files\Git\bin\bash.exe".to_string(), vec!["-i".to_string(), "-l".to_string()])
+        );
+        assert_eq!(split_commandline("wsl.exe -d Debian"), ("wsl.exe".into(), vec!["-d".into(), "Debian".into()]));
+        assert_eq!(join_commandline(r"C:\Program Files\x.exe", &["-a".into()]), r#""C:\Program Files\x.exe" -a"#);
+    }
+
+    #[test]
+    fn env_expansion() {
+        // SAFETY: tests in this module don't read this variable concurrently.
+        unsafe { std::env::set_var("WTPP_TEST_ROOT", r"C:\Windows") };
+        assert_eq!(expand_env(r"%WTPP_TEST_ROOT%\System32\cmd.exe"), r"C:\Windows\System32\cmd.exe");
+        assert_eq!(expand_env("100% sure %NOPE_NOT_SET%"), "100% sure %NOPE_NOT_SET%");
+    }
+
+    #[test]
+    fn profile_extras() {
+        let s = Settings::parse(r#"{
+            "profiles": {
+                "defaults": { "environment": { "A": "1", "B": "2" }, "font": { "weight": "bold", "cellHeight": "1.4" } },
+                "list": [ { "name": "x", "commandline": "x", "environment": { "B": "3" }, "bellStyle": "visual",
+                            "intenseTextStyle": "all", "tabTitle": "T", "suppressApplicationTitle": true,
+                            "font": { "weight": 300 } } ]
+            }
+        }"#).unwrap();
+        let p = s.resolve(&s.profiles.list[0]);
+        assert_eq!(p.environment.get("A").map(String::as_str), Some("1"));
+        assert_eq!(p.environment.get("B").map(String::as_str), Some("3"));
+        assert_eq!(p.bell_style, BellStyle::Visual);
+        assert!(p.intense_text_style.bright() && p.intense_text_style.bold_font());
+        assert_eq!(p.font_weight, 300);
+        assert_eq!(p.cell_height, 1.4);
+        assert!(p.ligatures);
+        let mut font = FontSettings::default();
+        font.set_ligatures(false);
+        assert_eq!(font.ligatures(), Some(false));
+        font.set_ligatures(true);
+        assert_eq!(font.ligatures(), None);
+        assert!(font.extra.is_empty());
+        assert_eq!(p.tab_title.as_deref(), Some("T"));
+        assert!(p.suppress_application_title);
+        let json = s.to_json();
+        assert!(json.contains("\"cellHeight\": \"1.4\""), "{json}");
+        assert!(json.contains("\"weight\": \"bold\""));
+    }
+
+    #[test]
+    fn padding_forms() {
+        assert_eq!(Padding::parse("8").unwrap().0, [8.0; 4]);
+        assert_eq!(Padding::parse("8, 4").unwrap().0, [8.0, 4.0, 8.0, 4.0]);
+        assert_eq!(Padding::parse("1,2,3,4").unwrap().0, [1.0, 2.0, 3.0, 4.0]);
+        assert!(Padding::parse("1,2,3").is_none());
+    }
+
+    #[test]
+    fn guids_are_stable_and_distinct() {
+        assert_eq!(guid_for("bash"), guid_for("bash"));
+        assert_ne!(guid_for("bash"), guid_for("zsh"));
+        assert_eq!(guid_for("bash").len(), 38);
+    }
+}

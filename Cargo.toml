@@ -1,0 +1,51 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+wtpp-session = { path = "crates/wtpp-session" }
+wtpp-render = { path = "crates/wtpp-render" }
+wtpp-input = { path = "crates/wtpp-input" }
+wtpp-config = { path = "crates/wtpp-config" }
+
+alacritty_terminal = "0.26.0"
+anyhow = "1.0.104"
+arboard = "3.7.0"
+bytemuck = { version = "1", features = ["derive"] }
+cosmic-text = "0.19.0"
+env_logger = "0.11.11"
+log = "0.4.35"
+notify = "8"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+slint = { version = "~1.18.1", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "accessibility",
+    "backend-winit",
+    "renderer-femtovg-wgpu",
+    "unstable-wgpu-30",
+    "unstable-winit-030",
+] }
+slint-build = "~1.18.1"
+wgpu = "30.0.1"
+windows-sys = "0.61.2"
+
+[profile.release]
+# Smaller binary: faster cold start (less to load and virus-scan).
+strip = true
+lto = "thin"
+
+[profile.dev.package."*"]
+# Dependencies (font rasterizing, wgpu) are painfully slow unoptimized.
+opt-level = 2
+
+[patch.crates-io]
+# Passes the window's display handle to wgpu so the GL backend can present
+# (needed for GPU rendering under WSLg). See vendor/README.md.
+i-slint-core = { path = "vendor/i-slint-core" }

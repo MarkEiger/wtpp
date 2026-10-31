@@ -1,0 +1,1282 @@
+import { Button, LineEdit, Palette } from "std-widgets.slint";
+import { SettingsPage, SettingsData } from "settings.slint";
+import { Colors } from "theme.slint";
+
+export { SettingsData, Colors }
+
+export struct TabData {
+    title: string,
+    // Tab color (rename/menu "Color"); `has-color` false means none.
+    color: color,
+    has-color: bool,
+    // A bell rang in this tab while it wasn't being looked at.
+    bell: bool,
+    icon: image,
+    icon-text: string,
+    active: bool,
+    is-settings: bool,
+    renaming: bool,
+    zoomed: bool,
+}
+
+export struct DividerData {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    vertical: bool,
+}
+
+export struct PaletteItem {
+    label: string,
+    keys: string,
+}
+
+export struct PaneData {
+    // Pane rectangle inside the content area.
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    // Rendered grid (a whole number of cells), placed at the padding offset.
+    image: image,
+    image-width: length,
+    image-height: length,
+    padding-left: length,
+    padding-top: length,
+    background: color,
+    focused: bool,
+    // Visual bell flash.
+    flash: bool,
+    // Ctrl is held over a link: hand cursor.
+    link-hover: bool,
+    // Scrollbar: thumb position and size as fractions of the track.
+    scroll-visible: bool,
+    thumb-top: float,
+    thumb-size: float,
+}
+
+export struct MenuEntry {
+    // Profile icon: an image, or short text such as an emoji.
+    icon: image,
+    icon-text: string,
+    label: string,
+    shortcut: string,
+    enabled: bool,
+}
+
+
+component IconButton inherits Rectangle {
+    callback clicked;
+    width: 32px;
+    height: 28px;
+    border-radius: 4px;
+    background: ta.pressed ? Colors.pressed : ta.has-hover ? Colors.hover : transparent;
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A small on/off button (find bar "Aa" match case / ".*" regex).
+component ToggleChip inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked;
+    callback toggled;
+    width: 30px;
+    height: 30px;
+    border-radius: 4px;
+    border-width: checked ? 1px : 0px;
+    border-color: Colors.accent;
+    background: checked ? #3b78ff33 : ta.has-hover ? Colors.hover : transparent;
+    ta := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+
+    Text {
+        text: root.label;
+        color: Colors.text;
+        font-size: 12px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// Scrolls the tab strip when tabs overflow.
+component ScrollButton inherits Rectangle {
+    in property <bool> left;
+    // False at the end it scrolls towards.
+    in property <bool> enabled: true;
+    callback clicked;
+    width: 24px;
+    height: 28px;
+    border-radius: 4px;
+    background: ta.has-hover && root.enabled ? Colors.hover : transparent;
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Path {
+        width: 5px;
+        height: 10px;
+        opacity: root.enabled ? 1 : 0.35;
+        stroke: Colors.text;
+        stroke-width: 1.2px;
+        commands: root.left ? "M 5 0 L 0 5 L 5 10" : "M 0 0 L 5 5 L 0 10";
+    }
+}
+
+component CaptionButton inherits Rectangle {
+    in property <bool> is-close;
+    in property <bool> external-hover;
+    callback clicked;
+    width: 46px;
+    background: (ta.has-hover || external-hover) ? (is-close ? #c42b1c : Colors.hover) : transparent;
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component TabItem inherits Rectangle {
+    in property <string> title;
+    in property <bool> active;
+    in property <bool> renaming;
+    in property <bool> is-settings;
+    in property <bool> zoomed;
+    in property <color> tab-color;
+    in property <bool> has-color;
+    in property <bool> bell;
+    in property <bool> window-active: true;
+    in property <image> icon;
+    in property <string> icon-text;
+    // 0 equal, 1 title length, 2 compact (inactive tabs show only the icon).
+    in property <int> width-mode;
+    property <bool> icon-only: width-mode == 2 && !active;
+    callback clicked;
+    callback close;
+    callback rename();
+    callback renamed(string);
+    // Pointer x in window coordinates while dragging the tab.
+    callback drag(length);
+    callback drag-end();
+    // An entry of the right-click menu.
+    callback menu(string);
+
+    property <bool> dragging;
+
+    min-width: icon-only ? 40px : 90px;
+    preferred-width: icon-only ? 40px : width-mode == 1 ? title-label.preferred-width + 80px : 220px;
+    max-width: icon-only ? 40px : width-mode == 1 ? 400px : 240px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    background: has-color
+        ? (active ? tab-color : ta.has-hover ? tab-color.darker(20%) : tab-color.darker(40%))
+        : (active ? Colors.terminal : ta.has-hover ? Colors.hover : transparent);
+
+    ta := TouchArea {
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.clicked();
+            }
+            if e.kind == PointerEventKind.up {
+                // Middle-click closes, like WT.
+                if e.button == PointerEventButton.middle {
+                    root.close();
+                }
+                if root.dragging {
+                    root.dragging = false;
+                    root.drag-end();
+                }
+            }
+        }
+        moved => {
+            if self.pressed && (root.dragging || abs(self.mouse-x - self.pressed-x) > 8px) {
+                root.dragging = true;
+                root.drag(self.absolute-position.x + self.mouse-x);
+            }
+        }
+        double-clicked => {
+            if !root.is-settings {
+                root.rename();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 6px;
+        spacing: 6px;
+        if root.icon.width > 0: VerticalLayout {
+            alignment: center;
+            Image {
+                width: 16px;
+                height: 16px;
+                source: root.icon;
+            }
+        }
+
+        if root.icon.width == 0 && root.icon-text != "": Text {
+            text: root.icon-text;
+            font-size: 13px;
+            vertical-alignment: center;
+            color: Colors.text;
+        }
+
+        // Bell rang while the tab wasn't visible.
+        if root.bell: VerticalLayout {
+            alignment: center;
+            Path {
+                width: 10px;
+                height: 11px;
+                stroke: Colors.text;
+                stroke-width: 1.1px;
+                commands: "M 5 0.5 C 2.5 0.5 1.5 2.5 1.5 4.5 L 1.5 7.5 L 0.5 9 L 9.5 9 L 8.5 7.5 L 8.5 4.5 C 8.5 2.5 7.5 0.5 5 0.5 Z M 3.8 10.5 L 6.2 10.5";
+            }
+        }
+
+        // Zoomed pane: a "maximize" corner-arrows icon.
+        if root.zoomed: VerticalLayout {
+            alignment: center;
+            Path {
+                width: 10px;
+                height: 10px;
+                stroke: Colors.text;
+                stroke-width: 1.2px;
+                commands: "M 0 3.5 L 0 0 L 3.5 0 M 6.5 0 L 10 0 L 10 3.5 M 10 6.5 L 10 10 L 6.5 10 M 3.5 10 L 0 10 L 0 6.5";
+            }
+        }
+
+        title-label := Text {
+            visible: !root.renaming && !root.icon-only;
+            // Elide in narrow tabs; take no space in icon-only tabs.
+            min-width: 0px;
+            max-width: root.icon-only ? 0px : 10000px;
+            text: (root.is-settings ? "⚙  " : "") + root.title;
+            // Colored tabs are dark enough for white text either way.
+            color: (root.active && root.window-active) || root.has-color ? Colors.text : Colors.text-dim;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+
+        if root.renaming: VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 100;
+            FocusScope {
+                key-pressed(e) => {
+                    if e.text == Key.Escape {
+                        root.renamed(root.title);
+                        return accept;
+                    }
+                    reject
+                }
+                name := LineEdit {
+                    height: 26px;
+                    text: root.title;
+                    init => {
+                        self.focus();
+                        self.select-all();
+                    }
+                    accepted(t) => {
+                        root.renamed(t);
+                    }
+                    changed has-focus => {
+                        if !self.has-focus {
+                            root.renamed(self.text);
+                        }
+                    }
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                height: 24px;
+                border-radius: 4px;
+                background: close-ta.has-hover ? Colors.pressed : transparent;
+                // Only show the close button on the active or hovered tab.
+                opacity: root.icon-only ? 0 : root.active || ta.has-hover || close-ta.has-hover ? 1 : 0;
+                width: root.icon-only ? 0px : 24px;
+                Path {
+                    width: 8px;
+                    height: 8px;
+                    stroke: Colors.text;
+                    stroke-width: 1.2px;
+                    commands: "M 0 0 L 8 8 M 8 0 L 0 8";
+                }
+
+                close-ta := TouchArea {
+                    clicked => {
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+
+    // On top of everything: it only reacts to right-clicks.
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: "Rename tab";
+                enabled: !root.is-settings;
+                activated => {
+                    root.menu("rename");
+                }
+            }
+
+            MenuItem {
+                title: "Duplicate tab";
+                enabled: !root.is-settings;
+                activated => {
+                    root.menu("duplicate");
+                }
+            }
+
+            Menu {
+                title: "Color";
+
+                MenuItem {
+                    title: "Red";
+                    activated => {
+                        root.menu("color:#C50F1F");
+                    }
+                }
+
+                MenuItem {
+                    title: "Orange";
+                    activated => {
+                        root.menu("color:#CA5010");
+                    }
+                }
+
+                MenuItem {
+                    title: "Yellow";
+                    activated => {
+                        root.menu("color:#C19C00");
+                    }
+                }
+
+                MenuItem {
+                    title: "Green";
+                    activated => {
+                        root.menu("color:#13A10E");
+                    }
+                }
+
+                MenuItem {
+                    title: "Teal";
+                    activated => {
+                        root.menu("color:#038387");
+                    }
+                }
+
+                MenuItem {
+                    title: "Blue";
+                    activated => {
+                        root.menu("color:#0063B1");
+                    }
+                }
+
+                MenuItem {
+                    title: "Purple";
+                    activated => {
+                        root.menu("color:#881798");
+                    }
+                }
+
+                MenuItem {
+                    title: "Pink";
+                    activated => {
+                        root.menu("color:#C239B3");
+                    }
+                }
+
+                MenuSeparator { }
+                MenuItem {
+                    title: "Reset";
+                    activated => {
+                        root.menu("color:none");
+                    }
+                }
+            }
+
+            MenuItem {
+                title: "Split tab";
+                enabled: !root.is-settings;
+                activated => {
+                    root.menu("split");
+                }
+            }
+
+            MenuItem {
+                title: "Move tab to new window";
+                enabled: !root.is-settings;
+                activated => {
+                    root.menu("move-to-new-window");
+                }
+            }
+
+            MenuSeparator { }
+            MenuItem {
+                title: "Close tabs to the right";
+                activated => {
+                    root.menu("close-right");
+                }
+            }
+
+            MenuItem {
+                title: "Close other tabs";
+                activated => {
+                    root.menu("close-others");
+                }
+            }
+
+            MenuItem {
+                title: "Close tab";
+                activated => {
+                    root.menu("close");
+                }
+            }
+        }
+    }
+}
+
+component MenuRow inherits Rectangle {
+    in property <MenuEntry> entry;
+    callback clicked;
+    height: 32px;
+    border-radius: 4px;
+    background: entry.enabled && ta.has-hover ? Colors.hover : transparent;
+    ta := TouchArea {
+        enabled: entry.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        Rectangle {
+            width: 16px;
+            if entry.icon.width > 0: Image {
+                width: 16px;
+                height: 16px;
+                source: entry.icon;
+            }
+            if entry.icon.width == 0: Text {
+                text: entry.icon-text;
+                font-size: 13px;
+                color: Colors.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: entry.label;
+            color: entry.enabled ? Colors.text : Colors.text-dim;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        Text {
+            text: entry.shortcut;
+            color: Colors.text-dim;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: session-title == "" ? "wt++" : session-title;
+    icon: @image-url("../../../assets/wtpp.png");
+    preferred-width: 1000px;
+    preferred-height: 620px;
+    // Fixed limits: if they followed the content (e.g. the number of tabs),
+    // every tab change would make the window re-apply its size, which with
+    // tabs in the title bar grows it by a caption height on Windows.
+    min-width: 360px;
+    min-height: 200px;
+    background: Colors.terminal;
+
+    in property <string> session-title;
+    in property <[TabData]> tabs;
+    in property <[PaneData]> panes;
+    in property <[DividerData]> dividers;
+    // Shown in the new-tab dropdown; the first entries are the profiles.
+    in property <[MenuEntry]> menu-entries;
+    in property <bool> loading: true;
+    in property <bool> show-settings;
+    // Windows: tabs share the row with our own caption buttons.
+    in property <bool> custom-titlebar;
+    // Hidden only with `alwaysShowTabs: false`, one tab, and a native title bar.
+    in property <bool> show-tab-row: true;
+    in property <int> tab-width-mode;
+    // From the tabs' own width, not the strip's: the strip narrows to make
+    // room for the scroll buttons.
+    property <bool> tabs-overflow: tabs-layout.min-width > tab-area.width + 1px;
+    // Right-click in a pane opens a menu (setting) instead of copy/paste.
+    in property <bool> terminal-menu;
+    in property <bool> max-hovered;
+    in property <bool> window-maximized;
+    in property <bool> window-active: true;
+    out property <length> titlebar-height: titlebar.height;
+    // Where the empty (draggable) part of the tab row starts, and where the
+    // caption buttons start, in window coordinates.
+    out property <length> drag-start: dropdown.absolute-position.x + dropdown.width + 4px;
+    out property <length> buttons-start: root.width - (root.custom-titlebar ? 3 * 46px : 0px);
+    // Confirmation dialog ("Close all tabs?", paste warnings).
+    in property <bool> dialog-visible;
+    in property <string> dialog-title;
+    in property <string> dialog-body;
+    in property <string> dialog-confirm;
+    out property <length> content-width: content.width;
+    out property <length> content-height: content.height;
+
+    // text, ctrl, alt, shift, meta → handled
+    callback key-pressed(string, bool, bool, bool, bool) -> bool;
+    callback content-resized();
+    callback select-tab(int);
+    callback close-tab(int);
+    callback new-tab();
+    callback menu-activated(int);
+    // pane index, kind (0 down, 1 up), button (0 left, 1 middle, 2 right), x, y, shift, ctrl, alt
+    callback pane-pointer(int, int, int, length, length, bool, bool, bool);
+    callback pane-moved(int, length, length);
+    // Pointer moved over a pane with no button held: index, x, y, ctrl.
+    callback pane-hover(int, length, length, bool);
+    // pane index, delta-y, ctrl → handled
+    callback pane-scroll(int, length, bool) -> bool;
+    callback dialog-result(bool);
+    callback tab-menu(int, string);
+    // An entry of a pane's right-click menu.
+    callback pane-menu(int, string);
+    callback tab-renamed(int, string);
+    callback tab-drag(int, length, length);
+    callback tab-drag-end();
+    // Scrollbar dragged: pane index, thumb top as a fraction of the track.
+    callback pane-scrollbar(int, float);
+    // A pane divider is being dragged to this position (content coordinates).
+    callback divider-drag(int, length, length);
+    // Command palette
+    in property <bool> palette-visible;
+    in property <[PaletteItem]> palette-items;
+    in-out property <int> palette-selected;
+    in-out property <string> palette-query;
+    callback palette-changed(string);
+    callback palette-run(int);
+    callback palette-close();
+    // Find
+    in property <bool> find-visible;
+    in-out property <string> find-query;
+    in property <string> find-status;
+    in-out property <bool> find-case;
+    in-out property <bool> find-regex;
+    callback find-options(bool, bool);
+    callback find-changed(string);
+    callback find-next(bool);
+    callback find-close();
+    callback minimize-window();
+    callback close-window();
+
+    public function open-new-tab-menu() {
+        menu.show();
+    }
+
+    // Give keyboard focus back to the terminal key handler (e.g. after a
+    // settings text field had it, or to record a key binding).
+    public function focus-keys() {
+        keys.focus();
+    }
+
+    public function focus-palette() {
+        palette-input.focus();
+        palette-input.select-all();
+    }
+
+    public function focus-find() {
+        find-input.focus();
+        find-input.select-all();
+    }
+
+    keys := FocusScope {
+        width: 0;
+        height: 0;
+        key-pressed(event) => {
+            root.key-pressed(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta) ? accept : reject
+        }
+    }
+
+    init => {
+        Palette.color-scheme = Colors.light ? ColorScheme.light : ColorScheme.dark;
+        keys.focus();
+    }
+
+    // Switch the app chrome (tab row, menus, settings, widgets) light/dark.
+    public function apply-theme(light: bool) {
+        Colors.light = light;
+        Palette.color-scheme = light ? ColorScheme.light : ColorScheme.dark;
+    }
+
+    VerticalLayout {
+        titlebar := Rectangle {
+            height: root.show-tab-row ? 40px : 0px;
+            clip: true;
+            background: Colors.titlebar;
+
+            HorizontalLayout {
+              tab-row := HorizontalLayout {
+                // Tabs shrink (down to their minimum), then scroll; they
+                // never widen the window.
+                min-width: 0px;
+                padding-left: 8px;
+                padding-top: 6px;
+                spacing: 2px;
+                alignment: start;
+                horizontal-stretch: 1;
+
+                tab-area := Rectangle {
+                    min-width: 0px;
+                    max-width: tabs-layout.min-width > 0 ? max(tabs-layout.min-width, tabs-layout.preferred-width) : 0px;
+                    // Explicit, so it doesn't come from the strip inside,
+                    // whose width depends on this one.
+                    preferred-width: self.max-width;
+                    horizontal-stretch: 1;
+                    clip: true;
+                    property <int> tab-count: root.tabs.length;
+                    changed tab-count => {
+                        // Show the newest tab.
+                        tab-flick.content-x = min(0px, tab-flick.width - tab-flick.content-width);
+                    }
+
+                    tab-flick := Flickable {
+                        // The scroll buttons get their own space at each end.
+                        x: root.tabs-overflow ? 28px : 0px;
+                        width: parent.width - (root.tabs-overflow ? 56px : 0px);
+                        content-width: max(self.width, tabs-layout.min-width);
+                        content-height: self.height;
+                        interactive: false;
+
+                        tabs-layout := HorizontalLayout {
+                            width: tab-flick.content-width;
+                            spacing: 2px;
+                            alignment: start;
+
+                            for tab[i] in root.tabs: TabItem {
+                                title: tab.title;
+                                active: tab.active;
+                                renaming: tab.renaming;
+                                is-settings: tab.is-settings;
+                                zoomed: tab.zoomed;
+                                tab-color: tab.color;
+                                has-color: tab.has-color;
+                                bell: tab.bell;
+                                icon: tab.icon;
+                                icon-text: tab.icon-text;
+                                window-active: root.window-active;
+                                width-mode: root.tab-width-mode;
+                                clicked => {
+                                    root.select-tab(i);
+                                    if !tab.renaming {
+                                        keys.focus();
+                                    }
+                                }
+                                close => {
+                                    root.close-tab(i);
+                                }
+                                rename => {
+                                    root.tab-menu(i, "rename");
+                                }
+                                renamed(t) => {
+                                    root.tab-renamed(i, t);
+                                    keys.focus();
+                                }
+                                drag(x) => {
+                                    // Position within the scrolled strip of tabs.
+                                    root.tab-drag(i, x - tab-flick.absolute-position.x - tab-flick.content-x, self.width);
+                                }
+                                drag-end => {
+                                    root.tab-drag-end();
+                                }
+                                menu(action) => {
+                                    root.tab-menu(i, action);
+                                }
+                            }
+                        }
+                    }
+
+                    if root.tabs-overflow: ScrollButton {
+                        x: 0;
+                        y: 3px;
+                        left: true;
+                        enabled: tab-flick.content-x < 0px;
+                        clicked => {
+                            tab-flick.content-x = min(0px, tab-flick.content-x + 200px);
+                        }
+                    }
+
+                    if root.tabs-overflow: ScrollButton {
+                        x: parent.width - self.width;
+                        y: 3px;
+                        left: false;
+                        enabled: tab-flick.content-x > tab-flick.width - tab-flick.content-width + 1px;
+                        clicked => {
+                            tab-flick.content-x = max(tab-flick.width - tab-flick.content-width, tab-flick.content-x - 200px);
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    padding-left: 4px;
+                    IconButton {
+                        clicked => {
+                            root.new-tab();
+                            keys.focus();
+                        }
+                        Path {
+                            width: 10px;
+                            height: 10px;
+                            stroke: Colors.text;
+                            stroke-width: 1.2px;
+                            commands: "M 5 0 L 5 10 M 0 5 L 10 5";
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    dropdown := IconButton {
+                        width: 28px;
+                        clicked => {
+                            menu.show();
+                        }
+                        Path {
+                            width: 10px;
+                            height: 5px;
+                            stroke: Colors.text;
+                            stroke-width: 1.2px;
+                            commands: "M 0 0 L 5 5 L 10 0";
+                        }
+
+                        menu := PopupWindow {
+                            x: 0;
+                            y: dropdown.height + 4px;
+                            width: 300px;
+                            close-policy: close-on-click;
+                            Rectangle {
+                                background: Colors.menu;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: Colors.menu-border;
+                                drop-shadow-blur: 12px;
+                                drop-shadow-color: #00000080;
+                                VerticalLayout {
+                                    padding: 4px;
+                                    for entry[i] in root.menu-entries: MenuRow {
+                                        entry: entry;
+                                        clicked => {
+                                            root.menu-activated(i);
+                                            keys.focus();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+              }
+
+              if root.custom-titlebar: caption-buttons := HorizontalLayout {
+                CaptionButton {
+                    clicked => {
+                        root.minimize-window();
+                    }
+                    Path {
+                        width: 10px;
+                        height: 1px;
+                        stroke: Colors.text;
+                        stroke-width: 1px;
+                        commands: "M 0 0.5 L 10 0.5";
+                    }
+                }
+
+                // Clicks arrive through Windows (it's a native maximize
+                // button for Snap Layouts); Rust reports hover.
+                CaptionButton {
+                    external-hover: root.max-hovered;
+                    Path {
+                        width: 10px;
+                        height: 10px;
+                        stroke: Colors.text;
+                        stroke-width: 1px;
+                        commands: root.window-maximized ? "M 2 0.5 L 9.5 0.5 L 9.5 8 M 0.5 2.5 L 7.5 2.5 L 7.5 9.5 L 0.5 9.5 Z" : "M 0.5 0.5 L 9.5 0.5 L 9.5 9.5 L 0.5 9.5 Z";
+                    }
+                }
+
+                CaptionButton {
+                    is-close: true;
+                    clicked => {
+                        root.close-window();
+                    }
+                    Path {
+                        width: 10px;
+                        height: 10px;
+                        stroke: Colors.text;
+                        stroke-width: 1px;
+                        commands: "M 0 0 L 10 10 M 10 0 L 0 10";
+                    }
+                }
+              }
+            }
+        }
+
+        content := Rectangle {
+            background: root.panes.length > 1 ? Colors.divider : Colors.terminal;
+            changed width => {
+                root.content-resized();
+            }
+            changed height => {
+                root.content-resized();
+            }
+
+            for pane[i] in root.panes: Rectangle {
+                x: pane.x;
+                y: pane.y;
+                width: pane.width;
+                height: pane.height;
+                background: pane.background;
+                clip: true;
+
+                Image {
+                    x: pane.padding-left;
+                    y: pane.padding-top;
+                    width: pane.image-width;
+                    height: pane.image-height;
+                    source: pane.image;
+                    image-fit: fill;
+                }
+
+                if pane.flash: Rectangle {
+                    background: #ffffff26;
+                }
+
+                TouchArea {
+                    mouse-cursor: pane.link-hover ? MouseCursor.pointer : MouseCursor.text;
+                    pointer-event(e) => {
+                        if e.kind == PointerEventKind.move && !self.pressed {
+                            root.pane-hover(i, self.mouse-x, self.mouse-y, e.modifiers.control);
+                        }
+                        if e.kind == PointerEventKind.down || e.kind == PointerEventKind.up {
+                            root.pane-pointer(i,
+                                e.kind == PointerEventKind.down ? 0 : 1,
+                                e.button == PointerEventButton.left ? 0 : e.button == PointerEventButton.middle ? 1 : e.button == PointerEventButton.right ? 2 : 3,
+                                self.mouse-x, self.mouse-y,
+                                e.modifiers.shift, e.modifiers.control, e.modifiers.alt);
+                            keys.focus();
+                        }
+                    }
+                    moved => {
+                        root.pane-moved(i, self.mouse-x, self.mouse-y);
+                    }
+                    scroll-event(e) => {
+                        root.pane-scroll(i, e.delta-y, e.modifiers.control) ? EventResult.accept : EventResult.reject
+                    }
+                }
+
+                if pane.focused && root.panes.length > 1: Rectangle {
+                    border-width: 1px;
+                    border-color: Colors.accent;
+                }
+
+                if root.terminal-menu: ContextMenuArea {
+                    Menu {
+                        MenuItem {
+                            title: "Copy";
+                            activated => {
+                                root.pane-menu(i, "copy");
+                            }
+                        }
+
+                        MenuItem {
+                            title: "Paste";
+                            activated => {
+                                root.pane-menu(i, "paste");
+                            }
+                        }
+
+                        MenuItem {
+                            title: "Select all";
+                            activated => {
+                                root.pane-menu(i, "select-all");
+                            }
+                        }
+
+                        MenuItem {
+                            title: "Find…";
+                            activated => {
+                                root.pane-menu(i, "find");
+                            }
+                        }
+
+                        MenuSeparator { }
+                        MenuItem {
+                            title: "Split pane";
+                            activated => {
+                                root.pane-menu(i, "split");
+                            }
+                        }
+
+                        MenuItem {
+                            title: "Duplicate tab";
+                            activated => {
+                                root.pane-menu(i, "duplicate");
+                            }
+                        }
+
+                        MenuSeparator { }
+                        MenuItem {
+                            title: "Close pane";
+                            activated => {
+                                root.pane-menu(i, "close");
+                            }
+                        }
+                    }
+                }
+
+                if pane.scroll-visible: Rectangle {
+                    x: parent.width - self.width - 2px;
+                    width: sb-ta.has-hover || sb-ta.pressed ? 10px : 6px;
+                    height: parent.height;
+                    animate width { duration: 100ms; }
+                    sb-ta := TouchArea {
+                        moved => {
+                            if self.pressed {
+                                root.pane-scrollbar(i, (self.mouse-y - thumb.height / 2) / (parent.height - thumb.height));
+                            }
+                        }
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down {
+                                root.pane-scrollbar(i, (self.mouse-y - thumb.height / 2) / (parent.height - thumb.height));
+                            }
+                        }
+                    }
+
+                    thumb := Rectangle {
+                        y: (parent.height - self.height) * pane.thumb-top;
+                        height: max(24px, parent.height * pane.thumb-size);
+                        border-radius: self.width / 2;
+                        // Contrasts with the pane's own background, light or dark.
+                        background: (pane.background.to-hsv().value > 0.5 ? #000000 : #ffffff).with-alpha(sb-ta.has-hover || sb-ta.pressed ? 0.5 : 0.25);
+                    }
+                }
+            }
+
+            if root.loading: Text {
+                text: "Starting…";
+                color: Colors.text-dim;
+                font-size: 13px;
+            }
+
+            // Pane dividers: a wider invisible grab area around each gap.
+            for d[i] in root.dividers: TouchArea {
+                x: d.vertical ? d.x - 3px : d.x;
+                y: d.vertical ? d.y : d.y - 3px;
+                width: d.vertical ? d.width + 6px : d.width;
+                height: d.vertical ? d.height : d.height + 6px;
+                mouse-cursor: d.vertical ? MouseCursor.col-resize : MouseCursor.row-resize;
+                moved => {
+                    if self.pressed {
+                        root.divider-drag(i, self.x + self.mouse-x, self.y + self.mouse-y);
+                    }
+                }
+            }
+
+            if root.show-settings: SettingsPage {
+                width: parent.width;
+                height: parent.height;
+            }
+
+            // Find bar (top right, like WT's search box).
+            Rectangle {
+                visible: root.find-visible;
+                x: parent.width - self.width - 24px;
+                y: 8px;
+                width: 440px;
+                height: 44px;
+                background: Colors.menu;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Colors.menu-border;
+                drop-shadow-blur: 12px;
+                drop-shadow-color: #00000080;
+                FocusScope {
+                    // Capture: the text field would otherwise eat Enter.
+                    capture-key-pressed(e) => {
+                        if e.text == Key.Escape {
+                            root.find-close();
+                            return accept;
+                        }
+                        if e.text == Key.Return {
+                            root.find-next(e.modifiers.shift);
+                            return accept;
+                        }
+                        reject
+                    }
+                    HorizontalLayout {
+                        padding: 6px;
+                        spacing: 4px;
+                        find-input := LineEdit {
+                            placeholder-text: "Find (Enter: up, Shift+Enter: down)";
+                            text <=> root.find-query;
+                            edited(t) => {
+                                root.find-changed(t);
+                            }
+                        }
+
+                        ToggleChip {
+                            label: "Aa";
+                            checked <=> root.find-case;
+                            toggled => {
+                                root.find-options(root.find-case, root.find-regex);
+                            }
+                        }
+
+                        ToggleChip {
+                            label: ".*";
+                            checked <=> root.find-regex;
+                            toggled => {
+                                root.find-options(root.find-case, root.find-regex);
+                            }
+                        }
+
+                        Text {
+                            text: root.find-status;
+                            color: Colors.text-dim;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            min-width: 56px;
+                            horizontal-alignment: center;
+                        }
+
+                        IconButton {
+                            width: 30px;
+                            height: 30px;
+                            clicked => {
+                                root.find-next(false);
+                            }
+                            Path {
+                                width: 10px;
+                                height: 5px;
+                                stroke: Colors.text;
+                                stroke-width: 1.2px;
+                                commands: "M 0 5 L 5 0 L 10 5";
+                            }
+                        }
+
+                        IconButton {
+                            width: 30px;
+                            height: 30px;
+                            clicked => {
+                                root.find-next(true);
+                            }
+                            Path {
+                                width: 10px;
+                                height: 5px;
+                                stroke: Colors.text;
+                                stroke-width: 1.2px;
+                                commands: "M 0 0 L 5 5 L 10 0";
+                            }
+                        }
+
+                        IconButton {
+                            width: 30px;
+                            height: 30px;
+                            clicked => {
+                                root.find-close();
+                            }
+                            Path {
+                                width: 8px;
+                                height: 8px;
+                                stroke: Colors.text;
+                                stroke-width: 1.2px;
+                                commands: "M 0 0 L 8 8 M 8 0 L 0 8";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Command palette.
+    Rectangle {
+        visible: root.palette-visible;
+        TouchArea {
+            clicked => {
+                root.palette-close();
+            }
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 48px;
+            width: min(640px, parent.width - 32px);
+            height: min(palette-layout.preferred-height, parent.height - 96px);
+            background: Colors.menu;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Colors.menu-border;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000099;
+            clip: true;
+            TouchArea { }
+            FocusScope {
+                capture-key-pressed(e) => {
+                    if e.text == Key.Escape {
+                        root.palette-close();
+                        return accept;
+                    }
+                    if e.text == Key.UpArrow {
+                        root.palette-selected = max(0, root.palette-selected - 1);
+                        return accept;
+                    }
+                    if e.text == Key.DownArrow {
+                        root.palette-selected = min(root.palette-items.length - 1, root.palette-selected + 1);
+                        return accept;
+                    }
+                    reject
+                }
+                palette-layout := VerticalLayout {
+                    padding: 6px;
+                    spacing: 4px;
+                    palette-input := LineEdit {
+                        placeholder-text: "Type a command name…";
+                        text <=> root.palette-query;
+                        edited(t) => {
+                            root.palette-changed(t);
+                        }
+                        accepted => {
+                            root.palette-run(root.palette-selected);
+                        }
+                    }
+
+                    for item[i] in root.palette-items: Rectangle {
+                        height: 34px;
+                        border-radius: 4px;
+                        background: i == root.palette-selected ? Colors.hover : row-ta.has-hover ? Colors.hover.with-alpha(0.6) : transparent;
+                        row-ta := TouchArea {
+                            clicked => {
+                                root.palette-run(i);
+                            }
+                        }
+
+                        if i == root.palette-selected: Rectangle {
+                            x: 0;
+                            width: 3px;
+                            height: 14px;
+                            border-radius: 1.5px;
+                            background: Colors.accent;
+                        }
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            padding-right: 12px;
+                            Text {
+                                text: item.label;
+                                color: Colors.text;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: item.keys;
+                                color: Colors.text-dim;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+
+                    if root.palette-items.length == 0: Text {
+                        text: "No matching commands";
+                        color: Colors.text-dim;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        height: 34px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.dialog-visible: Rectangle {
+        background: #00000099;
+        TouchArea { }
+        Rectangle {
+            width: 440px;
+            height: dialog-layout.preferred-height;
+            background: #2b2b2b;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #3f3f3f;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000099;
+            dialog-layout := VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+                Text {
+                    text: root.dialog-title;
+                    color: Colors.text;
+                    font-size: 20px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.dialog-body;
+                    color: Colors.text-dim;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: root.dialog-confirm;
+                        primary: true;
+                        clicked => {
+                            root.dialog-result(true);
+                        }
+                    }
+
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.dialog-result(false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

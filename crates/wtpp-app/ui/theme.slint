@@ -1,0 +1,35 @@
+import { Palette } from "std-widgets.slint";
+
+// App chrome colors, dark or light (`theme` setting). Terminal colors come
+// from the profile's color scheme instead.
+export global Colors {
+    in-out property <bool> light;
+    out property <color> titlebar: light ? #f3f3f3 : #202020;
+    // Active tab, and the content area behind panes.
+    out property <color> terminal: light ? #fbfbfb : #0c0c0c;
+    out property <color> hover: light ? #e6e6e6 : #2d2d2d;
+    out property <color> pressed: light ? #d6d6d6 : #383838;
+    out property <color> text: light ? #1b1b1b : #ffffff;
+    out property <color> text-dim: light ? #5f5f5f : #9d9d9d;
+    out property <color> accent: #3b78ff;
+    out property <color> menu: light ? #f9f9f9 : #2c2c2c;
+    out property <color> menu-border: light ? #dcdcdc : #3f3f3f;
+    out property <color> divider: light ? #cfcfcf : #3a3a3a;
+}
+
+// Settings page colors.
+export global Theme {
+    out property <color> page-bg: Colors.light ? #f3f3f3 : #1c1c1c;
+    out property <color> nav-bg: Colors.light ? #ebebeb : #202020;
+    out property <color> card: Colors.light ? #fbfbfb : #2b2b2b;
+    out property <color> card-hover: Colors.light ? #f5f5f5 : #323232;
+    out property <color> border: Colors.light ? #e0e0e0 : #3a3a3a;
+    out property <color> text: Colors.light ? #1b1b1b : #ffffff;
+    out property <color> text-dim: Colors.light ? #5f5f5f : #a0a0a0;
+    out property <color> accent: Palette.accent-background;
+    out property <color> error: Colors.light ? #c42b1c : #ff99a4;
+    out property <color> nav-selected: Colors.light ? #e3e3e3 : #2d2d2d;
+    out property <color> nav-hover: Colors.light ? #e8e8e8 : #292929;
+    out property <color> chip: Colors.light ? #f0f0f0 : #333333;
+    out property <color> chip-hover: Colors.light ? #e6e6e6 : #3a3a3a;
+}
