@@ -1092,7 +1092,9 @@ impl App {
             self.ui().set_session_title(self.tab_title(tab).into());
         }
         let ui = self.ui();
-        ui.set_show_tab_row(ui.get_custom_titlebar() || self.settings.always_show_tabs || self.tabs.len() > 1);
+        ui.set_show_tab_row(
+            ui.get_custom_titlebar() || ui.get_mac_titlebar() || self.settings.always_show_tabs || self.tabs.len() > 1,
+        );
         self.update_titlebar_geometry();
     }
 

@@ -391,10 +391,18 @@ fn main() -> anyhow::Result<()> {
         log::error!("settings: {error}");
     }
 
-    slint::BackendSelector::new()
-        .require_wgpu_30(wgpu_configuration(settings.graphics_api))
-        .select()
-        .context("no GPU backend available")?;
+    #[allow(unused_mut)]
+    let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(settings.graphics_api));
+    // macOS: tabs in the title bar, like Safari and iTerm: the title bar
+    // turns transparent and the content extends under it.
+    #[cfg(target_os = "macos")]
+    if settings.show_tabs_in_titlebar {
+        use slint::winit_030::winit::platform::macos::WindowAttributesExtMacOS;
+        backend = backend.with_winit_window_attributes_hook(|attributes| {
+            attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true)
+        });
+    }
+    backend.select().context("no GPU backend available")?;
     log::info!("backend selected after {:?}", started.elapsed());
 
     // Font and shell discovery are slow (hundreds of fonts on Windows,
@@ -532,6 +540,7 @@ fn create_window(
     let ui = MainWindow::new()?;
     let id = WINDOWS.with(|w| w.borrow().len());
     let custom_titlebar = cfg!(windows) && settings.show_tabs_in_titlebar;
+    ui.set_mac_titlebar(cfg!(target_os = "macos") && settings.show_tabs_in_titlebar);
     let mut launch_size = apply_launch_settings(&ui, &settings, matches!(placement, Placement::First));
     match placement {
         _ if let Some((x, y)) = args.as_ref().and_then(|a| a.position) => {
@@ -588,6 +597,18 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         }
     })?;
 
+    ui.on_start_window_drag(move || {
+        if let Some(e) = entry(id) {
+            use slint::winit_030::WinitWindowAccessor;
+            e.ui.window().with_winit_window(|w| w.drag_window().ok());
+        }
+    });
+    ui.on_zoom_window(move || {
+        if let Some(e) = entry(id) {
+            let window = e.ui.window();
+            window.set_maximized(!window.is_maximized());
+        }
+    });
     ui.on_content_resized(move || {
         with_window(id, |app| app.relayout());
     });

@@ -529,6 +529,11 @@ export component MainWindow inherits Window {
     in property <bool> show-settings;
     // Windows: tabs share the row with our own caption buttons.
     in property <bool> custom-titlebar;
+    // macOS: the tab row is the (transparent) title bar, with the window
+    // buttons at its left; its empty parts move the window.
+    in property <bool> mac-titlebar;
+    callback start-window-drag();
+    callback zoom-window();
     // Hidden only with `alwaysShowTabs: false`, one tab, and a native title bar.
     in property <bool> show-tab-row: true;
     in property <int> tab-width-mode;
@@ -661,12 +666,24 @@ export component MainWindow inherits Window {
             clip: true;
             background: Colors.titlebar;
 
+            if root.mac-titlebar: TouchArea {
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                        root.start-window-drag();
+                    }
+                }
+                double-clicked => {
+                    root.zoom-window();
+                }
+            }
+
             HorizontalLayout {
               tab-row := HorizontalLayout {
                 // Tabs shrink (down to their minimum), then scroll; they
                 // never widen the window.
                 min-width: 0px;
-                padding-left: 8px;
+                // Room for the red, yellow and green buttons on macOS.
+                padding-left: root.mac-titlebar ? 78px : 8px;
                 padding-top: 6px;
                 spacing: 2px;
                 alignment: start;
