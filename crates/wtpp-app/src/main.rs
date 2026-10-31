@@ -458,10 +458,10 @@ fn cascade_position() -> Option<slint::PhysicalPosition> {
     let (outer, size) = (window.position(), window.size());
     let step = (32.0 * window.scale_factor()).round() as i32;
     let (mut x, mut y) = (outer.x + step, outer.y + step);
-    if let Some((left, top, right, bottom)) = platform::work_area_at(outer.x + size.width as i32 / 2, outer.y + 8) {
-        if x + size.width as i32 > right || y + size.height as i32 > bottom {
-            (x, y) = (left, top);
-        }
+    if let Some((left, top, right, bottom)) = platform::work_area_at(outer.x + size.width as i32 / 2, outer.y + 8)
+        && (x + size.width as i32 > right || y + size.height as i32 > bottom)
+    {
+        (x, y) = (left, top);
     }
     Some(slint::PhysicalPosition::new(x, y))
 }
