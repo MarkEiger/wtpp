@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-10-31
+
+First public release, tested on Windows 11, Ubuntu 26.04 (GNOME, Wayland and
+X11) and macOS 27 (Apple Silicon). Licensed GPL-3.0-or-later.
 
 - Default terminal: Settings → Startup → "Make wt++ the default".
   - Windows: console programs started from the Start menu, Run or Explorer
@@ -14,8 +17,10 @@
 - `wtpp -e COMMAND…` and `--working-directory DIR`, as Linux desktops call
   terminals.
 - macOS: a proper `wt++.app` (icon, ad-hoc signed); tabs in the title bar
-  next to the window buttons; ⌘ shortcuts like Terminal and iTerm (⌘T, ⌘W,
-  ⌘D…), Ctrl always reaches the shell, Option types characters.
+  next to the window buttons (double-click to zoom); ⌘ shortcuts like
+  Terminal and iTerm (⌘T, ⌘W, ⌘D, ⌘M…), Ctrl always reaches the shell,
+  Option types characters and composes dead keys (⌥E E → é), ⌥←/⌥→ move by
+  word.
 - Linux: `install.sh` adds wt++ to the app menu with its icon; windows carry
   the `wtpp` app id so docks show the right icon.
 - Tabs can be torn off by dragging straight down (before, only a sideways
