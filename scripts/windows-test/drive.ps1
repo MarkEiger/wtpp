@@ -90,7 +90,7 @@ foreach ($s in $Steps) {
   # Keys, clicks and screenshots go to whatever is in front. If that isn't
   # wt++ (the user is in another app, a game is fullscreen), stop rather
   # than type into it or capture it.
-  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'shotall:*') {
+  if ($s -notlike 'sleep:*' -and $s -notin @('rect', 'windows', 'tile', 'launch', 'sup') -and $s -notlike 'shotall:*' -and $s -notlike 'filedrop:*') {
     $fg = [W]::GetForegroundWindow(); [uint32]$fgPid = 0; [W]::GetWindowThreadProcessId($fg, [ref]$fgPid) | Out-Null
     if ($fgPid -ne $p.Id) {
       "ABORTED at '$s': another app is in the foreground"
@@ -158,6 +158,33 @@ foreach ($s in $Steps) {
     [W]::SetCursorPos($v[0], $v[1]) | Out-Null; Start-Sleep -Milliseconds 80; [W]::mouse_event(2,0,0,0,0)
     for ($k = 1; $k -le 30; $k++) { [W]::SetCursorPos($v[0] + ($v[2]-$v[0])*$k/30, $v[1] + ($v[3]-$v[1])*$k/30) | Out-Null; Start-Sleep -Milliseconds 25 }
     Start-Sleep -Milliseconds 400
+  }
+  elseif ($s -like 'filedrop:*') {
+    # filedrop:x,y,PATH[;PATH...] drags files (a real OLE drag, like from
+    # Explorer) from a small source window and drops them at screen x,y.
+    $parts = $s.Substring(9).Split(',', 3); $tx = [int]$parts[0]; $ty = [int]$parts[1]
+    $files = New-Object System.Collections.Specialized.StringCollection
+    foreach ($f in $parts[2].Split(';')) { [void]$files.Add($f) }
+    $form = New-Object Windows.Forms.Form
+    $form.StartPosition = 'Manual'; $form.Location = New-Object Drawing.Point(($tx - 300), ($ty + 150)); $form.Size = New-Object Drawing.Size(160, 120)
+    $form.TopMost = $true; $form.Show(); [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 300
+    $sx = $form.Location.X + 80; $sy = $form.Location.Y + 60
+    # The form must see the button go down before the drag starts, or the
+    # drag ends at once.
+    [W]::SetCursorPos($sx, $sy) | Out-Null; [W]::mouse_event(2,0,0,0,0); Start-Sleep -Milliseconds 50; [Windows.Forms.Application]::DoEvents()
+    # The drag loop is modal: a second thread moves the pointer and lets go.
+    $mover = [PowerShell]::Create().AddScript({
+      param($sx, $sy, $tx, $ty)
+      Add-Type -Name M -Namespace N -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, int e);'
+      Start-Sleep -Milliseconds 400
+      for ($k = 1; $k -le 30; $k++) { [N.M]::mouse_event(1, 0, 0, 0, 0); [N.M]::SetCursorPos($sx + ($tx-$sx)*$k/30, $sy + ($ty-$sy)*$k/30) | Out-Null; Start-Sleep -Milliseconds 30 }
+      Start-Sleep -Milliseconds 300; [N.M]::mouse_event(4,0,0,0,0)
+    }).AddArgument($sx).AddArgument($sy).AddArgument($tx).AddArgument($ty)
+    $job = $mover.BeginInvoke()
+    $data = New-Object Windows.Forms.DataObject; $data.SetFileDropList($files)
+    $result = $form.DoDragDrop($data, [Windows.Forms.DragDropEffects]::Copy)
+    $mover.EndInvoke($job) | Out-Null; $form.Close()
+    "file drop: $result"; Start-Sleep -Milliseconds 800
   }
   elseif ($s -eq 'sup') { [W]::mouse_event(4,0,0,0,0); Start-Sleep -Milliseconds 1200 }
   elseif ($s -eq 'launch') {

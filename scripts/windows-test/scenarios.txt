@@ -43,3 +43,6 @@ tab-tearoff: sleep:600|^+t|sleep:900|setrect:2600,100,900,600|sdrag:2948,122,330
 tab-merge: sleep:600|^+n|sleep:2000|tile|shold:2726,122,3940,122|shotall:hover|sup|windows|shotall:after
 tab-between: sleep:600|^+t|sleep:900|^+n|sleep:2000|tile|shold:3888,122,3000,122|shotall:hover|sup|windows|shotall:after
 tab-follow: sleep:600|setrect:2600,100,900,600|shold:2700,122,3200,400|shotall:moving|sup|windows
+file-drop-wsl: sleep:600|setrect:2600,100,900,600|filedrop:3000,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\a b.txt;C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\plain.txt|sleep:500|shot:pasted
+file-drop-cmd: sleep:600|^+2|sleep:1500|setrect:2600,100,900,600|filedrop:3000,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder|sleep:500|shot:pasted
+file-drop-split: sleep:600|^+=|sleep:1200|setrect:2600,100,900,600|filedrop:2750,400,C:\Users\user\AppData\Local\Temp\wtpp-test\My Folder\plain.txt|sleep:500|shot:pasted
