@@ -386,7 +386,7 @@ impl Chord {
     pub fn to_wt_string(self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.mods.meta {
-            parts.push("win".into());
+            parts.push(if cfg!(target_os = "macos") { "cmd" } else { "win" }.into());
         }
         if self.mods.ctrl {
             parts.push("ctrl".into());
@@ -401,8 +401,11 @@ impl Chord {
         parts.join("+")
     }
 
-    /// Display form, e.g. "Ctrl+Shift+T".
+    /// Display form, e.g. "Ctrl+Shift+T", or "⇧⌘T" on macOS.
     pub fn label(self) -> String {
+        if cfg!(target_os = "macos") {
+            return self.mac_label();
+        }
         let mut parts: Vec<String> = Vec::new();
         if self.mods.meta {
             parts.push("Win".into());
@@ -429,6 +432,37 @@ impl Chord {
             other => format!("{other:?}"),
         });
         parts.join("+")
+    }
+
+    /// macOS style: modifier symbols in Apple's order (⌃⌥⇧⌘), then the key.
+    pub fn mac_label(self) -> String {
+        let mut label = String::new();
+        for (on, symbol) in [(self.mods.ctrl, '⌃'), (self.mods.alt, '⌥'), (self.mods.shift, '⇧'), (self.mods.meta, '⌘')] {
+            if on {
+                label.push(symbol);
+            }
+        }
+        label += &match self.key {
+            Key::Char(' ') => "Space".into(),
+            Key::Char('=') => "+".into(),
+            Key::Char(c) => c.to_uppercase().to_string(),
+            Key::Enter => "↩".into(),
+            Key::Tab => "⇥".into(),
+            Key::Backspace => "⌫".into(),
+            Key::Delete => "⌦".into(),
+            Key::Escape => "⎋".into(),
+            Key::Up => "↑".into(),
+            Key::Down => "↓".into(),
+            Key::Left => "←".into(),
+            Key::Right => "→".into(),
+            Key::PageUp => "⇞".into(),
+            Key::PageDown => "⇟".into(),
+            Key::Home => "↖".into(),
+            Key::End => "↘".into(),
+            Key::Insert => "Insert".into(),
+            Key::F(n) => format!("F{n}"),
+        };
+        label
     }
 }
 
@@ -528,7 +562,10 @@ mod tests {
     fn chord_round_trip() {
         for s in ["ctrl+comma", "win+backtick", "ctrl+shift+t", "alt+shift+plus", "alt+shift+minus", "ctrl+shift+space", "f11", "ctrl+alt+1", "alt+enter", "ctrl+pgup"] {
             let chord = Chord::parse(s).unwrap();
-            assert_eq!(chord.to_wt_string(), s);
+            // macOS writes the ⌘ key as "cmd" ("win" elsewhere).
+            if !(cfg!(target_os = "macos") && s.starts_with("win")) {
+                assert_eq!(chord.to_wt_string(), s);
+            }
             assert_eq!(Chord::parse(&chord.to_wt_string()), Some(chord));
         }
         assert_eq!(Chord::parse("Ctrl+Shift+T"), Chord::parse("ctrl+shift+t"));
@@ -549,6 +586,8 @@ mod tests {
     fn labels() {
         assert_eq!(Chord::parse("ctrl+shift+t").unwrap().label(), "Ctrl+Shift+T");
         assert_eq!(Chord::parse("alt+shift+plus").unwrap().label(), "Alt+Shift+Plus");
+        assert_eq!(Chord::parse("cmd+shift+p").unwrap().mac_label(), "⇧⌘P");
+        assert_eq!(Chord::parse("cmd+ctrl+left").unwrap().mac_label(), "⌃⌘←");
         assert_eq!(Chord::parse("f11").unwrap().label(), "F11");
         assert_eq!(Chord::parse("ctrl+shift+pgup").unwrap().label(), "Ctrl+Shift+PgUp");
         assert_eq!(Chord::parse("alt+left").unwrap().label(), "Alt+Left");

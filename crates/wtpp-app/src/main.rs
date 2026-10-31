@@ -592,6 +592,10 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         with_window(id, |app| app.relayout());
     });
     ui.on_key_pressed(move |text, ctrl, alt, shift, meta| {
+        // Slint reports ⌘ as "control" and Ctrl as "meta" on macOS (like
+        // Qt). The terminal needs the real Ctrl, so swap them back: our
+        // `ctrl` is always the Ctrl key, `meta` is ⌘ (or the Windows key).
+        let (ctrl, meta) = if cfg!(target_os = "macos") { (meta, ctrl) } else { (ctrl, meta) };
         with_window(id, |app| app.on_key(&text, Mods { shift, alt, ctrl, meta })).unwrap_or(false)
     });
     ui.on_select_tab(move |i| {

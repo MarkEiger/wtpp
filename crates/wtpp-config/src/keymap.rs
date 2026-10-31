@@ -28,6 +28,56 @@ impl Keymap {
     /// - Ctrl+Alt is AltGr on many layouts (Ctrl+Alt+7 types `{` in German),
     ///   so switching tabs is Alt+1..9.
     pub fn defaults() -> Keymap {
+        if cfg!(target_os = "macos") { Keymap::mac_defaults() } else { Keymap::pc_defaults() }
+    }
+
+    /// macOS: app shortcuts on ⌘ as in Terminal and iTerm (⌘T, ⌘W, ⌘D to
+    /// split, ⌥⌘arrows between panes); Ctrl always goes to the shell.
+    pub fn mac_defaults() -> Keymap {
+        use Action::*;
+        use Direction::*;
+
+        let mut b: Vec<(String, Action)> = vec![
+            ("cmd+ctrl+f".into(), ToggleFullscreen),
+            ("cmd+shift+space".into(), OpenNewTabDropdown),
+            ("cmd+comma".into(), OpenSettings),
+            ("cmd+f".into(), Find),
+            ("cmd+shift+p".into(), CommandPalette),
+            ("cmd+shift+m".into(), MarkMode),
+            ("cmd+a".into(), SelectAll),
+            ("cmd+t".into(), NewTab(None)),
+            ("cmd+n".into(), NewWindow),
+            ("cmd+w".into(), ClosePane),
+            ("cmd+shift+]".into(), NextTab),
+            ("cmd+shift+[".into(), PrevTab),
+            ("ctrl+tab".into(), NextTab),
+            ("ctrl+shift+tab".into(), PrevTab),
+            ("cmd+d".into(), SplitPane { side: Some(Right), duplicate: false }),
+            ("cmd+shift+d".into(), SplitPane { side: Some(Down), duplicate: false }),
+            ("cmd+shift+enter".into(), TogglePaneZoom),
+            ("cmd+c".into(), Copy),
+            ("cmd+v".into(), Paste),
+            ("cmd+pgup".into(), ScrollUpPage),
+            ("cmd+pgdn".into(), ScrollDownPage),
+            ("cmd+home".into(), ScrollToTop),
+            ("cmd+end".into(), ScrollToBottom),
+            ("cmd+plus".into(), AdjustFontSize(1)),
+            ("cmd+minus".into(), AdjustFontSize(-1)),
+            ("cmd+0".into(), ResetFontSize),
+        ];
+        for (k, d) in [("left", Left), ("right", Right), ("up", Up), ("down", Down)] {
+            b.push((format!("cmd+alt+{k}"), MoveFocus(d)));
+            b.push((format!("cmd+ctrl+{k}"), ResizePane(d)));
+        }
+        for n in 1..=9 {
+            b.push((format!("cmd+{n}"), SwitchToTab(n - 1)));
+            b.push((format!("cmd+shift+{n}"), NewTab(Some(n - 1))));
+        }
+        Keymap::from_list(b.iter().map(|(k, a)| (k.as_str(), a.clone())))
+    }
+
+    /// Windows and Linux.
+    pub fn pc_defaults() -> Keymap {
         use Action::*;
         use Direction::*;
 
@@ -69,9 +119,12 @@ impl Keymap {
         let switch: Vec<_> = (1..=9).map(|n| (format!("alt+{n}"), SwitchToTab(n - 1))).collect();
         let owned: Vec<(String, Action)> = move_focus.into_iter().chain(resize).chain(new_tabs).chain(switch).collect();
         b.extend(owned.iter().map(|(k, a)| (k.as_str(), a.clone())));
+        Keymap::from_list(b)
+    }
 
+    fn from_list<'a>(list: impl IntoIterator<Item = (&'a str, Action)>) -> Keymap {
         Keymap {
-            bindings: b
+            bindings: list
                 .into_iter()
                 .map(|(keys, action)| Binding {
                     chord: Chord::parse(keys).unwrap_or_else(|| panic!("bad default chord {keys}")),
@@ -157,7 +210,7 @@ mod tests {
 
     #[test]
     fn defaults_parse() {
-        let km = Keymap::defaults();
+        let km = Keymap::pc_defaults();
         let ctrl_shift = Mods { ctrl: true, shift: true, ..Mods::NONE };
         assert_eq!(km.lookup(Key::Char('T'), ctrl_shift), Some(&Action::NewTab(None)));
         assert_eq!(km.lookup(Key::Char('!'), ctrl_shift), Some(&Action::NewTab(Some(0))));
@@ -171,8 +224,25 @@ mod tests {
     }
 
     #[test]
+    fn mac_defaults() {
+        let km = Keymap::mac_defaults();
+        let cmd = Mods { meta: true, ..Mods::NONE };
+        let cmd_shift = Mods { meta: true, shift: true, ..Mods::NONE };
+        assert_eq!(km.lookup(Key::Char('t'), cmd), Some(&Action::NewTab(None)));
+        assert_eq!(km.lookup(Key::Char('c'), cmd), Some(&Action::Copy));
+        assert_eq!(km.lookup(Key::Char('}'), cmd_shift), Some(&Action::NextTab));
+        // Ctrl+C, Ctrl+V and friends belong to the shell.
+        for c in 'a'..='z' {
+            assert_eq!(km.lookup(Key::Char(c), Mods::CTRL), None, "ctrl+{c}");
+        }
+        let mut chords: Vec<_> = km.bindings.iter().map(|b| b.chord).collect();
+        chords.dedup();
+        assert_eq!(chords.len(), km.bindings.len());
+    }
+
+    #[test]
     fn defaults_avoid_os_hotkeys() {
-        for b in Keymap::defaults().bindings {
+        for b in Keymap::pc_defaults().bindings {
             let m = b.chord.mods;
             assert!(!(m.alt && m.shift), "{} uses Alt+Shift (Windows layout switch)", b.chord.label());
             assert!(!(m.ctrl && m.alt), "{} uses Ctrl+Alt (AltGr)", b.chord.label());

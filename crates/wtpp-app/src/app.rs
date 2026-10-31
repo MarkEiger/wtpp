@@ -1232,6 +1232,11 @@ impl App {
             _ => key,
         };
 
+        // macOS: ⌘ shortcuts we don't bind belong to the system (⌘Q, ⌘H, …),
+        // never to the shell.
+        if cfg!(target_os = "macos") && mods.meta {
+            return false;
+        }
         let Some(pane) = self.focused_pane() else { return false };
         if pane.exited {
             let id = self.active_terminal().map(|(_, f)| f).unwrap_or_default();
@@ -1251,6 +1256,10 @@ impl App {
             return true;
         }
         let bytes = match key {
+            // macOS: Option types characters (⌥A → å), as in Terminal.
+            Some((Key::Char(c), m)) if cfg!(target_os = "macos") && m.alt && !m.ctrl && !c.is_ascii() => {
+                Some(text.as_bytes().to_vec())
+            }
             Some((key, mods)) => wtpp_input::encode(key, mods, &pane.session.encode_options()),
             // Composed text (IME, dead keys) goes through verbatim.
             None if text.chars().count() > 1 => Some(text.as_bytes().to_vec()),
