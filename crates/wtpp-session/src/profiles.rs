@@ -75,7 +75,9 @@ fn unix_profiles(
     etc_shells: &str,
     exists: impl Fn(&Path) -> bool,
 ) -> Vec<Profile> {
-    const NOT_SHELLS: &[&str] = &["nologin", "false", "git-shell", "tmux", "screen"];
+    // Not interactive shells, or (rbash: restricted bash) not one anyone
+    // wants a tab of.
+    const NOT_SHELLS: &[&str] = &["nologin", "false", "git-shell", "tmux", "screen", "rbash"];
 
     let candidates = login_shell.into_iter().chain(
         etc_shells.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')),

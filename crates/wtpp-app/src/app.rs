@@ -1234,6 +1234,15 @@ impl App {
             _ => key,
         };
 
+        // Escape with a selection clears it (like WT), rather than reaching
+        // the shell.
+        if key == Some((Key::Escape, Mods::NONE))
+            && let Some(term) = self.focused_term()
+            && term.lock().selection.take().is_some()
+        {
+            self.render();
+            return true;
+        }
         // macOS: ⌘ shortcuts we don't bind belong to the system (⌘Q, ⌘H, …),
         // never to the shell.
         if cfg!(target_os = "macos") && mods.meta {
