@@ -975,7 +975,13 @@ impl App {
             ui.set_window_fullscreen(fullscreen);
         }
         let show_settings = matches!(self.tabs.get(self.active), Some(Tab { kind: TabKind::Settings, .. }));
-        self.ui().set_show_settings(show_settings);
+        let ui = self.ui();
+        // Leaving Settings (⌘T, Ctrl+Tab, closing it): the terminal gets the
+        // keys back, not a Settings control that's no longer shown.
+        if ui.get_show_settings() && !show_settings {
+            ui.invoke_focus_keys();
+        }
+        ui.set_show_settings(show_settings);
         let layout = self.active_layout();
         self.visible = layout.iter().map(|(id, _)| *id).collect();
         self.update_dividers();
