@@ -944,7 +944,7 @@ impl App {
         }
     }
 
-    fn tab_title(&self, tab: &Tab) -> String {
+    pub(crate) fn tab_title(&self, tab: &Tab) -> String {
         if let Some(title) = &tab.title {
             return title.clone();
         }

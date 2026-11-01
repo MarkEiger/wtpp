@@ -95,7 +95,7 @@ impl App {
             self.ui().set_tab_lifted(n > 1);
         }
         if self.tab_lift.is_some() {
-            let screen = crate::platform::cursor_pos().or_else(|| window_to_screen(self.ui().window(), x, y));
+            let screen = crate::platform::cursor_pos(self.ui().window()).or_else(|| window_to_screen(self.ui().window(), x, y));
             let Some(lift) = self.tab_lift.as_mut() else { return };
             lift.screen = screen;
             let grab = lift.grab;
@@ -114,7 +114,16 @@ impl App {
             }
             if let (Some((preview, (ox, oy))), Some((sx, sy))) = (&lift.preview, screen) {
                 // Out of the way over a tab row, where the marker shows.
-                preview.show_at(target.is_none().then_some((sx - ox, sy - oy)));
+                if preview.show_at(target.is_none().then_some((sx - ox, sy - oy))) && cfg!(target_os = "macos") {
+                    // Once Slint has created it (it takes the key window).
+                    let win = self.id;
+                    slint::Timer::single_shot(std::time::Duration::from_millis(30), move || {
+                        crate::with_window(win, |app| {
+                            use slint::winit_030::WinitWindowAccessor;
+                            app.ui().window().with_winit_window(|w| w.focus_window());
+                        });
+                    });
+                }
             }
             if !(in_row && target.is_none()) {
                 return;
@@ -141,7 +150,7 @@ impl App {
         let Some(lift) = self.tab_lift.take() else { return };
         self.ui().set_tab_lifted(false);
         let Some(index) = index else { return };
-        let screen = crate::platform::cursor_pos().or(lift.screen);
+        let screen = crate::platform::cursor_pos(self.ui().window()).or(lift.screen);
         let target = crate::tab_drop_target(self.id, screen);
         crate::tab_drop_target(self.id, None);
         match target {
@@ -170,7 +179,8 @@ impl App {
         let scale = window.scale_factor();
         let full = window.size().width as f32;
         let width = (WIDTH * scale).min(full);
-        let preview = crate::platform::DragPreview::capture(window, width as u32)?;
+        let title = self.tabs.get(self.dragging_tab?).map(|t| self.tab_title(t)).unwrap_or_default();
+        let preview = crate::platform::DragPreview::capture(window, width as u32, &title)?;
         let k = scale * width / full;
         Some((preview, ((grab.0 * k).round() as i32, (grab.1 * k).round() as i32)))
     }

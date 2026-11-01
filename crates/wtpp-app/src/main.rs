@@ -437,8 +437,14 @@ fn main() -> anyhow::Result<()> {
     if settings.show_tabs_in_titlebar {
         use slint::winit_030::winit::platform::macos::WindowAttributesExtMacOS;
         backend = backend.with_winit_window_attributes_hook(|attributes| {
-            attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true)
+            platform::preview_window_attributes(
+                attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true),
+            )
         });
+    }
+    #[cfg(target_os = "macos")]
+    if !settings.show_tabs_in_titlebar {
+        backend = backend.with_winit_window_attributes_hook(platform::preview_window_attributes);
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -447,7 +453,7 @@ fn main() -> anyhow::Result<()> {
         // Name the app (Wayland app_id, X11 class) so desktops match its
         // windows to wtpp.desktop (icon, dock).
         backend = backend.with_winit_window_attributes_hook(|attributes| {
-            WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp")
+            platform::preview_window_attributes(WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp"))
         });
         // Prefer X11 (XWayland) where both exist: winit has no drag and drop
         // on Wayland (file drops, tabs between windows: Wayland doesn't tell
@@ -879,7 +885,7 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
                     if first {
                         // Drops carry no position (and no mouse moves arrive
                         // during one), so ask the OS where the pointer is.
-                        let at = platform::cursor_pos().zip(client_origin(window)).map(|((x, y), (left, top))| {
+                        let at = platform::cursor_pos(window).zip(client_origin(window)).map(|((x, y), (left, top))| {
                             let scale = window.scale_factor();
                             ((x - left) as f32 / scale, (y - top) as f32 / scale)
                         });

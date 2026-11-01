@@ -1465,3 +1465,34 @@ export component MainWindow inherits Window {
         }
     }
 }
+
+// Linux and macOS: the see-through snapshot that follows a tab dragged out
+// of its window (Windows draws its own; see platform::DragPreview).
+export component DragPreviewWindow inherits Window {
+    in property <image> snapshot;
+    // Without a snapshot (the renderer can't take one): the tab's title.
+    in property <string> label;
+    in property <length> preview-width;
+    in property <length> preview-height;
+    width: preview-width;
+    height: preview-height;
+    no-frame: true;
+    background: transparent;
+    Rectangle {
+        background: snapshot.width > 0 ? transparent : Colors.menu;
+        border-width: 1px;
+        border-color: Colors.menu-border;
+        opacity: 0.8;
+        Image {
+            width: 100%;
+            height: 100%;
+            source: snapshot;
+            image-fit: fill;
+        }
+        if snapshot.width == 0: Text {
+            text: label;
+            color: Colors.text;
+            font-size: 13px;
+        }
+    }
+}

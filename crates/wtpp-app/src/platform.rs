@@ -129,18 +129,75 @@ pub fn physical_key_char() -> Option<char> {
     None
 }
 
-/// The mouse pointer in screen coordinates (physical pixels), where the OS
-/// tells us. Elsewhere callers work it out from the window position.
-pub fn cursor_pos() -> Option<(i32, i32)> {
+/// The mouse pointer in screen coordinates (physical pixels, as `window`'s
+/// position is measured), where the OS tells us: not on Wayland, where
+/// callers work it out from the window position.
+pub fn cursor_pos(window: &slint::Window) -> Option<(i32, i32)> {
     #[cfg(windows)]
     {
+        let _ = window;
         use windows_sys::Win32::Foundation::POINT;
         let mut p = POINT { x: 0, y: 0 };
         // SAFETY: `p` is a valid out pointer.
         (unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
     }
-    #[cfg(not(windows))]
-    None
+    #[cfg(target_os = "macos")]
+    {
+        #[repr(C)]
+        struct CGPoint {
+            x: f64,
+            y: f64,
+        }
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGEventCreate(source: *const std::ffi::c_void) -> *const std::ffi::c_void;
+            fn CGEventGetLocation(event: *const std::ffi::c_void) -> CGPoint;
+            fn CFRelease(cf: *const std::ffi::c_void);
+        }
+        // Points from the main screen's top-left, as winit measures window
+        // positions (before scaling them to pixels).
+        // SAFETY: a null source is allowed; the event is released once.
+        let p = unsafe {
+            let event = CGEventCreate(std::ptr::null());
+            if event.is_null() {
+                return None;
+            }
+            let p = CGEventGetLocation(event);
+            CFRelease(event);
+            p
+        };
+        let scale = window.scale_factor() as f64;
+        Some(((p.x * scale).round() as i32, (p.y * scale).round() as i32))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use x11rb::protocol::xproto::ConnectionExt;
+        let x11 = window
+            .with_winit_window(|w| {
+                w.window_handle().is_ok_and(|h| matches!(h.as_raw(), RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)))
+            })
+            .unwrap_or(false);
+        if !x11 {
+            return None;
+        }
+        thread_local! {
+            static X11: std::cell::OnceCell<Option<(x11rb::rust_connection::RustConnection, u32)>> =
+                const { std::cell::OnceCell::new() };
+        }
+        X11.with(|x| {
+            let (conn, root) = x
+                .get_or_init(|| {
+                    let (conn, screen) = x11rb::connect(None).ok()?;
+                    let root = x11rb::connection::Connection::setup(&conn).roots.get(screen)?.root;
+                    Some((conn, root))
+                })
+                .as_ref()?;
+            let reply = conn.query_pointer(*root).ok()?.reply().ok()?;
+            Some((reply.root_x as i32, reply.root_y as i32))
+        })
+    }
 }
 
 /// The usable area (without the taskbar) of the monitor at screen point
@@ -208,33 +265,107 @@ pub fn bring_to_front(window: &slint::Window) {
 
 /// A floating, see-through snapshot of a window that follows the pointer
 /// while a tab is dragged out of it (like WT's tab drag preview). It never
-/// takes focus or the mouse. Windows only; a no-op elsewhere.
+/// takes focus or the mouse. A native layered window on Windows, a Slint
+/// window elsewhere (not on Wayland, which can't place windows).
 pub struct DragPreview {
     #[cfg(windows)]
     hwnd: windows_sys::Win32::Foundation::HWND,
+    #[cfg(not(windows))]
+    window: crate::DragPreviewWindow,
+    /// Its native window lets the pointer through (once it exists).
+    #[cfg(not(windows))]
+    click_through: std::cell::Cell<bool>,
+}
+
+#[cfg(not(windows))]
+thread_local! {
+    /// Set from creating the preview until its native window is created
+    /// (whenever Slint does that): the window attributes hook then makes it
+    /// a borderless, unfocusable overlay.
+    static CREATING_PREVIEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The window attributes hook's part for the drag preview window (see
+/// `DragPreview`); other windows pass through unchanged.
+#[cfg(not(windows))]
+pub fn preview_window_attributes(
+    attributes: slint::winit_030::winit::window::WindowAttributes,
+) -> slint::winit_030::winit::window::WindowAttributes {
+    use slint::winit_030::winit::window::WindowLevel;
+    if !CREATING_PREVIEW.replace(false) {
+        return attributes;
+    }
+    let attributes =
+        attributes.with_decorations(false).with_active(false).with_window_level(WindowLevel::AlwaysOnTop).with_transparent(true);
+    // X11: not managed by the window manager at all (no frame, no taskbar
+    // entry, placed exactly where we say).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let attributes = {
+        use slint::winit_030::winit::platform::x11::WindowAttributesExtX11;
+        attributes.with_override_redirect(true)
+    };
+    attributes
 }
 
 impl DragPreview {
     /// Snapshot `window`'s client area as it is on screen, `width` physical
     /// pixels wide. Hidden until `show_at`.
-    pub fn capture(window: &slint::Window, width: u32) -> Option<DragPreview> {
+    pub fn capture(window: &slint::Window, width: u32, label: &str) -> Option<DragPreview> {
         #[cfg(windows)]
         {
+            let _ = label;
             imp::preview_capture(window, width).map(|hwnd| DragPreview { hwnd })
         }
         #[cfg(not(windows))]
         {
-            let _ = (window, width);
-            None
+            // Wayland can't place a window at the pointer.
+            cursor_pos(window)?;
+            CREATING_PREVIEW.set(true);
+            let preview = crate::DragPreviewWindow::new().ok()?;
+            let size = window.size();
+            let height = (width as f32 * size.height as f32 / size.width.max(1) as f32).round() as u32;
+            match window.take_snapshot() {
+                Ok(pixels) => preview.set_snapshot(slint::Image::from_rgba8(pixels)),
+                Err(e) => log::debug!("tab drag preview: no snapshot ({e})"),
+            }
+            preview.set_label(label.into());
+            let scale = window.scale_factor();
+            preview.set_preview_width(width as f32 / scale);
+            preview.set_preview_height(height as f32 / scale);
+            Some(DragPreview { window: preview, click_through: std::cell::Cell::new(false) })
         }
     }
 
-    /// Show it with its top-left at screen (`x`, `y`), or hide it.
-    pub fn show_at(&self, at: Option<(i32, i32)>) {
+    /// Show it with its top-left at screen (`x`, `y`), or hide it. True
+    /// if that just put it on screen (macOS then makes it the key window:
+    /// the caller takes that back).
+    pub fn show_at(&self, at: Option<(i32, i32)>) -> bool {
         #[cfg(windows)]
-        imp::preview_show(self.hwnd, at);
+        {
+            imp::preview_show(self.hwnd, at);
+            false
+        }
         #[cfg(not(windows))]
-        let _ = at;
+        {
+            use slint::ComponentHandle;
+            let window = self.window.window();
+            let Some((x, y)) = at else {
+                window.hide().ok();
+                return false;
+            };
+            window.set_position(slint::PhysicalPosition::new(x, y));
+            let shown = !window.is_visible();
+            if shown {
+                window.show().ok();
+            }
+            if !self.click_through.get() {
+                // The pointer goes through it, to whatever is below.
+                use slint::winit_030::WinitWindowAccessor;
+                let done = window.with_winit_window(|w| w.set_cursor_hittest(false).is_ok());
+                self.click_through.set(done.unwrap_or(false));
+            }
+            shown
+        }
     }
 }
 
@@ -244,6 +375,13 @@ impl Drop for DragPreview {
         // SAFETY: our own window, destroyed once.
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(self.hwnd);
+        }
+        #[cfg(not(windows))]
+        {
+            use slint::ComponentHandle;
+            self.window.window().hide().ok();
+            // Never shown: the next window isn't the preview.
+            CREATING_PREVIEW.set(false);
         }
     }
 }

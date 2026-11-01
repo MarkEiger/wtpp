@@ -6010,6 +6010,7 @@ dependencies = [
  "wtpp-input",
  "wtpp-render",
  "wtpp-session",
+ "x11rb",
 ]
 
 [[package]]

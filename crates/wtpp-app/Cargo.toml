@@ -28,6 +28,10 @@ wtpp-session.workspace = true
 # The same version winit uses, to adjust its view class.
 objc2 = "0.5"
 
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# The same version winit uses: where the pointer is (X11).
+x11rb = "0.13"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
