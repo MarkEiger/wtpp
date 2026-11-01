@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0 — 2026-11-01
+
+- Linux and macOS: dropped files paste into the pane under the pointer
+  (before, the focused pane), like on Windows.
+- Linux and macOS: a tab dragged out of a window shows the same see-through
+  preview of the window as on Windows. (Not on Wayland, which can't place
+  windows at the pointer.)
+
 ## 1.0.0 — 2026-10-31
 
 First public release, tested on Windows 11, Ubuntu 26.04 (GNOME, Wayland and
