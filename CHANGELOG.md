@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 — 2026-11-01
 
 - macOS: ⌘← / ⌘→ go to the start / end of the line, ⌘⌫ deletes to the start
   of the line and ⌘⌦ to its end, as in iTerm; ⌘↑ / ⌘↓ scroll by a line.
