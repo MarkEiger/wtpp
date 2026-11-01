@@ -1330,9 +1330,7 @@ impl App {
             return true;
         }
         let bytes = match key {
-            // macOS: Option+arrows move by word, as in Terminal (ESC b / f).
-            Some((Key::Left, m)) if cfg!(target_os = "macos") && m == Mods::ALT => Some(b"\x1bb".to_vec()),
-            Some((Key::Right, m)) if cfg!(target_os = "macos") && m == Mods::ALT => Some(b"\x1bf".to_vec()),
+            Some((k, m)) if cfg!(target_os = "macos") && let Some(b) = mac_option_edit(k, m) => Some(b.to_vec()),
             // macOS: Option types characters (⌥A → å), as in Terminal.
             Some((Key::Char(c), m)) if cfg!(target_os = "macos") && m.alt && !m.ctrl && !c.is_ascii() => {
                 Some(text.as_bytes().to_vec())
@@ -1940,6 +1938,21 @@ fn cursor_line(session: &Session) -> Vec<char> {
     out
 }
 
+/// macOS: Option word editing, as in Terminal and iTerm. ⌥←/⌥→ move by word
+/// (ESC b / f) and ⌥⌦ (⌥fn⌫) deletes the next word (ESC d); ⌥⌫ already sends
+/// ESC DEL from the encoder.
+fn mac_option_edit(key: Key, mods: Mods) -> Option<&'static [u8]> {
+    if mods != Mods::ALT {
+        return None;
+    }
+    match key {
+        Key::Left => Some(b"\x1bb"),
+        Key::Right => Some(b"\x1bf"),
+        Key::Delete => Some(b"\x1bd"),
+        _ => None,
+    }
+}
+
 /// How many characters Ctrl+Delete removes, Windows-style: the rest of the
 /// current word plus the whitespace after it (or, from whitespace, up to the
 /// next word). Trailing blanks at the end of the input stop the count.
@@ -2028,6 +2041,17 @@ mod tests {
         assert!(is_exe_path(r"C:\WINDOWS\system32\cmd.exe"));
         assert!(!is_exe_path("mark@host: ~/wtpp"));
         assert!(!is_exe_path("setup.exe"));
+    }
+
+    #[test]
+    fn mac_option_word_editing() {
+        assert_eq!(mac_option_edit(Key::Left, Mods::ALT), Some(&b"\x1bb"[..]));
+        assert_eq!(mac_option_edit(Key::Right, Mods::ALT), Some(&b"\x1bf"[..]));
+        assert_eq!(mac_option_edit(Key::Delete, Mods::ALT), Some(&b"\x1bd"[..]));
+        // Other keys and modifiers go through the normal encoder.
+        assert_eq!(mac_option_edit(Key::Backspace, Mods::ALT), None);
+        assert_eq!(mac_option_edit(Key::Delete, Mods::NONE), None);
+        assert_eq!(mac_option_edit(Key::Left, Mods { alt: true, shift: true, ..Mods::NONE }), None);
     }
 
     #[test]

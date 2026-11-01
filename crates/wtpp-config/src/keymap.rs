@@ -64,6 +64,15 @@ impl Keymap {
             ("cmd+plus".into(), AdjustFontSize(1)),
             ("cmd+minus".into(), AdjustFontSize(-1)),
             ("cmd+0".into(), ResetFontSize),
+            // Line editing as in iTerm's "Natural Text Editing": ⌘←/→ go to
+            // the start/end of the line (^A/^E), ⌘⌫ deletes to its start
+            // (^U), ⌘⌦ to its end (^K).
+            ("cmd+left".into(), SendInput("\x01".into())),
+            ("cmd+right".into(), SendInput("\x05".into())),
+            ("cmd+backspace".into(), SendInput("\x15".into())),
+            ("cmd+delete".into(), SendInput("\x0b".into())),
+            ("cmd+up".into(), ScrollUp),
+            ("cmd+down".into(), ScrollDown),
         ];
         for (k, d) in [("left", Left), ("right", Right), ("up", Up), ("down", Down)] {
             b.push((format!("cmd+alt+{k}"), MoveFocus(d)));
@@ -235,9 +244,31 @@ mod tests {
         for c in 'a'..='z' {
             assert_eq!(km.lookup(Key::Char(c), Mods::CTRL), None, "ctrl+{c}");
         }
-        let mut chords: Vec<_> = km.bindings.iter().map(|b| b.chord).collect();
-        chords.dedup();
+        let chords: std::collections::HashSet<_> = km.bindings.iter().map(|b| b.chord).collect();
         assert_eq!(chords.len(), km.bindings.len());
+    }
+
+    #[test]
+    fn mac_line_editing() {
+        let km = Keymap::mac_defaults();
+        let cmd = Mods { meta: true, ..Mods::NONE };
+        let send = |s: &str| Some(Action::SendInput(s.into()));
+        assert_eq!(km.lookup(Key::Left, cmd).cloned(), send("\x01"));
+        assert_eq!(km.lookup(Key::Right, cmd).cloned(), send("\x05"));
+        assert_eq!(km.lookup(Key::Backspace, cmd).cloned(), send("\x15"));
+        assert_eq!(km.lookup(Key::Delete, cmd).cloned(), send("\x0b"));
+        assert_eq!(km.lookup(Key::Up, cmd), Some(&Action::ScrollUp));
+        assert_eq!(km.lookup(Key::Down, cmd), Some(&Action::ScrollDown));
+        // The ⌥⌘ and ⌃⌘ arrows still move between and resize panes.
+        let cmd_alt = Mods { meta: true, alt: true, ..Mods::NONE };
+        let cmd_ctrl = Mods { meta: true, ctrl: true, ..Mods::NONE };
+        assert_eq!(km.lookup(Key::Left, cmd_alt), Some(&Action::MoveFocus(Direction::Left)));
+        assert_eq!(km.lookup(Key::Left, cmd_ctrl), Some(&Action::ResizePane(Direction::Left)));
+        // Windows and Linux keep these keys for the shell.
+        let pc = Keymap::pc_defaults();
+        for key in [Key::Left, Key::Right, Key::Backspace, Key::Delete] {
+            assert_eq!(pc.lookup(key, cmd), None, "{key:?}");
+        }
     }
 
     #[test]
@@ -269,8 +300,10 @@ mod tests {
         let mut km = Keymap::defaults();
         assert!(km.to_user_actions().is_empty());
 
+        // Defaults differ per platform: unbind whatever Paste is on here.
+        let paste = km.bindings.iter().find(|b| b.action == Action::Paste).unwrap().chord;
         km.bind(Chord::parse("ctrl+shift+w").unwrap(), Action::CloseTab);
-        km.bindings.retain(|b| b.chord != Chord::parse("ctrl+v").unwrap());
+        km.bindings.retain(|b| b.chord != paste);
         km.bind(Chord::parse("ctrl+alt+s").unwrap(), Action::SplitPane { side: None, duplicate: false });
 
         let entries = km.to_user_actions();

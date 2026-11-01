@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- macOS: ⌘← / ⌘→ go to the start / end of the line, ⌘⌫ deletes to the start
+  of the line and ⌘⌦ to its end, as in iTerm; ⌘↑ / ⌘↓ scroll by a line.
+  Before, these keys did nothing. They can be changed in Keyboard shortcuts.
+- macOS: ⌥⌦ (⌥fn⌫) deletes the next word, as in Terminal; it printed
+  `[3;3~` instead.
+
 ## 1.1.0 — 2026-11-01
 
 - Linux and macOS: dropped files paste into the pane under the pointer

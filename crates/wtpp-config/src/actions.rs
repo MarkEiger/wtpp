@@ -403,9 +403,11 @@ impl Chord {
 
     /// Display form, e.g. "Ctrl+Shift+T", or "⇧⌘T" on macOS.
     pub fn label(self) -> String {
-        if cfg!(target_os = "macos") {
-            return self.mac_label();
-        }
+        if cfg!(target_os = "macos") { self.mac_label() } else { self.pc_label() }
+    }
+
+    /// Windows and Linux style: "Ctrl+Shift+T".
+    pub fn pc_label(self) -> String {
         let mut parts: Vec<String> = Vec::new();
         if self.mods.meta {
             parts.push("Win".into());
@@ -584,18 +586,35 @@ mod tests {
 
     #[test]
     fn labels() {
-        assert_eq!(Chord::parse("ctrl+shift+t").unwrap().label(), "Ctrl+Shift+T");
-        assert_eq!(Chord::parse("alt+shift+plus").unwrap().label(), "Alt+Shift+Plus");
-        assert_eq!(Chord::parse("cmd+shift+p").unwrap().mac_label(), "⇧⌘P");
-        assert_eq!(Chord::parse("cmd+ctrl+left").unwrap().mac_label(), "⌃⌘←");
-        assert_eq!(Chord::parse("f11").unwrap().label(), "F11");
-        assert_eq!(Chord::parse("ctrl+shift+pgup").unwrap().label(), "Ctrl+Shift+PgUp");
-        assert_eq!(Chord::parse("alt+left").unwrap().label(), "Alt+Left");
+        let pc = |s: &str| Chord::parse(s).unwrap().pc_label();
+        let mac = |s: &str| Chord::parse(s).unwrap().mac_label();
+        assert_eq!(pc("ctrl+shift+t"), "Ctrl+Shift+T");
+        assert_eq!(pc("alt+shift+plus"), "Alt+Shift+Plus");
+        assert_eq!(pc("f11"), "F11");
+        assert_eq!(pc("ctrl+shift+pgup"), "Ctrl+Shift+PgUp");
+        assert_eq!(pc("alt+left"), "Alt+Left");
+        assert_eq!(mac("cmd+shift+p"), "⇧⌘P");
+        assert_eq!(mac("cmd+ctrl+left"), "⌃⌘←");
+        assert_eq!(mac("cmd+left"), "⌘←");
+        assert_eq!(mac("cmd+backspace"), "⌘⌫");
+        assert_eq!(mac("cmd+delete"), "⌘⌦");
+        let ctrl_shift_t = Chord::parse("ctrl+shift+t").unwrap();
+        let native = if cfg!(target_os = "macos") { "⌃⇧T" } else { "Ctrl+Shift+T" };
+        assert_eq!(ctrl_shift_t.label(), native);
+    }
+
+    #[test]
+    fn line_editing_chords_round_trip() {
+        for s in ["cmd+left", "cmd+right", "cmd+backspace", "cmd+delete", "cmd+up", "cmd+down"] {
+            let chord = Chord::parse(s).unwrap();
+            assert_eq!(Chord::parse(&chord.to_wt_string()), Some(chord), "{s}");
+        }
     }
 
     #[test]
     fn action_json_round_trip() {
-        for action in Action::catalog(3).into_iter().chain([Action::SendInput("\x1b\r".into())]) {
+        let inputs = ["\x1b\r", "\x01", "\x05", "\x15", "\x0b"].map(|s| Action::SendInput(s.into()));
+        for action in Action::catalog(3).into_iter().chain(inputs) {
             let json = action.to_json();
             assert_eq!(Action::from_json(&json), Ok(Some(action.clone())), "{json}");
         }
