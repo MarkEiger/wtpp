@@ -1,6 +1,11 @@
 # Changelog
 
-## 1.1.1 — 2026-11-01
+## 1.1.1 — 2026-11-08
+
+- Splitting a pane (Ctrl+Shift+Plus / Minus, ⌘D / ⇧⌘D) opens the same profile
+  as the pane you split, like the right-click menu, instead of the default
+  profile. "Split pane with default profile" is in the pane and tab right-click
+  menus and the command palette, and can be given a shortcut.
 
 - macOS: ⌘← / ⌘→ go to the start / end of the line, ⌘⌫ deletes to the start
   of the line and ⌘⌦ to its end, as in iTerm; ⌘↑ / ⌘↓ scroll by a line.

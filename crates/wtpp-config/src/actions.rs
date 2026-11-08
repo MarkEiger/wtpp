@@ -228,9 +228,9 @@ impl Action {
                     Some(Direction::Up) => "up",
                 };
                 if *duplicate {
-                    format!("Split pane ({side}), duplicate profile")
-                } else {
                     format!("Split pane ({side})")
+                } else {
+                    format!("Split pane ({side}), default profile")
                 }
             }
             MoveFocus(d) => format!("Move focus {}", d.name()),
@@ -269,8 +269,8 @@ impl Action {
         all.extend([DuplicateTab, CloseTab, CloseOtherTabs, ClosePane, NextTab, PrevTab, RenameTab]);
         all.extend((0..9).map(SwitchToTab));
         for side in [None, Some(Direction::Right), Some(Direction::Down), Some(Direction::Left), Some(Direction::Up)] {
-            all.push(SplitPane { side, duplicate: false });
             all.push(SplitPane { side, duplicate: true });
+            all.push(SplitPane { side, duplicate: false });
         }
         for d in [Direction::Left, Direction::Right, Direction::Up, Direction::Down] {
             all.push(MoveFocus(d));
@@ -618,6 +618,13 @@ mod tests {
             let json = action.to_json();
             assert_eq!(Action::from_json(&json), Ok(Some(action.clone())), "{json}");
         }
+    }
+
+    #[test]
+    fn split_labels() {
+        let split = |duplicate| Action::SplitPane { side: Some(Direction::Right), duplicate }.label(&[]);
+        assert_eq!(split(true), "Split pane (right)");
+        assert_eq!(split(false), "Split pane (right), default profile");
     }
 
     #[test]

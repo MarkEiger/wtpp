@@ -52,8 +52,8 @@ impl Keymap {
             ("cmd+shift+[".into(), PrevTab),
             ("ctrl+tab".into(), NextTab),
             ("ctrl+shift+tab".into(), PrevTab),
-            ("cmd+d".into(), SplitPane { side: Some(Right), duplicate: false }),
-            ("cmd+shift+d".into(), SplitPane { side: Some(Down), duplicate: false }),
+            ("cmd+d".into(), SplitPane { side: Some(Right), duplicate: true }),
+            ("cmd+shift+d".into(), SplitPane { side: Some(Down), duplicate: true }),
             ("cmd+shift+enter".into(), TogglePaneZoom),
             ("cmd+c".into(), Copy),
             ("cmd+v".into(), Paste),
@@ -105,8 +105,8 @@ impl Keymap {
             ("ctrl+shift+w", ClosePane),
             ("ctrl+tab", NextTab),
             ("ctrl+shift+tab", PrevTab),
-            ("ctrl+shift+plus", SplitPane { side: Some(Right), duplicate: false }),
-            ("ctrl+shift+minus", SplitPane { side: Some(Down), duplicate: false }),
+            ("ctrl+shift+plus", SplitPane { side: Some(Right), duplicate: true }),
+            ("ctrl+shift+minus", SplitPane { side: Some(Down), duplicate: true }),
             ("ctrl+c", Copy),
             ("ctrl+shift+c", Copy),
             ("ctrl+insert", Copy),
@@ -225,8 +225,8 @@ mod tests {
         assert_eq!(km.lookup(Key::Char('!'), ctrl_shift), Some(&Action::NewTab(Some(0))));
         assert_eq!(km.lookup(Key::Char('t'), Mods::CTRL), None);
         assert_eq!(km.lookup(Key::Backspace, Mods::CTRL), None);
-        let right = Action::SplitPane { side: Some(Direction::Right), duplicate: false };
-        let down = Action::SplitPane { side: Some(Direction::Down), duplicate: false };
+        let right = Action::SplitPane { side: Some(Direction::Right), duplicate: true };
+        let down = Action::SplitPane { side: Some(Direction::Down), duplicate: true };
         assert_eq!(km.lookup(Key::Char('+'), ctrl_shift), Some(&right));
         assert_eq!(km.lookup(Key::Char('_'), ctrl_shift), Some(&down));
         assert_eq!(km.lookup(Key::Char('='), Mods::CTRL), Some(&Action::AdjustFontSize(1)));
@@ -246,6 +246,21 @@ mod tests {
         }
         let chords: std::collections::HashSet<_> = km.bindings.iter().map(|b| b.chord).collect();
         assert_eq!(chords.len(), km.bindings.len());
+    }
+
+    #[test]
+    fn split_keys_keep_the_pane_profile() {
+        // The split shortcuts open the focused pane's profile, not the default.
+        for km in [Keymap::pc_defaults(), Keymap::mac_defaults()] {
+            for b in &km.bindings {
+                if let Action::SplitPane { duplicate, .. } = b.action {
+                    assert!(duplicate, "{} splits with the default profile", b.chord.label());
+                }
+            }
+        }
+        let cmd = Mods { meta: true, ..Mods::NONE };
+        let right = Action::SplitPane { side: Some(Direction::Right), duplicate: true };
+        assert_eq!(Keymap::mac_defaults().lookup(Key::Char('d'), cmd), Some(&right));
     }
 
     #[test]

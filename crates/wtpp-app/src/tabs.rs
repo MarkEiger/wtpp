@@ -28,9 +28,10 @@ impl App {
                 self.select_tab(index);
                 self.run_named(wtpp_config::Action::DuplicateTab);
             }
-            "split" => {
+            "split" | "split-default" => {
                 self.select_tab(index);
-                self.run_named(wtpp_config::Action::SplitPane { side: None, duplicate: true });
+                let duplicate = action == "split";
+                self.run_named(wtpp_config::Action::SplitPane { side: None, duplicate });
             }
             "close-right" => {
                 for i in (index + 1..self.tabs.len()).rev() {

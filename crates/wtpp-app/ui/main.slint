@@ -425,6 +425,14 @@ component TabItem inherits Rectangle {
             }
 
             MenuItem {
+                title: "Split tab with default profile";
+                enabled: !root.is-settings;
+                activated => {
+                    root.menu("split-default");
+                }
+            }
+
+            MenuItem {
                 title: "Move tab to new window";
                 enabled: !root.is-settings;
                 activated => {
@@ -1010,6 +1018,13 @@ export component MainWindow inherits Window {
                             title: "Split pane";
                             activated => {
                                 root.pane-menu(i, "split");
+                            }
+                        }
+
+                        MenuItem {
+                            title: "Split pane with default profile";
+                            activated => {
+                                root.pane-menu(i, "split-default");
                             }
                         }
 

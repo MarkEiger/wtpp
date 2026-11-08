@@ -1692,6 +1692,7 @@ impl App {
             "select-all" => Action::SelectAll,
             "find" => Action::Find,
             "split" => Action::SplitPane { side: None, duplicate: true },
+            "split-default" => Action::SplitPane { side: None, duplicate: false },
             "duplicate" => Action::DuplicateTab,
             "close" => Action::ClosePane,
             other => {

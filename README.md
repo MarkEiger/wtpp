@@ -69,7 +69,7 @@ All shortcuts are editable in **⌄ → Keyboard shortcuts**.
 | Ctrl+Shift+N | ⌘N | New window |
 | Ctrl+Shift+W | ⌘W | Close pane |
 | Ctrl+Tab, Ctrl+Shift+Tab, Alt+1..9 | ⌃Tab, ⇧⌘] / ⇧⌘[, ⌘1..9 | Switch tabs |
-| Ctrl+Shift+Plus / Ctrl+Shift+Minus | ⌘D / ⇧⌘D | Split pane right / down |
+| Ctrl+Shift+Plus / Ctrl+Shift+Minus | ⌘D / ⇧⌘D | Split pane right / down (same profile as the pane) |
 | Alt+Arrows | ⌥⌘Arrows | Move between panes |
 | Ctrl+Shift+Arrows | ⌃⌘Arrows | Resize pane |
 | Ctrl+Shift+P | ⇧⌘P | Command palette |
