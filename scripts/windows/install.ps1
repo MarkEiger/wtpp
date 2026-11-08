@@ -26,4 +26,19 @@ foreach ($key in 'HKCU:\Software\Classes\Directory\Background\shell\wtpp', 'HKCU
     Set-ItemProperty $key 'Icon' "$dir\wtpp.ico"
     Set-ItemProperty "$key\command" '(default)' "`"$dir\wtpp.exe`" -d `"%V`""
 }
+# On the user's PATH, so `wtpp --version` (and `wtpp -d DIR`) work in new
+# shells. Read the raw value so %VARIABLES% in it stay unexpanded.
+$envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+$path = [string]$envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+$parts = @($path -split ';' | Where-Object { $_ })
+if ($parts -notcontains $dir) {
+    $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+    if ($path) { $kind = $envKey.GetValueKind('Path') }
+    $envKey.SetValue('Path', (($parts + $dir) -join ';'), $kind)
+    # Tell Explorer, so shells started from now on see it.
+    [Environment]::SetEnvironmentVariable('WTPP_INSTALL_REFRESH', '1', 'User')
+    [Environment]::SetEnvironmentVariable('WTPP_INSTALL_REFRESH', $null, 'User')
+}
+$envKey.Close()
 Write-Host "Installed to $dir. Find wt++ in the Start Menu."
+Write-Host "In a new terminal, 'wtpp --version' shows the installed version."

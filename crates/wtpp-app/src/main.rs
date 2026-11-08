@@ -403,6 +403,11 @@ fn main() -> anyhow::Result<()> {
 
     let request = instance::Request { args: std::env::args().skip(1).collect(), cwd: std::env::current_dir().ok() };
     let args = parse_args(request);
+    // Before the running-instance handoff: it only prints.
+    if args.version {
+        platform::print_line(&format!("wt++ {}", env!("CARGO_PKG_VERSION")));
+        return Ok(());
+    }
     // Started by COM for a console handoff (wt++ is the default terminal,
     // and no wt++ was running to take it): serve it, whatever else runs.
     let embedding = args.embedding;

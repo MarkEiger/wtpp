@@ -14,7 +14,8 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
 This installs to `%LOCALAPPDATA%\Programs\wtpp`, adds wt++ to the Start Menu
-and "Open in wt++" to Explorer's folder right-click menu.
+and your PATH, and "Open in wt++" to Explorer's folder right-click menu.
+`wtpp --version` shows the installed version.
 
 **macOS** (Apple Silicon): unzip `wtpp-<version>-macos-arm64.zip` and move
 `wt++.app` to Applications. It isn't notarized by Apple, so macOS blocks the

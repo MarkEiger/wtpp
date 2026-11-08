@@ -25,6 +25,31 @@ pub fn open(target: &str) -> std::io::Result<()> {
     }
 }
 
+/// Print a line to the shell that started wt++ (`wtpp --version`). On Windows
+/// wt++ is a GUI app without a console of its own, so it writes to its
+/// parent's console unless stdout is redirected (`wtpp -v > file`, a pipe).
+pub fn print_line(text: &str) {
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE};
+        // SAFETY: no preconditions.
+        let stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        // SAFETY: no preconditions; fails harmlessly without a parent console.
+        if (stdout.is_null() || stdout == INVALID_HANDLE_VALUE)
+            && unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } != 0
+            && let Ok(mut console) = std::fs::OpenOptions::new().write(true).open("CONOUT$")
+        {
+            // The shell doesn't wait for GUI apps and has printed its next
+            // prompt already: start on a fresh line.
+            let _ = writeln!(console, "\r\n{text}");
+            return;
+        }
+    }
+    println!("{text}");
+}
+
 /// The terminal bell: the system's default sound.
 pub fn bell() {
     #[cfg(windows)]

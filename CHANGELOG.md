@@ -6,7 +6,8 @@
   as the pane you split, like the right-click menu, instead of the default
   profile. "Split pane with default profile" is in the pane and tab right-click
   menus and the command palette, and can be given a shortcut.
-
+- `wtpp --version` (or `-v`) prints the version. On Windows, `install.ps1` now
+  puts wt++ on your PATH, so it works in any new terminal.
 - macOS: ⌘← / ⌘→ go to the start / end of the line, ⌘⌫ deletes to the start
   of the line and ⌘⌦ to its end, as in iTerm; ⌘↑ / ⌘↓ scroll by a line.
   Before, these keys did nothing. They can be changed in Keyboard shortcuts.

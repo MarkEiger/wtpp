@@ -1,5 +1,5 @@
 //! Command-line arguments, following Windows Terminal's `wt.exe`:
-//! `wtpp [--pos X,Y] [new-tab] [-p PROFILE] [-d DIR] [--] [COMMANDLINE...]`.
+//! `wtpp [-v] [--pos X,Y] [new-tab] [-p PROFILE] [-d DIR] [--] [COMMANDLINE...]`.
 
 use std::path::PathBuf;
 
@@ -15,6 +15,8 @@ pub struct Args {
     /// Started by COM to receive a console from Windows (wt++ is the
     /// default terminal): no window until one arrives.
     pub embedding: bool,
+    /// `-v` / `--version`: print the version and exit.
+    pub version: bool,
 }
 
 impl Args {
@@ -38,6 +40,7 @@ impl Args {
         let mut rest = Vec::new();
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "-v" | "--version" => out.version = true,
                 "-p" | "--profile" => out.profile = Some(args.next().ok_or("-p needs a profile name")?),
                 "-d" | "--startingDirectory" | "--working-directory" => {
                     let dir = args.next().ok_or("-d needs a directory")?;
@@ -91,5 +94,16 @@ mod tests {
         assert_eq!(a.starting_directory, Some(PathBuf::from("/tmp")));
         assert_eq!(a.commandline.as_deref(), Some("htop -d"));
         assert!(parse(&["-p"]).is_err());
+    }
+
+    #[test]
+    fn version_flag() {
+        assert!(parse(&["--version"]).unwrap().version);
+        assert!(parse(&["-v"]).unwrap().version);
+        assert!(!parse(&[]).unwrap().version);
+        // After the command line starts, -v belongs to the command.
+        let a = parse(&["-e", "grep", "-v", "x"]).unwrap();
+        assert!(!a.version);
+        assert_eq!(a.commandline.as_deref(), Some("grep -v x"));
     }
 }
