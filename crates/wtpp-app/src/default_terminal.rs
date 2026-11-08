@@ -57,7 +57,7 @@ mod imp {
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetExitCodeProcess, INFINITE, PROCESS_NAME_WIN32, PROCESS_QUERY_INFORMATION,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
+        GetProcessId, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
     };
     use windows_sys::core::{GUID, HRESULT};
 
@@ -223,6 +223,8 @@ mod imp {
                 output: file(self.output),
                 input: file(self.input),
                 signal: file(self.signal),
+                // SAFETY: `client` is a process handle we own.
+                pid: Some(unsafe { GetProcessId(self.client as HANDLE) }).filter(|&p| p != 0),
                 wait_exit: Box::new(move || {
                     let mut code = 0u32;
                     // SAFETY: `client` stays open until this closes it.

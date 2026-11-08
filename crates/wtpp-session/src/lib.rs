@@ -81,6 +81,8 @@ pub struct Pipes {
     pub input: File,
     /// Takes resize messages.
     pub signal: File,
+    /// The client program's process id.
+    pub pid: Option<u32>,
     /// Waits for the client program to exit and returns its exit code.
     pub wait_exit: Box<dyn FnOnce() -> Option<i32> + Send>,
     /// Handles to hold for the session's lifetime: closing them tells the
@@ -181,6 +183,8 @@ pub struct Session {
     io: Io,
     size: Arc<FairMutex<GridSize>>,
     profile: Profile,
+    /// The process the session started (or was handed): the shell.
+    pid: Option<u32>,
     /// For a handed-over console (see [`Pipes::keep_alive`]).
     _keep_alive: Vec<File>,
 }
@@ -230,13 +234,17 @@ impl Session {
             escape_args: true,
         };
         let pty = tty::new(&options, size.window_size(), 0)?;
+        #[cfg(windows)]
+        let pid = pty.child_watcher().pid().map(|p| p.get());
+        #[cfg(not(windows))]
+        let pid = Some(pty.child().id());
 
         let event_loop = EventLoop::new(term.clone(), listener.clone(), pty, true, false)?;
         let io = Io::Pty(event_loop.channel());
         let _ = listener.pty.set(io.clone());
         event_loop.spawn();
 
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), _keep_alive: Vec::new() })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, _keep_alive: Vec::new() })
     }
 
     /// A session on a console Windows handed over (see [`Pipes`]): a thread
@@ -248,7 +256,7 @@ impl Session {
         on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
     ) -> anyhow::Result<Session> {
         let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
-        let Pipes { mut output, mut input, signal, wait_exit, keep_alive } = pipes;
+        let Pipes { mut output, mut input, signal, pid, wait_exit, keep_alive } = pipes;
 
         let (tx, rx) = mpsc::channel::<Option<Cow<'static, [u8]>>>();
         std::thread::Builder::new().name("handoff-input".into()).spawn(move || {
@@ -284,7 +292,7 @@ impl Session {
         let _ = listener.pty.set(io.clone());
         // The console host starts at its own default size.
         io.resize(size);
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), _keep_alive: keep_alive })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, _keep_alive: keep_alive })
     }
 
     pub fn term(&self) -> &Arc<FairMutex<Term<Listener>>> {
@@ -293,6 +301,11 @@ impl Session {
 
     pub fn profile(&self) -> &Profile {
         &self.profile
+    }
+
+    /// The shell's process id (the program a handed-over console started).
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
     }
 
     pub fn size(&self) -> GridSize {
@@ -376,7 +389,7 @@ mod tests {
         let (mut host_signal, signal) = pipe();
         let size = GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
         let (tx, rx) = mpsc::channel();
-        let pipes = Pipes { output, input, signal, wait_exit: Box::new(|| Some(3)), keep_alive: Vec::new() };
+        let pipes = Pipes { output, input, signal, pid: None, wait_exit: Box::new(|| Some(3)), keep_alive: Vec::new() };
         let session = Session::from_pipes(&Profile::new("cmd", "cmd.exe", &[]), size, pipes, move |e| {
             if let SessionEvent::Exited(code) = e {
                 tx.send(code).unwrap();

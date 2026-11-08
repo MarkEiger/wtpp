@@ -1329,6 +1329,18 @@ impl App {
             pane.session.write(delete.repeat(n));
             return true;
         }
+        // Claude Code under cmd or PowerShell reads keys through the console,
+        // which keeps Alt but drops Shift from Enter: give it Alt+Enter (ESC CR,
+        // its "insert newline"). PSReadLine keeps its own Shift+Enter otherwise.
+        if key == Some((Key::Enter, Mods::SHIFT))
+            && pane.session.profile().key_style == KeyStyle::Windows
+            && pane.session.pid().is_some_and(|pid| crate::platform::runs_under(pid, "claude.exe"))
+        {
+            let alt_enter = wtpp_input::encode_win32(Key::Enter, Mods::ALT).unwrap_or_default();
+            pane.session.term().lock().selection = None;
+            pane.session.write(alt_enter);
+            return true;
+        }
         let bytes = match key {
             Some((k, m)) if cfg!(target_os = "macos") && let Some(b) = mac_option_edit(k, m) => Some(b.to_vec()),
             // macOS: Option types characters (⌥A → å), as in Terminal.

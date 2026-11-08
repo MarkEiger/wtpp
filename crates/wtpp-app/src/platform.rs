@@ -154,6 +154,21 @@ pub fn physical_key_char() -> Option<char> {
     None
 }
 
+/// Whether a process named `exe` (e.g. `claude.exe`, any case) runs under
+/// process `root`: `root` itself or any of its descendants. Windows only;
+/// elsewhere `false`.
+pub fn runs_under(root: u32, exe: &str) -> bool {
+    #[cfg(windows)]
+    {
+        imp::runs_under(root, exe)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (root, exe);
+        false
+    }
+}
+
 /// The mouse pointer in screen coordinates (physical pixels, as `window`'s
 /// position is measured), where the OS tells us: not on Wayland, where
 /// callers work it out from the window position.
@@ -437,6 +452,51 @@ mod imp {
         dirs.into_iter().map(|d| d.join(&with_ext)).find(|p| p.exists())
     }
 
+    pub fn runs_under(root: u32, exe: &str) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+        };
+
+        // (pid, parent pid, name) of every process.
+        let mut procs = Vec::new();
+        // SAFETY: a snapshot we close; `entry` is sized as the API requires.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return false;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut entry) != 0;
+            while ok {
+                let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                procs.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+                ok = Process32NextW(snap, &mut entry) != 0;
+            }
+            CloseHandle(snap);
+        }
+        // Walk down from `root`. Parent ids can be stale (an exited parent's
+        // id reused), so only processes found under `root` are followed.
+        let mut todo = vec![root];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(pid) = todo.pop() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            for (child, parent, name) in &procs {
+                if *child == pid && name.eq_ignore_ascii_case(exe) {
+                    return true;
+                }
+                if *parent == pid && *child != pid {
+                    todo.push(*child);
+                }
+            }
+        }
+        false
+    }
+
     pub fn exe_icon(program: &str) -> Option<slint::Image> {
         let path = resolve(program)?;
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -589,5 +649,18 @@ mod imp {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn finds_descendants_by_name() {
+        let me = std::process::id();
+        let mut child = std::process::Command::new("ping").args(["-n", "5", "127.0.0.1"]).spawn().unwrap();
+        assert!(super::runs_under(me, "PING.EXE"));
+        assert!(!super::runs_under(me, "claude.exe"));
+        assert!(!super::runs_under(child.id(), "cmd.exe"));
+        child.kill().unwrap();
     }
 }
