@@ -2,6 +2,7 @@
 
 ## 1.1.2 — 2026-11-08
 
+- Ctrl+Alt+Plus / Minus split a pane right / down with the default profile.
 - Windows: Shift+Enter inserts a new line in Claude Code running in a
   PowerShell or Command Prompt tab; it submitted the prompt. Outside Claude
   Code, PowerShell still gets its own Shift+Enter.

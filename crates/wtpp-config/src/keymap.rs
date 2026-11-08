@@ -26,7 +26,8 @@ impl Keymap {
     ///   splitting and resizing panes kept switching layouts. Panes use
     ///   Ctrl+Shift+Plus/Minus and Ctrl+Shift+arrows instead.
     /// - Ctrl+Alt is AltGr on many layouts (Ctrl+Alt+7 types `{` in German),
-    ///   so switching tabs is Alt+1..9.
+    ///   so switching tabs is Alt+1..9. Only Plus/Minus use it, which few
+    ///   layouts type anything on: split with the default profile.
     pub fn defaults() -> Keymap {
         if cfg!(target_os = "macos") { Keymap::mac_defaults() } else { Keymap::pc_defaults() }
     }
@@ -54,6 +55,8 @@ impl Keymap {
             ("ctrl+shift+tab".into(), PrevTab),
             ("cmd+d".into(), SplitPane { side: Some(Right), duplicate: true }),
             ("cmd+shift+d".into(), SplitPane { side: Some(Down), duplicate: true }),
+            ("ctrl+alt+plus".into(), SplitPane { side: Some(Right), duplicate: false }),
+            ("ctrl+alt+minus".into(), SplitPane { side: Some(Down), duplicate: false }),
             ("cmd+shift+enter".into(), TogglePaneZoom),
             ("cmd+c".into(), Copy),
             ("cmd+v".into(), Paste),
@@ -107,6 +110,8 @@ impl Keymap {
             ("ctrl+shift+tab", PrevTab),
             ("ctrl+shift+plus", SplitPane { side: Some(Right), duplicate: true }),
             ("ctrl+shift+minus", SplitPane { side: Some(Down), duplicate: true }),
+            ("ctrl+alt+plus", SplitPane { side: Some(Right), duplicate: false }),
+            ("ctrl+alt+minus", SplitPane { side: Some(Down), duplicate: false }),
             ("ctrl+c", Copy),
             ("ctrl+shift+c", Copy),
             ("ctrl+insert", Copy),
@@ -249,18 +254,22 @@ mod tests {
     }
 
     #[test]
-    fn split_keys_keep_the_pane_profile() {
-        // The split shortcuts open the focused pane's profile, not the default.
-        for km in [Keymap::pc_defaults(), Keymap::mac_defaults()] {
-            for b in &km.bindings {
-                if let Action::SplitPane { duplicate, .. } = b.action {
-                    assert!(duplicate, "{} splits with the default profile", b.chord.label());
-                }
-            }
-        }
+    fn split_keys_pick_the_profile() {
+        let split = |side, duplicate| Some(Action::SplitPane { side: Some(side), duplicate });
+        let ctrl_alt = Mods { ctrl: true, alt: true, ..Mods::NONE };
+        let ctrl_shift = Mods { ctrl: true, shift: true, ..Mods::NONE };
         let cmd = Mods { meta: true, ..Mods::NONE };
-        let right = Action::SplitPane { side: Some(Direction::Right), duplicate: true };
-        assert_eq!(Keymap::mac_defaults().lookup(Key::Char('d'), cmd), Some(&right));
+        for km in [Keymap::pc_defaults(), Keymap::mac_defaults()] {
+            // Ctrl+Alt+Plus/Minus: the default profile, typed with or without Shift's "+".
+            for plus in ['=', '+'] {
+                assert_eq!(km.lookup(Key::Char(plus), ctrl_alt).cloned(), split(Direction::Right, false));
+            }
+            assert_eq!(km.lookup(Key::Char('-'), ctrl_alt).cloned(), split(Direction::Down, false));
+        }
+        // The other split shortcuts open the focused pane's profile.
+        assert_eq!(Keymap::pc_defaults().lookup(Key::Char('='), ctrl_shift).cloned(), split(Direction::Right, true));
+        assert_eq!(Keymap::pc_defaults().lookup(Key::Char('-'), ctrl_shift).cloned(), split(Direction::Down, true));
+        assert_eq!(Keymap::mac_defaults().lookup(Key::Char('d'), cmd).cloned(), split(Direction::Right, true));
     }
 
     #[test]
@@ -291,7 +300,8 @@ mod tests {
         for b in Keymap::pc_defaults().bindings {
             let m = b.chord.mods;
             assert!(!(m.alt && m.shift), "{} uses Alt+Shift (Windows layout switch)", b.chord.label());
-            assert!(!(m.ctrl && m.alt), "{} uses Ctrl+Alt (AltGr)", b.chord.label());
+            let plus_minus = matches!(b.chord.key, Key::Char('=' | '-'));
+            assert!(!(m.ctrl && m.alt) || plus_minus, "{} uses Ctrl+Alt (AltGr)", b.chord.label());
         }
     }
 
