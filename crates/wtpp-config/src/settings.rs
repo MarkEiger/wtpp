@@ -19,6 +19,8 @@ pub const DEFAULT_HISTORY: u32 = 9001;
 pub const DEFAULT_CELL_HEIGHT: f32 = 1.2;
 /// Marks profiles wt++ found on the machine (shells, WSL distros).
 pub const DISCOVERED_SOURCE: &str = "wtpp.discovered";
+/// Marks the stand-in shell used when no profile is visible; never saved.
+pub const FALLBACK_SOURCE: &str = "wtpp.fallback";
 
 fn is_default<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
@@ -500,6 +502,10 @@ pub struct Settings {
     /// Restore the last window position and size (wt++ addition).
     #[serde(rename = "wtpp.rememberWindowBounds")]
     pub remember_window_bounds: bool,
+    /// The machine's shells have been merged into `profiles` (wt++ addition).
+    /// That happens once; afterwards only "Refresh shell list" changes them.
+    #[serde(rename = "wtpp.profilesDiscovered")]
+    pub profiles_discovered: bool,
     pub multi_line_paste_warning: bool,
     pub large_paste_warning: bool,
     pub show_tabs_in_titlebar: bool,
@@ -537,6 +543,7 @@ impl Default for Settings {
             allow_osc52: true,
             initial_position: None,
             remember_window_bounds: true,
+            profiles_discovered: false,
             multi_line_paste_warning: true,
             large_paste_warning: true,
             show_tabs_in_titlebar: true,
@@ -592,6 +599,89 @@ pub struct DiscoveredProfile {
     pub icon: Option<String>,
 }
 
+/// What [`Settings::refresh_discovered`] changed: profile names.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefreshReport {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+}
+
+impl RefreshReport {
+    /// Add what another refresh changed (the same names only count once).
+    pub fn merge(&mut self, other: RefreshReport) {
+        for (ours, theirs) in [(&mut self.added, other.added), (&mut self.removed, other.removed)] {
+            for name in theirs {
+                if !ours.contains(&name) {
+                    ours.push(name);
+                }
+            }
+        }
+    }
+
+    /// One short paragraph for the user.
+    pub fn summary(&self, wsl_known: bool) -> String {
+        // Junk names can be whole lines of text, and many of them.
+        fn names(list: &[String]) -> String {
+            const SHOWN: usize = 4;
+            const LONGEST: usize = 32;
+            let mut shown: Vec<String> = list
+                .iter()
+                .take(SHOWN)
+                .map(|n| match n.char_indices().nth(LONGEST) {
+                    Some((end, _)) => format!("{}…", &n[..end]),
+                    None => n.clone(),
+                })
+                .collect();
+            if list.len() > SHOWN {
+                shown.push(format!("{} more", list.len() - SHOWN));
+            }
+            shown.join(", ")
+        }
+        let mut parts = Vec::new();
+        if !self.added.is_empty() {
+            parts.push(format!("Added {}.", names(&self.added)));
+        }
+        if !self.removed.is_empty() {
+            parts.push(format!("Removed {}.", names(&self.removed)));
+        }
+        if parts.is_empty() {
+            parts.push("No changes.".to_string());
+        }
+        if !wsl_known {
+            parts.push("WSL couldn't be read, so existing WSL profiles were kept.".to_string());
+        }
+        parts.join(" ")
+    }
+}
+
+/// Could this be the name of a WSL distro? WSL itself only allows these
+/// characters, and no line of its usage or error texts passes all of this.
+pub fn is_plausible_distro_name(name: &str) -> bool {
+    const LONGEST: usize = 64;
+    name.len() <= LONGEST
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// The distro a profile runs, if it runs `wsl.exe`: its `-d`, else its name.
+fn wsl_distro_of(p: &ProfileSettings) -> Option<String> {
+    let (program, args) = split_commandline(p.commandline.as_deref()?);
+    let file = program.rsplit(['/', '\\']).next().unwrap_or(&program).to_ascii_lowercase();
+    if file != "wsl.exe" && file != "wsl" {
+        return None;
+    }
+    let distro = args.iter().position(|a| a == "-d" || a == "--distribution").and_then(|i| args.get(i + 1));
+    distro.cloned().or_else(|| p.name.clone())
+}
+
+/// Does this entry stand for this shell? Discovered entries may have been
+/// renamed or given another command line; the GUID still tells their origin.
+fn is_same_shell(p: &ProfileSettings, d: &DiscoveredProfile) -> bool {
+    p.name.as_deref() == Some(&d.name)
+        || p.commandline.as_deref() == Some(&d.commandline)
+        || p.guid.as_deref() == Some(&guid_for(&d.name))
+}
+
 impl Settings {
     /// Parse settings JSON (comments and trailing commas allowed).
     pub fn parse(text: &str) -> Result<Settings, String> {
@@ -635,19 +725,62 @@ impl Settings {
         std::fs::rename(&tmp, path)
     }
 
-    /// Add shells found on this machine that the file doesn't list yet.
-    /// Returns whether anything was added.
-    pub fn merge_discovered(&mut self, found: &[DiscoveredProfile]) -> bool {
-        let mut changed = false;
+    /// If `path` holds something that doesn't parse, copy it aside: to
+    /// `settings.json.bak`, or a numbered name so no older backup is lost.
+    /// For just before the user replaces it; returns where the copy went.
+    pub fn backup_if_broken(path: &Path) -> std::io::Result<Option<PathBuf>> {
+        match std::fs::read_to_string(path) {
+            Ok(text) if Settings::parse(&text).is_ok() => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            _ => {}
+        }
+        let backup = path.with_extension("json.bak");
+        let free = std::iter::once(backup.clone())
+            .chain((1..).map(|n| backup.with_extension(format!("bak.{n}"))))
+            .find(|p| !p.exists())
+            .expect("an endless list");
+        std::fs::copy(path, &free)?;
+        Ok(Some(free))
+    }
+
+    /// Bring the discovered profiles in line with the shells found on this
+    /// machine, keeping the user's changes to them. Entries that aren't ours
+    /// (made by the user, imported from WT) are never touched. `wsl_known` is
+    /// false when WSL couldn't be asked: its distros may still be there.
+    pub fn refresh_discovered(&mut self, found: &[DiscoveredProfile], wsl_known: bool) -> RefreshReport {
+        let mut report = RefreshReport::default();
+        let mut removed_ids = Vec::new();
+        self.profiles.list.retain(|p| {
+            let keep = p.source.as_deref() != Some(DISCOVERED_SOURCE)
+                || found.iter().any(|d| is_same_shell(p, d))
+                || (!wsl_known && wsl_distro_of(p).is_some_and(|d| is_plausible_distro_name(&d)));
+            if !keep {
+                let name = p.name.clone().unwrap_or_else(|| "Profile".into());
+                removed_ids.push(p.guid.clone().unwrap_or_else(|| guid_for(&name)));
+                removed_ids.push(name.clone());
+                report.removed.push(name);
+            }
+            keep
+        });
+        // Don't leave the default pointing at nothing: the first profile takes over.
+        if let Some(wanted) = &self.default_profile
+            && removed_ids.iter().any(|id| id.eq_ignore_ascii_case(wanted))
+        {
+            self.default_profile = None;
+        }
+
         for d in found {
-            let known = self.profiles.list.iter_mut().find(|p| {
-                p.name.as_deref() == Some(&d.name) || p.commandline.as_deref() == Some(&d.commandline)
-            });
-            if let Some(known) = known {
-                // Profiles found by an older version may lack an icon.
-                if known.source.as_deref() == Some(DISCOVERED_SOURCE) && known.icon.is_none() && d.icon.is_some() {
-                    known.icon = d.icon.clone();
-                    changed = true;
+            if let Some(known) = self.profiles.list.iter_mut().find(|p| is_same_shell(p, d)) {
+                if known.source.as_deref() == Some(DISCOVERED_SOURCE) {
+                    // Profiles found by an older version may lack an icon.
+                    if known.icon.is_none() {
+                        known.icon = d.icon.clone();
+                    }
+                    // They may also have a `--cd` this Windows doesn't know,
+                    // which only makes wsl print its usage.
+                    if known.commandline.as_deref() == Some(&format!("{} --cd ~", d.commandline)) {
+                        known.commandline = Some(d.commandline.clone());
+                    }
                 }
             } else {
                 self.profiles.list.push(ProfileSettings {
@@ -658,10 +791,10 @@ impl Settings {
                     source: Some(DISCOVERED_SOURCE.into()),
                     ..Default::default()
                 });
-                changed = true;
+                report.added.push(d.name.clone());
             }
         }
-        changed
+        report
     }
 
     /// All schemes: built-ins, overridden/extended by the file's.
@@ -713,9 +846,29 @@ impl Settings {
         }
     }
 
-    /// Profiles shown in the new-tab menu, in order.
+    /// Profiles shown in the new-tab menu, in order. Never empty: with
+    /// nothing to show (an empty list, everything hidden) there's still the
+    /// stand-in shell, so wt++ always opens something.
     pub fn visible_profiles(&self) -> Vec<ResolvedProfile> {
-        self.profiles.list.iter().map(|p| self.resolve(p)).filter(|p| !p.hidden).collect()
+        let visible: Vec<_> = self.profiles.list.iter().map(|p| self.resolve(p)).filter(|p| !p.hidden).collect();
+        if visible.is_empty() { vec![self.fallback_profile()] } else { visible }
+    }
+
+    /// The system's plain shell, as a profile that only exists in memory.
+    pub fn fallback_profile(&self) -> ResolvedProfile {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        let (name, program) = if cfg!(windows) {
+            ("Command Prompt".to_string(), env("COMSPEC").unwrap_or_else(|| "cmd.exe".into()))
+        } else {
+            let shell = env("SHELL").unwrap_or_else(|| "/bin/sh".into());
+            (shell.rsplit('/').next().unwrap_or("sh").to_string(), shell)
+        };
+        self.resolve(&ProfileSettings {
+            commandline: Some(join_commandline(&program, &[])),
+            name: Some(name),
+            source: Some(FALLBACK_SOURCE.into()),
+            ..Default::default()
+        })
     }
 
     /// Index into [`Settings::visible_profiles`] of the default profile.
@@ -981,6 +1134,14 @@ mod tests {
     use super::*;
     use crate::actions::Action;
 
+    fn found(name: &str, commandline: &str) -> DiscoveredProfile {
+        DiscoveredProfile { name: name.into(), commandline: commandline.into(), icon: None }
+    }
+
+    fn names(s: &Settings) -> Vec<&str> {
+        s.profiles.list.iter().filter_map(|p| p.name.as_deref()).collect()
+    }
+
     const WT_SAMPLE: &str = r##"
     // This file was initially generated by Windows Terminal
     {
@@ -1058,10 +1219,7 @@ mod tests {
     fn import_from_windows_terminal() {
         let wt = Settings::parse(WT_SAMPLE).unwrap();
         let mut ours = Settings::default();
-        ours.merge_discovered(&[
-            DiscoveredProfile { name: "Windows PowerShell".into(), commandline: "powershell.exe".into(), icon: None },
-            DiscoveredProfile { name: "Command Prompt".into(), commandline: "cmd.exe".into(), icon: None },
-        ]);
+        ours.refresh_discovered(&[found("Windows PowerShell", "powershell.exe"), found("Command Prompt", "cmd.exe")], true);
         ours.import_windows_terminal(&wt);
 
         // Matched by name, our GUID kept, settings imported; WSL generator profile skipped.
@@ -1074,15 +1232,280 @@ mod tests {
         assert_eq!(keymap.lookup(wtpp_input::Key::Char('v'), wtpp_input::Mods::CTRL), None);
     }
 
+    /// What 1.1.2 wrote where `wsl -l -q` printed its usage: a profile per line.
+    const JUNK_1_1_2: &str = r##"{
+        "defaultProfile": "Windows PowerShell",
+        "wtpp.rememberWindowBounds": false,
+        "launchWindowAnimation": true,
+        "profiles": { "defaults": {}, "list": [
+            { "guid": "{1}", "name": "Windows PowerShell", "commandline": "powershell.exe -NoLogo", "source": "wtpp.discovered", "colorScheme": "Vintage" },
+            { "guid": "{2}", "name": "Command Prompt", "commandline": "C:\\Windows\\system32\\cmd.exe", "source": "wtpp.discovered" },
+            { "guid": "{3}", "name": "Usage: wsl.exe [Argument] [Options...] [CommandLine]", "commandline": "wsl.exe -d \"Usage: wsl.exe [Argument] [Options...] [CommandLine]\" --cd ~", "source": "wtpp.discovered" },
+            { "guid": "{4}", "name": "Arguments for running Linux binaries:", "commandline": "wsl.exe -d \"Arguments for running Linux binaries:\" --cd ~", "source": "wtpp.discovered" },
+            { "guid": "{5}", "name": "--exec, -e <CommandLine>", "commandline": "wsl.exe -d \"--exec, -e <CommandLine>\" --cd ~", "source": "wtpp.discovered" },
+            { "guid": "{6}", "name": "--", "commandline": "wsl.exe -d -- --cd ~", "source": "wtpp.discovered" },
+            { "guid": "{7}", "name": "Debian", "commandline": "wsl.exe -d Debian --cd ~", "source": "wtpp.discovered" },
+            { "guid": "{8}", "name": "Usage: my own notes", "commandline": "wsl.exe -d \"not a distro\"" },
+            { "guid": "{9}", "name": "Ubuntu", "source": "Windows.Terminal.Wsl" }
+        ] }
+    }"##;
+
+    fn junk_names() -> [&'static str; 4] {
+        [
+            "Usage: wsl.exe [Argument] [Options...] [CommandLine]",
+            "Arguments for running Linux binaries:",
+            "--exec, -e <CommandLine>",
+            "--",
+        ]
+    }
+
     #[test]
-    fn discovered_profiles_merge_once() {
+    fn upgrade_from_1_1_2_cleans_junk() {
+        let mut s = Settings::parse(JUNK_1_1_2).unwrap();
+        assert!(!s.profiles_discovered, "flag absent means not discovered yet");
+        let done = JUNK_1_1_2.replacen('{', r#"{ "wtpp.profilesDiscovered": true,"#, 1);
+        assert!(Settings::parse(&done).unwrap().profiles_discovered);
+        let shells = [found("Windows PowerShell", "powershell.exe -NoLogo"), found("Command Prompt", "cmd.exe")];
+
+        // WSL couldn't be read (it printed the usage again): junk goes, Debian stays.
+        let report = s.refresh_discovered(&shells, false);
+        assert_eq!(report.removed, junk_names());
+        assert_eq!(report.added, Vec::<String>::new());
+        assert_eq!(names(&s), ["Windows PowerShell", "Command Prompt", "Debian", "Usage: my own notes", "Ubuntu"]);
+        // Customized and found by commandline or name: untouched.
+        assert_eq!(s.profiles.list[0].color_scheme.as_deref(), Some("Vintage"));
+        assert_eq!(s.profiles.list[1].commandline.as_deref(), Some(r"C:\Windows\system32\cmd.exe"));
+        assert_eq!(s.extra.get("launchWindowAnimation"), Some(&Value::from(true)));
+    }
+
+    #[test]
+    fn known_wsl_answer_removes_what_is_gone() {
+        let mut s = Settings::parse(JUNK_1_1_2).unwrap();
+        let report = s.refresh_discovered(&[found("Windows PowerShell", "powershell.exe -NoLogo"), found("Kali", "wsl.exe -d Kali --cd ~")], true);
+        assert_eq!(report.added, ["Kali"]);
+        assert!(report.removed.contains(&"Debian".to_string()));
+        assert!(report.removed.contains(&"Command Prompt".to_string()));
+        // Not ours: stays, however junk it looks.
+        assert_eq!(names(&s), ["Windows PowerShell", "Usage: my own notes", "Ubuntu", "Kali"]);
+    }
+
+    #[test]
+    fn unknown_wsl_only_protects_wsl_entries() {
         let mut s = Settings::default();
-        let found = [DiscoveredProfile { name: "bash".into(), commandline: "/bin/bash -l".into(), icon: None }];
-        assert!(s.merge_discovered(&found));
-        assert!(!s.merge_discovered(&found));
+        let shells = [found("Git Bash", "bash.exe"), found("Debian", "wsl.exe -d Debian --cd ~")];
+        s.refresh_discovered(&shells, true);
+        let report = s.refresh_discovered(&[], false);
+        assert_eq!(report.removed, ["Git Bash"]);
+        assert_eq!(names(&s), ["Debian"]);
+    }
+
+    #[test]
+    fn renamed_wsl_entry_counts_by_its_distro() {
+        let mut s = Settings::default();
+        s.refresh_discovered(&[found("Debian", "wsl.exe -d Debian --cd ~")], true);
+        s.profiles.list[0].name = Some("My Debian box".into());
+        assert_eq!(s.refresh_discovered(&[], false), RefreshReport::default());
+        assert_eq!(names(&s), ["My Debian box"]);
+        // A plain `wsl.exe` has no `-d`: its name is all there is.
+        s.profiles.list[0].commandline = Some(r"C:\Windows\System32\WSL.EXE".into());
+        assert_eq!(s.refresh_discovered(&[], false).removed, ["My Debian box"]);
+    }
+
+    #[test]
+    fn refresh_keeps_customizations() {
+        let shells = [found("bash", "/bin/bash -l"), found("zsh", "/bin/zsh -l"), found("fish", "/bin/fish -l")];
+        let mut s = Settings::default();
+        assert_eq!(s.refresh_discovered(&shells, true).added, ["bash", "zsh", "fish"]);
         assert_eq!(s.visible_profiles()[0].commandline, "/bin/bash -l");
+
+        s.profiles.list[0].color_scheme = Some("Vintage".into());
+        s.profiles.list[0].set_font_size(Some(20.0));
+        s.profiles.list[1].hidden = Some(true);
+        // Renamed, found by its commandline.
+        s.profiles.list[2].name = Some("The fish".into());
+        let before = s.clone();
+        assert_eq!(s.refresh_discovered(&shells, true), RefreshReport::default());
+        assert_eq!(s, before);
+
+        // Renamed and given another command line: still the same shell.
+        s.profiles.list[2].commandline = Some("/opt/fish".into());
+        assert_eq!(s.refresh_discovered(&shells, true), RefreshReport::default());
+    }
+
+    #[test]
+    fn refresh_brings_back_a_deleted_profile() {
+        let shells = [found("bash", "/bin/bash -l"), found("zsh", "/bin/zsh -l")];
+        let mut s = Settings::default();
+        s.refresh_discovered(&shells, true);
+        s.profiles_discovered = true;
+        s.profiles.list.remove(1);
+        // Relaunching doesn't run discovery at all (the flag is set)...
+        let reloaded = Settings::parse(&s.to_json()).unwrap();
+        assert!(reloaded.profiles_discovered);
+        assert_eq!(names(&reloaded), ["bash"]);
+        // ...refreshing does.
+        assert_eq!(s.refresh_discovered(&shells, true).added, ["zsh"]);
+    }
+
+    #[test]
+    fn refresh_fills_in_what_older_versions_lacked() {
+        let mut s = Settings::default();
+        s.refresh_discovered(&[found("Debian", "wsl.exe -d Debian --cd ~")], true);
+        let with_icon = DiscoveredProfile { icon: Some("x.ico".into()), ..found("Debian", "wsl.exe -d Debian") };
+        assert_eq!(s.refresh_discovered(&[with_icon.clone()], true), RefreshReport::default());
+        assert_eq!(s.profiles.list[0].icon.as_deref(), Some("x.ico"));
+        // This Windows has no `--cd`.
+        assert_eq!(s.profiles.list[0].commandline.as_deref(), Some("wsl.exe -d Debian"));
+        // The other way round it's the user's choice to not have it.
+        s.refresh_discovered(&[found("Debian", "wsl.exe -d Debian --cd ~")], true);
+        assert_eq!(s.profiles.list[0].commandline.as_deref(), Some("wsl.exe -d Debian"));
+    }
+
+    #[test]
+    fn default_profile_falls_back_when_removed() {
+        let shells = [found("bash", "/bin/bash -l"), found("zsh", "/bin/zsh -l")];
+        for wanted in [guid_for("zsh"), guid_for("zsh").to_uppercase(), "zsh".to_string()] {
+            let mut s = Settings::default();
+            s.refresh_discovered(&shells, true);
+            s.default_profile = Some(wanted);
+            assert_eq!(s.default_profile_index(), 1);
+            s.refresh_discovered(&shells[..1], true);
+            assert_eq!(s.default_profile, None);
+            assert_eq!(s.default_profile_index(), 0);
+        }
+        // Anything else stays.
+        let mut s = Settings::default();
+        s.refresh_discovered(&shells, true);
+        s.default_profile = Some("bash".into());
+        s.refresh_discovered(&shells[..1], true);
+        assert_eq!(s.default_profile.as_deref(), Some("bash"));
+        // Pointing at nothing (edited by hand).
+        s.default_profile = Some("nope".into());
+        assert_eq!(s.default_profile_index(), 0);
+    }
+
+    #[test]
+    fn default_profile_hidden_falls_back() {
+        let mut s = Settings::default();
+        s.refresh_discovered(&[found("bash", "/bin/bash -l"), found("zsh", "/bin/zsh -l")], true);
+        s.default_profile = Some("bash".into());
         s.profiles.list[0].hidden = Some(true);
-        assert!(s.visible_profiles().is_empty());
+        assert_eq!(s.visible_profiles()[s.default_profile_index()].name, "zsh");
+    }
+
+    #[test]
+    fn profiles_discovered_round_trip() {
+        let mut s = Settings::parse(r#"{ "launchWindowAnimation": true }"#).unwrap();
+        assert!(!s.profiles_discovered);
+        s.profiles_discovered = true;
+        let json = s.to_json();
+        assert!(json.contains("\"wtpp.profilesDiscovered\": true"), "{json}");
+        assert!(json.contains("\"launchWindowAnimation\": true"), "{json}");
+        let again = Settings::parse(&json).unwrap();
+        assert!(again.profiles_discovered);
+        assert_eq!(again, s);
+        // Not leaked into the unknown keys.
+        assert!(!again.extra.contains_key("wtpp.profilesDiscovered"));
+        assert!(!Settings::parse("{}").unwrap().profiles_discovered);
+    }
+
+    #[test]
+    fn nothing_visible_still_gives_a_shell() {
+        let mut s = Settings::default();
+        assert_eq!(s.default_profile_index(), 0);
+        let fallback = s.visible_profiles();
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].source.as_deref(), Some(FALLBACK_SOURCE));
+        assert!(!fallback[0].commandline.trim().is_empty());
+        assert!(!fallback[0].hidden);
+        let wanted = if cfg!(windows) { "cmd" } else { "sh" };
+        assert!(fallback[0].commandline.to_lowercase().contains(wanted), "{}", fallback[0].commandline);
+
+        // Everything hidden: the same, and defaults still apply.
+        s.profiles.defaults.color_scheme = Some("Vintage".into());
+        s.refresh_discovered(&[found("bash", "/bin/bash -l")], true);
+        s.profiles.list[0].hidden = Some(true);
+        s.default_profile = Some("bash".into());
+        assert_eq!(s.default_profile_index(), 0);
+        let fallback = s.visible_profiles();
+        assert_eq!(fallback[0].source.as_deref(), Some(FALLBACK_SOURCE));
+        assert_eq!(fallback[0].color_scheme, "Vintage");
+
+        // It's never written to the file.
+        assert!(!s.to_json().contains(FALLBACK_SOURCE));
+        assert_eq!(s.profiles.list.len(), 1);
+        assert!(!Settings::default().to_json().contains(FALLBACK_SOURCE));
+    }
+
+    #[test]
+    fn fallback_makes_no_catalog_or_label_trouble() {
+        let s = Settings::default();
+        let names: Vec<String> = s.visible_profiles().into_iter().map(|p| p.name).collect();
+        for a in Action::catalog(names.len()) {
+            let _ = a.label(&names);
+        }
+        let _ = Action::NewTab(Some(5)).label(&[]);
+    }
+
+    #[test]
+    fn distro_names() {
+        for good in ["Ubuntu", "Ubuntu-22.04", "kali-linux", "OracleLinux_8_5", "SUSE-Linux-Enterprise-Server-15-SP4", "docker-desktop-data", "1a"] {
+            assert!(is_plausible_distro_name(good), "{good}");
+        }
+        let long = "a".repeat(65);
+        for bad in ["", "--", "-d", ".hidden", "My Distro", "Usage:", "<x>", "Ünix", "a/b", "wsl.exe [x]", &long] {
+            assert!(!is_plausible_distro_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn refresh_summaries() {
+        let report = |added: &[&str], removed: &[&str]| RefreshReport {
+            added: added.iter().map(|s| s.to_string()).collect(),
+            removed: removed.iter().map(|s| s.to_string()).collect(),
+        };
+        assert_eq!(report(&[], &[]).summary(true), "No changes.");
+        assert_eq!(report(&["a", "b"], &["c"]).summary(true), "Added a, b. Removed c.");
+        assert_eq!(report(&[], &["c"]).summary(true), "Removed c.");
+        assert_eq!(report(&[], &[]).summary(false), "No changes. WSL couldn't be read, so existing WSL profiles were kept.");
+        assert_eq!(report(&[], &["1", "2", "3", "4", "5", "6"]).summary(true), "Removed 1, 2, 3, 4, 2 more.");
+        let long = "é".repeat(50);
+        assert_eq!(report(&[&long], &[]).summary(true), format!("Added {}….", "é".repeat(32)));
+
+        let mut merged = report(&["a"], &["c"]);
+        merged.merge(report(&["a", "b"], &["c"]));
+        assert_eq!(merged, report(&["a", "b"], &["c"]));
+    }
+
+    #[test]
+    fn broken_file_is_backed_up_not_lost() {
+        let dir = std::env::temp_dir().join(format!("wtpp-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+
+        // No file, or a fine one: nothing to do.
+        assert_eq!(Settings::backup_if_broken(&path).unwrap(), None);
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(Settings::backup_if_broken(&path).unwrap(), None);
+
+        // load() reports the error and gives defaults; the file stays as it is.
+        std::fs::write(&path, "{ broken").unwrap();
+        let (settings, error) = Settings::load(&path);
+        assert!(error.is_some());
+        assert!(!settings.profiles_discovered, "a failed load discovers again");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
+
+        let first = Settings::backup_if_broken(&path).unwrap().unwrap();
+        assert_eq!(first, dir.join("settings.json.bak"));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "{ broken");
+        // An older backup is never overwritten.
+        std::fs::write(&path, "{ broken again").unwrap();
+        let second = Settings::backup_if_broken(&path).unwrap().unwrap();
+        assert_eq!(second, dir.join("settings.json.bak.1"));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "{ broken");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "{ broken again");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

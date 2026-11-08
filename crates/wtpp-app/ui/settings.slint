@@ -31,6 +31,7 @@ export global SettingsData {
     in-out property <int> initial-cols;
     in-out property <int> initial-rows;
     in property <bool> can-import-wt;
+    in property <bool> shells-refreshing;
     // 0: not possible on this system, 1: not the default, 2: the default.
     in property <int> default-term;
     in property <string> default-term-description;
@@ -75,7 +76,6 @@ export global SettingsData {
 
     // Profile page (also used for "Defaults")
     in property <bool> p-is-defaults;
-    in property <bool> p-discovered;
     in-out property <string> p-name;
     in-out property <string> p-commandline;
     in-out property <string> p-startdir;
@@ -106,6 +106,7 @@ export global SettingsData {
     callback discard();
     callback open-json();
     callback import-wt();
+    callback refresh-shells();
     callback set-default-term(bool);
     // A key no control in Settings used: run it if it's a shortcut.
     callback shortcut(string, bool, bool, bool, bool) -> bool;
@@ -791,6 +792,18 @@ component ActionsPage inherits VerticalLayout {
 
 component ProfilePage inherits VerticalLayout {
     spacing: 4px;
+    if SettingsData.p-is-defaults: Card {
+        title: "Refresh shell list";
+        description: "wt++ finds installed shells once. Refresh after installing a new shell or WSL distro, or to repair the list. Profiles you made yourself aren't touched.";
+        Button {
+            text: SettingsData.shells-refreshing ? "Refreshing…" : "Refresh";
+            enabled: !SettingsData.shells-refreshing;
+            clicked => {
+                SettingsData.refresh-shells();
+            }
+        }
+    }
+
     if !SettingsData.p-is-defaults: Card {
         title: "Name";
         LineEdit {
@@ -1054,8 +1067,7 @@ component ProfilePage inherits VerticalLayout {
         padding-top: 12px;
         alignment: start;
         Button {
-            text: SettingsData.p-discovered ? "Delete profile (it will come back; hide it instead)" : "Delete profile";
-            enabled: !SettingsData.p-discovered;
+            text: "Delete profile";
             clicked => {
                 SettingsData.delete-profile();
             }
@@ -1172,6 +1184,7 @@ export component SettingsPage inherits Rectangle {
                             font-size: 12px;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
+                            wrap: word-wrap;
                             overflow: elide;
                         }
 

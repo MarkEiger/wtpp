@@ -18,13 +18,15 @@ mod titlebar;
 mod window_state;
 mod wsl;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use anyhow::Context;
 use slint::ComponentHandle;
 use slint::wgpu_30::{WGPUConfiguration, WGPUSettings, wgpu};
+use wtpp_config::settings::DiscoveredProfile;
 use wtpp_input::Mods;
+use wtpp_session::profiles::Discovery;
 
 use app::App;
 
@@ -44,6 +46,11 @@ thread_local! {
     static FOCUS_ORDER: RefCell<Vec<WindowId>> = const { RefCell::new(Vec::new()) };
     /// The shared font database and monospace families, once loaded.
     static FONTS: RefCell<Option<(wtpp_render::SharedFonts, Vec<String>)>> = const { RefCell::new(None) };
+    /// Shells found that settings.json couldn't take (it's broken, or can't
+    /// be written), and whether WSL was known: for windows that open later.
+    static UNSAVED_SHELLS: RefCell<Option<(Vec<DiscoveredProfile>, bool)>> = const { RefCell::new(None) };
+    /// The "Refresh shell list" button's discovery is running.
+    static SHELL_REFRESH: Cell<bool> = const { Cell::new(false) };
 }
 
 fn entry(id: WindowId) -> Option<Rc<WindowEntry>> {
@@ -216,10 +223,106 @@ pub(crate) enum Placement {
 pub(crate) fn request_window(moved: Option<app::MovedTab>, placement: Placement) {
     // A timer rather than invoke_from_event_loop: the moved tab isn't Send.
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
-        let settings = wtpp_config::Settings::load(&wtpp_config::settings::settings_path()).0;
-        if let Err(e) = create_window(settings, None, moved, placement) {
+        if let Err(e) = create_window(load_settings(), None, moved, placement) {
             log::error!("couldn't open a window: {e:#}");
         }
+    });
+}
+
+/// The settings a new window opens with.
+fn load_settings() -> wtpp_config::Settings {
+    let mut settings = wtpp_config::Settings::load(&wtpp_config::settings::settings_path()).0;
+    if !settings.profiles_discovered {
+        UNSAVED_SHELLS.with(|shells| {
+            if let Some((found, wsl_known)) = &*shells.borrow() {
+                settings.refresh_discovered(found, *wsl_known);
+                settings.profiles_discovered = true;
+            }
+        });
+    }
+    settings
+}
+
+/// Bring settings.json and every window in line with the shells found. A
+/// file that doesn't parse is never written to: it may only need a typo
+/// fixed, so the shells then only last as long as this run. `requester` is
+/// the window whose Refresh button asked for this.
+fn apply_shells(discovery: &Discovery, requester: Option<WindowId>) {
+    use wtpp_config::settings::join_commandline;
+    let found: Vec<DiscoveredProfile> = discovery
+        .profiles
+        .iter()
+        .map(|p| DiscoveredProfile {
+            name: p.name.clone(),
+            commandline: join_commandline(&p.program, &p.args),
+            icon: p.icon.clone(),
+        })
+        .collect();
+    let wsl_known = discovery.wsl_known;
+    let path = wtpp_config::settings::settings_path();
+    let (loaded, error) = wtpp_config::Settings::load(&path);
+    // If it broke after startup, the windows still have the last good settings.
+    let running = || window_ids().first().and_then(|&id| entry(id)).and_then(|e| e.app.try_borrow().ok().map(|a| a.settings.clone()));
+    let mut settings = if error.is_some() { running().unwrap_or(loaded) } else { loaded };
+    let before = settings.clone();
+    let mut report = settings.refresh_discovered(&found, wsl_known);
+    settings.profiles_discovered = true;
+    log::info!("shells: added {:?}, removed {:?}, WSL known: {wsl_known}", report.added, report.removed);
+    let not_saved = match error {
+        Some(error) => {
+            log::warn!("not writing settings: {error}");
+            Some(
+                "settings.json has an error, so it wasn't changed, and this lasts until wt++ closes. Fix the file \
+                 with Open JSON file; if you save changes here instead, the old file is kept as settings.json.bak."
+                    .to_string(),
+            )
+        }
+        // Saving loses the file's comments: not without a reason.
+        None if settings == before => None,
+        None => settings.save(&path).err().map(|e| {
+            log::warn!("could not write {}: {e}", path.display());
+            format!("Couldn't save {}, so this lasts until wt++ closes: {e}", path.display())
+        }),
+    };
+    UNSAVED_SHELLS.with(|shells| *shells.borrow_mut() = not_saved.is_some().then(|| (found.clone(), wsl_known)));
+    for id in window_ids() {
+        with_window(id, |app| {
+            let draft = app.on_shells_changed(settings.clone(), &found, wsl_known);
+            if requester == Some(id) {
+                report.merge(draft.unwrap_or_default());
+                app.settings_shells_refreshed(&report, wsl_known, not_saved.as_deref());
+            }
+        });
+    }
+}
+
+pub(crate) fn shell_refresh_running() -> bool {
+    SHELL_REFRESH.get()
+}
+
+fn show_shell_refresh(running: bool) {
+    SHELL_REFRESH.set(running);
+    for e in window_ids().into_iter().filter_map(entry) {
+        e.ui.global::<SettingsData>().set_shells_refreshing(running);
+    }
+}
+
+/// The "Refresh shell list" button: find the shells again, in the background.
+/// Settings or the window may be closed by the time that's done: the windows
+/// still there get the result, and with none left the event loop has ended
+/// and the result goes nowhere.
+fn refresh_shells(requester: WindowId) {
+    if shell_refresh_running() {
+        return;
+    }
+    show_shell_refresh(true);
+    std::thread::spawn(move || {
+        let discovery = wtpp_session::profiles::discover();
+        slint::invoke_from_event_loop(move || {
+            show_shell_refresh(false);
+            apply_shells(&discovery, Some(requester));
+        })
+        .ok();
     });
 }
 
@@ -365,6 +468,7 @@ fn wire_settings(ui: &MainWindow, id: WindowId) {
     data.on_import_wt(move || {
         with_window(id, |app| app.settings_import_wt());
     });
+    data.on_refresh_shells(move || refresh_shells(id));
     data.on_select_scheme(move |i| {
         with_window(id, |app| app.settings_select_scheme(i.max(0) as usize));
     });
@@ -480,15 +584,21 @@ fn main() -> anyhow::Result<()> {
     backend.select().context("no GPU backend available")?;
     log::info!("backend selected after {:?}", started.elapsed());
 
-    // Font and shell discovery are slow (hundreds of fonts on Windows,
+    // Shells are looked for once, not on every launch, so what the user
+    // removed stays removed. The flag is false for a missing file and for one
+    // that doesn't load: their shells have to come from somewhere.
+    let discover_shells = !settings.profiles_discovered;
+    // Font and shell discovery are slow (hundreds of fonts on Windows, maybe
     // `wsl.exe -l`), so they run while the window opens. Started only now:
     // invoke_from_event_loop needs the backend selected above.
     std::thread::spawn(move || {
         let fonts = wtpp_render::load_fonts();
         log::info!("fonts loaded after {:?}", started.elapsed());
-        let profiles = wtpp_session::profiles::discover();
-        log::info!("{} profiles found after {:?}", profiles.len(), started.elapsed());
-        let delivered = slint::invoke_from_event_loop(move || on_assets_loaded(fonts, profiles));
+        let discovery = discover_shells.then(wtpp_session::profiles::discover);
+        if let Some(discovery) = &discovery {
+            log::info!("{} profiles found after {:?}", discovery.profiles.len(), started.elapsed());
+        }
+        let delivered = slint::invoke_from_event_loop(move || on_assets_loaded(fonts, discovery));
         if let Err(e) = delivered {
             log::error!("could not hand fonts to the UI thread: {e}");
         }
@@ -580,8 +690,7 @@ fn on_instance_request(request: instance::Request) {
     if args.embedding {
         return;
     }
-    let settings = wtpp_config::Settings::load(&wtpp_config::settings::settings_path()).0;
-    if let Err(e) = create_window(settings, Some(args), None, Placement::Default) {
+    if let Err(e) = create_window(load_settings(), Some(args), None, Placement::Default) {
         log::error!("couldn't open a window: {e:#}");
     }
 }
@@ -590,9 +699,8 @@ fn on_instance_request(request: instance::Request) {
 /// new window for it, like WT.
 #[cfg(windows)]
 fn on_handoff(handoff: default_terminal::Handoff) {
-    let settings = wtpp_config::Settings::load(&wtpp_config::settings::settings_path()).0;
     let placement = if window_ids().is_empty() { Placement::First } else { Placement::Default };
-    match create_window(settings, None, None, placement) {
+    match create_window(load_settings(), None, None, placement) {
         Ok(id) => {
             with_window(id, |app| app.handoff = Some(handoff));
             // The user started the program, so its window belongs in front
@@ -610,15 +718,22 @@ fn on_handoff(handoff: default_terminal::Handoff) {
     }
 }
 
-/// The background thread finished loading fonts and finding shells.
-fn on_assets_loaded(fonts: wtpp_render::FontSystem, discovered: Vec<wtpp_session::Profile>) {
+/// The background thread finished loading fonts and, if asked to, finding
+/// shells. There may be no window yet (started for a console handoff), or
+/// several: the shells don't depend on any of them.
+fn on_assets_loaded(fonts: wtpp_render::FontSystem, discovery: Option<Discovery>) {
     let families = wtpp_render::monospace_families(&fonts);
     let fonts: wtpp_render::SharedFonts = Rc::new(RefCell::new(fonts));
     FONTS.with(|f| *f.borrow_mut() = Some((fonts.clone(), families.clone())));
-    for (n, id) in window_ids().into_iter().enumerate() {
-        // Only one window merges newly found shells into settings.json.
-        let discovered = (n == 0).then_some(discovered.as_slice());
-        with_window(id, |app| app.on_assets_loaded(fonts.clone(), families.clone(), discovered));
+    if let Some(discovery) = discovery {
+        // Another wt++ (a handoff's) may have got there first.
+        let (current, error) = wtpp_config::Settings::load(&wtpp_config::settings::settings_path());
+        if error.is_some() || !current.profiles_discovered {
+            apply_shells(&discovery, None);
+        }
+    }
+    for id in window_ids() {
+        with_window(id, |app| app.on_assets_loaded(fonts.clone(), families.clone()));
     }
 }
 
@@ -679,7 +794,7 @@ fn create_window(
     let entry = Rc::new(WindowEntry { ui: ui.clone_strong(), app: RefCell::new(app) });
     WINDOWS.with(|w| w.borrow_mut().push(Some(entry)));
     if let Some((fonts, families)) = FONTS.with(|f| f.borrow().clone()) {
-        with_window(id, |app| app.on_assets_loaded(fonts, families, None));
+        with_window(id, |app| app.on_assets_loaded(fonts, families));
     }
     wire_window(&ui, id, custom_titlebar)?;
     ui.show()?;

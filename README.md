@@ -41,6 +41,8 @@ between windows; `WTPP_WAYLAND=1` runs it as a Wayland app without those.
 - A settings UI like WT's; settings live in WT-format `settings.json`
   (`%LOCALAPPDATA%\wtpp` on Windows, `~/.config/wtpp` on Linux), reload live,
   and can be imported from Windows Terminal.
+- Finds installed shells and WSL distros on first launch; Settings → Defaults →
+  **Refresh shell list** finds them again after you install a new one.
 - Drag tabs between windows (or out into a new one), like a browser.
 - Drop files or folders onto the terminal to paste their paths, in the right
   form for the shell (cmd, PowerShell, WSL, Git Bash).

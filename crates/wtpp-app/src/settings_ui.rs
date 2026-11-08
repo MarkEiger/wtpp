@@ -5,7 +5,8 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use wtpp_config::actions::{escape_input, unescape_input};
 use wtpp_config::schemes::builtin_schemes;
 use wtpp_config::settings::{
-    DISCOVERED_SOURCE, FontWeight, Padding, ProfileSettings, find_windows_terminal_settings, guid_for,
+    DiscoveredProfile, FALLBACK_SOURCE, FontWeight, Padding, ProfileSettings, RefreshReport,
+    find_windows_terminal_settings, guid_for,
 };
 use wtpp_config::{Action, AppTheme, TabWidthMode, BellStyle, GraphicsApi, Binding, COLOR_NAMES, Chord, CloseOnExit, CursorShape, IntenseTextStyle, KeyEncoding, Keymap, LaunchMode, Settings};
 use wtpp_input::{Key, Mods};
@@ -92,6 +93,20 @@ impl Draft {
         }
     }
 
+    /// Update the list of shells, leaving every other edit alone. Profile
+    /// pages go by position: stay on the same profile if it's still there.
+    fn refresh_shells(&mut self, found: &[DiscoveredProfile], wsl_known: bool) -> RefreshReport {
+        let shown = self.profile_index().and_then(|i| self.settings.profiles.list.get(i)).map(|p| (p.guid.clone(), p.name.clone()));
+        let report = self.settings.refresh_discovered(found, wsl_known);
+        self.settings.profiles_discovered = true;
+        if let Some((guid, name)) = shown {
+            let index = self.settings.profiles.list.iter().position(|p| p.guid == guid && p.name == name);
+            self.page = index.map_or(PAGE_DEFAULTS, |i| PAGE_DEFAULTS + 1 + i);
+        }
+        self.catalog = Action::catalog(self.settings.visible_profiles().len());
+        report
+    }
+
     fn rebuild_rows(&mut self, names: &[String]) {
         let filter = self.filter.to_lowercase();
         let mut rows: Vec<(String, Row)> = self
@@ -146,6 +161,15 @@ impl App {
         self.tabs.push(Tab::new(TabKind::Settings));
         self.active = self.tabs.len() - 1;
         self.set_status("", false);
+        if let (_, Some(error)) = Settings::load(&self.settings_path) {
+            self.set_status(
+                &format!(
+                    "settings.json has an error and isn't being used: {error}. Fix it with Open JSON file; \
+                     if you save here instead, the old file is kept as settings.json.bak."
+                ),
+                true,
+            );
+        }
         self.refresh_settings();
         self.relayout();
     }
@@ -198,6 +222,7 @@ impl App {
         data.set_initial_cols(s.initial_cols as i32);
         data.set_initial_rows(s.initial_rows as i32);
         data.set_can_import_wt(can_import);
+        data.set_shells_refreshing(crate::shell_refresh_running());
         refresh_default_terminal(&ui);
         data.set_copy_on_select(s.copy_on_select);
         data.set_word_delimiters(s.word_delimiters.clone().into());
@@ -273,7 +298,6 @@ impl App {
         };
         let resolved = s.resolve(&entry);
         data.set_p_is_defaults(is_defaults);
-        data.set_p_discovered(entry.source.as_deref() == Some(DISCOVERED_SOURCE));
         data.set_p_name(resolved.name.clone().into());
         data.set_p_commandline(if is_defaults { entry.commandline.clone().unwrap_or_default() } else { resolved.commandline.clone() }.into());
         data.set_p_startdir(resolved.starting_directory.clone().unwrap_or_default().into());
@@ -347,7 +371,9 @@ impl App {
             let s = &mut d.settings;
             match key {
                 "defaultProfile" => {
-                    s.default_profile = s.visible_profiles().get(int as usize).map(|p| p.guid.clone());
+                    // The stand-in shell isn't in the file, so nothing can refer to it.
+                    let chosen = s.visible_profiles().into_iter().nth(int as usize);
+                    s.default_profile = chosen.filter(|p| p.source.as_deref() != Some(FALLBACK_SOURCE)).map(|p| p.guid);
                 }
                 "launchMode" => {
                     s.launch_mode = [LaunchMode::Default, LaunchMode::Maximized, LaunchMode::Fullscreen][int.clamp(0, 2) as usize]
@@ -456,11 +482,26 @@ impl App {
         let Some(d) = self.draft.as_mut() else { return };
         d.settings.set_keymap(&d.keymap);
         let settings = d.settings.clone();
+        // This replaces the file; if it doesn't parse, it's the only copy of
+        // whatever the user had in it, so it's kept, or nothing is saved.
+        let backup = match Settings::backup_if_broken(&self.settings_path) {
+            Ok(backup) => backup,
+            Err(e) => {
+                let path = self.settings_path.display();
+                self.set_status(&format!("{path} has an error and couldn't be copied, so nothing was saved: {e}"), true);
+                return;
+            }
+        };
         match settings.save(&self.settings_path) {
             Ok(()) => {
                 d.dirty = false;
                 self.apply_settings(settings);
-                self.set_status(&format!("Saved to {}", self.settings_path.display()), false);
+                let path = self.settings_path.display();
+                let status = match backup {
+                    Some(backup) => format!("Saved to {path}. The old file had an error; it's kept as {}.", backup.display()),
+                    None => format!("Saved to {path}"),
+                };
+                self.set_status(&status, false);
             }
             Err(e) => self.set_status(&format!("Couldn't save {}: {e}", self.settings_path.display()), true),
         }
@@ -545,6 +586,25 @@ impl App {
             &format!("Imported {profiles} profiles and {schemes} color schemes from Windows Terminal. Review, then Save."),
             false,
         );
+    }
+
+    /// The list of shells changed (`settings` has it): show it everywhere,
+    /// and put it in the draft too. Returns what that changed in the draft,
+    /// where unsaved edits may make it differ from the file.
+    pub(crate) fn on_shells_changed(&mut self, settings: Settings, found: &[DiscoveredProfile], wsl_known: bool) -> Option<RefreshReport> {
+        self.apply_settings(settings);
+        let report = self.draft.as_mut().map(|d| d.refresh_shells(found, wsl_known));
+        self.refresh_settings();
+        report
+    }
+
+    /// The "Refresh shell list" button's result.
+    pub(crate) fn settings_shells_refreshed(&mut self, report: &RefreshReport, wsl_known: bool, not_saved: Option<&str>) {
+        let summary = report.summary(wsl_known);
+        match not_saved {
+            Some(why) => self.set_status(&format!("{summary} {why}"), true),
+            None => self.set_status(&summary, false),
+        }
     }
 
     // ---- color schemes ---------------------------------------------------------

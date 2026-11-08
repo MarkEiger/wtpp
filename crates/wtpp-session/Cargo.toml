@@ -10,4 +10,8 @@ repository.workspace = true
 alacritty_terminal.workspace = true
 anyhow.workspace = true
 log.workspace = true
+wtpp-config.workspace = true
 wtpp-input.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Registry"] }

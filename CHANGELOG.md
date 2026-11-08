@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- Windows: on some Windows 10 / WSL1 setups, WSL's usage text or an error
+  message turned into one junk profile per line. wt++ now reads the list of
+  distros from the registry, like Windows Terminal, and only accepts
+  `wsl.exe -l -q` output that really is a list. Existing junk profiles are
+  removed once, on the first launch of this version.
+- wt++ looks for installed shells once, not on every launch: it no longer runs
+  `wsl.exe` each time, and a shell profile you delete stays deleted (it could
+  not be deleted before).
+- Settings → Defaults → **Refresh shell list** finds shells again: use it after
+  installing a new shell or WSL distro, or to repair the list. It adds what's
+  new and removes what's gone, and says what changed; your changes to the
+  shells' profiles, and profiles you made yourself, stay as they are.
+- A `settings.json` with an error is no longer overwritten on startup. wt++
+  opens with default settings and leaves the file alone. Saving from Settings
+  replaces it only after keeping a copy as `settings.json.bak`.
+- With no profile left to show (an empty list, or all hidden), wt++ opens the
+  system's shell instead of closing, and also if the default profile's command
+  can't be started.
+- WSL profiles work on Windows 10 before version 1903, which has no `--cd`.
+
 ## 1.1.2 — 2026-11-08
 
 - Ctrl+Alt+Plus / Minus split a pane right / down with the default profile.

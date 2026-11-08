@@ -6045,6 +6045,8 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "log",
+ "windows-sys 0.61.2",
+ "wtpp-config",
  "wtpp-input",
 ]
 

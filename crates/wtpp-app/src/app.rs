@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use slint::wgpu_30::wgpu;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use wtpp_config::settings::{DiscoveredProfile, expand_env, join_commandline, split_commandline};
+use wtpp_config::settings::{expand_env, split_commandline};
 use wtpp_config::{Action, BellStyle, CloseOnExit, CursorShape, KeyEncoding, Keymap, ResolvedProfile, Settings};
 use wtpp_input::{Key, KeyStyle, Mods};
 use wtpp_render::{Frame, Highlight, HighlightKind, Renderer, SharedFonts, Theme};
@@ -292,40 +292,13 @@ impl App {
         self.try_start();
     }
 
-    /// Fonts and shell discovery finished on the background thread.
-    /// The (shared) font database is ready. `discovered` is the shell list,
-    /// merged into the settings by the first window only.
-    pub fn on_assets_loaded(
-        &mut self,
-        fonts: SharedFonts,
-        families: Vec<String>,
-        discovered: Option<&[wtpp_session::Profile]>,
-    ) {
+    /// The (shared) font database is ready, loaded on the background thread.
+    pub fn on_assets_loaded(&mut self, fonts: SharedFonts, families: Vec<String>) {
         self.font_families = families;
         self.fonts = Some(fonts);
-        if let Some(discovered) = discovered {
-            self.merge_discovered(discovered);
-        }
         self.profiles = self.settings.visible_profiles();
         self.update_menu();
         self.try_start();
-    }
-
-    fn merge_discovered(&mut self, discovered: &[wtpp_session::Profile]) {
-        let found: Vec<DiscoveredProfile> = discovered
-            .iter()
-            .map(|p| DiscoveredProfile {
-                name: p.name.clone(),
-                commandline: join_commandline(&p.program, &p.args),
-                icon: p.icon.clone(),
-            })
-            .collect();
-        let first_run = !self.settings_path.exists();
-        if (self.settings.merge_discovered(&found) || first_run)
-            && let Err(e) = self.settings.save(&self.settings_path)
-        {
-            log::warn!("could not write {}: {e}", self.settings_path.display());
-        }
     }
 
     /// Open the first tab once both the GPU and the background-loaded fonts
@@ -368,9 +341,14 @@ impl App {
             profile.commandline = commandline;
         }
         self.new_tab_with(profile);
+        // A profile that can't start (a bad command line) mustn't take wt++
+        // down with it: Settings is where to fix it.
+        if self.tabs.is_empty() {
+            self.new_tab_with(self.settings.fallback_profile());
+        }
         if self.tabs.is_empty() {
             log::error!("could not start any shell");
-            crate::close_window(self.id);
+            self.open_settings();
         }
     }
 
