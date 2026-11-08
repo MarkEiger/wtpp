@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.2 — 2026-11-08
+
+- Windows: Shift+Enter inserts a new line in Claude Code running in a
+  PowerShell or Command Prompt tab; it submitted the prompt. Outside Claude
+  Code, PowerShell still gets its own Shift+Enter.
+- A tab dragged out of a maximized or fullscreen window opens at the default
+  window size, not filling the screen again. A lone tab dragged out of
+  fullscreen leaves fullscreen, as it already did for a maximized window.
+
 ## 1.1.1 — 2026-11-08
 
 - Splitting a pane (Ctrl+Shift+Plus / Minus, ⌘D / ⇧⌘D) opens the same profile

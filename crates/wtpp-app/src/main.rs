@@ -206,7 +206,8 @@ pub(crate) enum Placement {
     /// Configured size, cascaded from the most recently focused window (so
     /// it opens on the monitor you're working on).
     Default,
-    /// A tab dropped outside any window: there, at its old window's size.
+    /// A tab dropped outside any window: there, at this size, as a normal
+    /// window whatever the launch mode.
     At(slint::PhysicalPosition, slint::PhysicalSize),
 }
 
@@ -266,12 +267,10 @@ fn wgpu_configuration(api: wtpp_config::GraphicsApi) -> WGPUConfiguration {
     WGPUConfiguration::Automatic(settings)
 }
 
-/// Window size from `initialCols`/`initialRows` and the launch mode. The size
-/// is an estimate from the default font (real metrics need the fonts, which
-/// load in the background), close enough to WT's behavior.
-/// Returns the window size it chose.
-/// Only the app's `first` window restores the remembered bounds.
-fn apply_launch_settings(ui: &MainWindow, settings: &wtpp_config::Settings, first: bool) -> slint::WindowSize {
+/// Window size from `initialCols`/`initialRows`. The size is an estimate from
+/// the default font (real metrics need the fonts, which load in the
+/// background), close enough to WT's behavior.
+pub(crate) fn default_window_size(settings: &wtpp_config::Settings) -> slint::WindowSize {
     let profile = settings.visible_profiles().into_iter().nth(settings.default_profile_index());
     let (size, padding) = profile.map_or((wtpp_config::settings::DEFAULT_FONT_SIZE, wtpp_config::settings::DEFAULT_PADDING), |p| {
         (p.font_size, p.padding)
@@ -279,7 +278,13 @@ fn apply_launch_settings(ui: &MainWindow, settings: &wtpp_config::Settings, firs
     let px = size * 96.0 / 72.0;
     let width = settings.initial_cols as f32 * (px * 0.6).round() + padding[0] + padding[2];
     let height = settings.initial_rows as f32 * (px * 1.2).round() + padding[1] + padding[3] + 40.0;
-    let mut size = slint::WindowSize::Logical(slint::LogicalSize::new(width.min(2400.0), height.min(1600.0)));
+    slint::WindowSize::Logical(slint::LogicalSize::new(width.min(2400.0), height.min(1600.0)))
+}
+
+/// Apply the configured size and launch mode, returning the size it chose.
+/// Only the app's `first` window restores the remembered bounds.
+fn apply_launch_settings(ui: &MainWindow, settings: &wtpp_config::Settings, first: bool) -> slint::WindowSize {
+    let mut size = default_window_size(settings);
 
     let mut maximize = false;
     if let Some((x, y)) = settings.initial_position.as_deref().and_then(window_state::parse_position) {
@@ -663,6 +668,8 @@ fn create_window(
             ui.window().set_position(position);
             launch_size = slint::WindowSize::Physical(size);
             ui.window().set_size(launch_size.clone());
+            ui.window().set_fullscreen(false);
+            ui.window().set_maximized(false);
         }
     }
     let mut app = App::new(&ui, settings, wtpp_config::settings::settings_path(), id);

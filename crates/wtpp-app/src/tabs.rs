@@ -198,6 +198,9 @@ impl App {
     fn move_window_to(&self, (sx, sy): (i32, i32), grab: (f32, f32)) {
         let ui = self.ui();
         let window = ui.window();
+        if window.is_fullscreen() {
+            window.set_fullscreen(false);
+        }
         if window.is_maximized() {
             window.set_maximized(false);
         }
@@ -210,8 +213,9 @@ impl App {
         window.set_position(slint::PhysicalPosition::new(x, y));
     }
 
-    /// A tab torn off at `screen` opens in a window of this one's size, with
-    /// the tab under the pointer.
+    /// A tab torn off at `screen` opens in a window of this one's size (the
+    /// default size if this one fills the screen), with the tab under the
+    /// pointer.
     fn new_window_placement(&self, (sx, sy): (i32, i32)) -> crate::Placement {
         let ui = self.ui();
         let window = ui.window();
@@ -220,7 +224,11 @@ impl App {
         let (frame_x, frame_y) = crate::client_origin(window).map_or((0, 0), |(l, t)| (l - outer.x, t - outer.y));
         let grab_x = ((ui.get_tabs_left() + 60.0) * scale).round() as i32;
         let grab_y = (ui.get_titlebar_height() / 2.0 * scale).round() as i32;
-        let size = window.size();
+        let size = if window.is_maximized() || window.is_fullscreen() {
+            crate::default_window_size(&self.settings).to_physical(scale)
+        } else {
+            window.size()
+        };
         let (mut x, mut y) = (sx - grab_x - frame_x, sy - grab_y - frame_y);
         // Keep it on the monitor it was dropped on, clear of the taskbar.
         if let Some((left, top, right, bottom)) = crate::platform::work_area_at(sx, sy) {
