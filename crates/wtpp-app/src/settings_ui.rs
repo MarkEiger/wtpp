@@ -599,8 +599,8 @@ impl App {
     }
 
     /// The "Refresh shell list" button's result.
-    pub(crate) fn settings_shells_refreshed(&mut self, report: &RefreshReport, wsl_known: bool, not_saved: Option<&str>) {
-        let summary = report.summary(wsl_known);
+    pub(crate) fn settings_shells_refreshed(&mut self, report: &RefreshReport, not_saved: Option<&str>) {
+        let summary = report.summary();
         match not_saved {
             Some(why) => self.set_status(&format!("{summary} {why}"), true),
             None => self.set_status(&summary, false),

@@ -290,7 +290,7 @@ fn apply_shells(discovery: &Discovery, requester: Option<WindowId>) {
             let draft = app.on_shells_changed(settings.clone(), &found, wsl_known);
             if requester == Some(id) {
                 report.merge(draft.unwrap_or_default());
-                app.settings_shells_refreshed(&report, wsl_known, not_saved.as_deref());
+                app.settings_shells_refreshed(&report, not_saved.as_deref());
             }
         });
     }

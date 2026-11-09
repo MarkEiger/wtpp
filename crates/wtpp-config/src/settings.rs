@@ -604,6 +604,8 @@ pub struct DiscoveredProfile {
 pub struct RefreshReport {
     pub added: Vec<String>,
     pub removed: Vec<String>,
+    /// WSL couldn't be read, and WSL profiles were kept because of that.
+    pub wsl_kept: bool,
 }
 
 impl RefreshReport {
@@ -616,10 +618,11 @@ impl RefreshReport {
                 }
             }
         }
+        self.wsl_kept |= other.wsl_kept;
     }
 
     /// One short paragraph for the user.
-    pub fn summary(&self, wsl_known: bool) -> String {
+    pub fn summary(&self) -> String {
         // Junk names can be whole lines of text, and many of them.
         fn names(list: &[String]) -> String {
             const SHOWN: usize = 4;
@@ -647,7 +650,7 @@ impl RefreshReport {
         if parts.is_empty() {
             parts.push("No changes.".to_string());
         }
-        if !wsl_known {
+        if self.wsl_kept {
             parts.push("WSL couldn't be read, so existing WSL profiles were kept.".to_string());
         }
         parts.join(" ")
@@ -674,12 +677,35 @@ fn wsl_distro_of(p: &ProfileSettings) -> Option<String> {
     distro.cloned().or_else(|| p.name.clone())
 }
 
+/// Every command line wt++ has written for a distro: 1.1.2's `--cd ~` (which
+/// fails on Windows 10's inbox WSL), then `~` first, then neither.
+fn generated_wsl_commandlines(distro: &str) -> [String; 3] {
+    let line = |args: &[&str]| join_commandline("wsl.exe", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+    [line(&["-d", distro, "--cd", "~"]), line(&["~", "-d", distro]), line(&["-d", distro])]
+}
+
 /// Does this entry stand for this shell? Discovered entries may have been
 /// renamed or given another command line; the GUID still tells their origin.
+/// An older version's command line for the same distro counts as its own.
 fn is_same_shell(p: &ProfileSettings, d: &DiscoveredProfile) -> bool {
-    p.name.as_deref() == Some(&d.name)
+    if p.name.as_deref() == Some(&d.name)
         || p.commandline.as_deref() == Some(&d.commandline)
         || p.guid.as_deref() == Some(&guid_for(&d.name))
+    {
+        return true;
+    }
+    let forms = generated_wsl_commandlines(&d.name);
+    forms.contains(&d.commandline) && p.commandline.as_ref().is_some_and(|c| forms.contains(c))
+}
+
+/// A command line without what opens a generated WSL profile in the Linux
+/// home, for when it's told to open in some directory instead.
+pub fn without_wsl_home(commandline: &str) -> String {
+    let line = commandline.replace(" --cd ~", "");
+    match line.strip_prefix("wsl.exe ~ ") {
+        Some(rest) => format!("wsl.exe {rest}"),
+        None => line,
+    }
 }
 
 impl Settings {
@@ -751,16 +777,18 @@ impl Settings {
         let mut report = RefreshReport::default();
         let mut removed_ids = Vec::new();
         self.profiles.list.retain(|p| {
-            let keep = p.source.as_deref() != Some(DISCOVERED_SOURCE)
-                || found.iter().any(|d| is_same_shell(p, d))
-                || (!wsl_known && wsl_distro_of(p).is_some_and(|d| is_plausible_distro_name(&d)));
-            if !keep {
-                let name = p.name.clone().unwrap_or_else(|| "Profile".into());
-                removed_ids.push(p.guid.clone().unwrap_or_else(|| guid_for(&name)));
-                removed_ids.push(name.clone());
-                report.removed.push(name);
+            if p.source.as_deref() != Some(DISCOVERED_SOURCE) || found.iter().any(|d| is_same_shell(p, d)) {
+                return true;
             }
-            keep
+            if !wsl_known && wsl_distro_of(p).is_some_and(|d| is_plausible_distro_name(&d)) {
+                report.wsl_kept = true;
+                return true;
+            }
+            let name = p.name.clone().unwrap_or_else(|| "Profile".into());
+            removed_ids.push(p.guid.clone().unwrap_or_else(|| guid_for(&name)));
+            removed_ids.push(name.clone());
+            report.removed.push(name);
+            false
         });
         // Don't leave the default pointing at nothing: the first profile takes over.
         if let Some(wanted) = &self.default_profile
@@ -776,9 +804,11 @@ impl Settings {
                     if known.icon.is_none() {
                         known.icon = d.icon.clone();
                     }
-                    // They may also have a `--cd` this Windows doesn't know,
-                    // which only makes wsl print its usage.
-                    if known.commandline.as_deref() == Some(&format!("{} --cd ~", d.commandline)) {
+                    // An older form of ours may not start here. Only those:
+                    // anything else is the user's, and so is having removed
+                    // the `~` (the plain form is never rewritten).
+                    let forms = generated_wsl_commandlines(&d.name);
+                    if forms.contains(&d.commandline) && known.commandline.as_ref().is_some_and(|c| forms[..2].contains(c)) {
                         known.commandline = Some(d.commandline.clone());
                     }
                 }
@@ -1281,7 +1311,7 @@ mod tests {
     #[test]
     fn known_wsl_answer_removes_what_is_gone() {
         let mut s = Settings::parse(JUNK_1_1_2).unwrap();
-        let report = s.refresh_discovered(&[found("Windows PowerShell", "powershell.exe -NoLogo"), found("Kali", "wsl.exe -d Kali --cd ~")], true);
+        let report = s.refresh_discovered(&[found("Windows PowerShell", "powershell.exe -NoLogo"), found("Kali", "wsl.exe ~ -d Kali")], true);
         assert_eq!(report.added, ["Kali"]);
         assert!(report.removed.contains(&"Debian".to_string()));
         assert!(report.removed.contains(&"Command Prompt".to_string()));
@@ -1292,19 +1322,35 @@ mod tests {
     #[test]
     fn unknown_wsl_only_protects_wsl_entries() {
         let mut s = Settings::default();
-        let shells = [found("Git Bash", "bash.exe"), found("Debian", "wsl.exe -d Debian --cd ~")];
+        let shells = [found("Git Bash", "bash.exe"), found("Debian", "wsl.exe ~ -d Debian")];
         s.refresh_discovered(&shells, true);
         let report = s.refresh_discovered(&[], false);
         assert_eq!(report.removed, ["Git Bash"]);
+        assert!(report.wsl_kept);
         assert_eq!(names(&s), ["Debian"]);
+    }
+
+    #[test]
+    fn wsl_note_only_when_a_wsl_profile_was_kept() {
+        // Nothing of WSL here, and wsl.exe says so in its usage text.
+        let mut s = Settings::default();
+        s.refresh_discovered(&[found("Command Prompt", "cmd.exe")], true);
+        let report = s.refresh_discovered(&[found("Command Prompt", "cmd.exe")], false);
+        assert!(!report.wsl_kept);
+        assert_eq!(report.summary(), "No changes.");
+        // Only junk to remove: nothing kept either.
+        s.profiles.list.push(old_entry("Options:", "wsl.exe -d Options: --cd ~"));
+        let report = s.refresh_discovered(&[], false);
+        assert!(!report.wsl_kept);
+        assert!(!report.summary().contains("WSL"), "{}", report.summary());
     }
 
     #[test]
     fn renamed_wsl_entry_counts_by_its_distro() {
         let mut s = Settings::default();
-        s.refresh_discovered(&[found("Debian", "wsl.exe -d Debian --cd ~")], true);
+        s.refresh_discovered(&[found("Debian", "wsl.exe ~ -d Debian")], true);
         s.profiles.list[0].name = Some("My Debian box".into());
-        assert_eq!(s.refresh_discovered(&[], false), RefreshReport::default());
+        assert_eq!(s.refresh_discovered(&[], false), RefreshReport { wsl_kept: true, ..Default::default() });
         assert_eq!(names(&s), ["My Debian box"]);
         // A plain `wsl.exe` has no `-d`: its name is all there is.
         s.profiles.list[0].commandline = Some(r"C:\Windows\System32\WSL.EXE".into());
@@ -1348,17 +1394,107 @@ mod tests {
     }
 
     #[test]
-    fn refresh_fills_in_what_older_versions_lacked() {
+    fn refresh_fills_in_a_missing_icon() {
         let mut s = Settings::default();
-        s.refresh_discovered(&[found("Debian", "wsl.exe -d Debian --cd ~")], true);
-        let with_icon = DiscoveredProfile { icon: Some("x.ico".into()), ..found("Debian", "wsl.exe -d Debian") };
-        assert_eq!(s.refresh_discovered(&[with_icon.clone()], true), RefreshReport::default());
+        s.refresh_discovered(&[found("bash", "/bin/bash -l")], true);
+        let with_icon = DiscoveredProfile { icon: Some("x.ico".into()), ..found("bash", "/bin/bash -l") };
+        assert_eq!(s.refresh_discovered(&[with_icon], true), RefreshReport::default());
         assert_eq!(s.profiles.list[0].icon.as_deref(), Some("x.ico"));
-        // This Windows has no `--cd`.
-        assert_eq!(s.profiles.list[0].commandline.as_deref(), Some("wsl.exe -d Debian"));
-        // The other way round it's the user's choice to not have it.
-        s.refresh_discovered(&[found("Debian", "wsl.exe -d Debian --cd ~")], true);
-        assert_eq!(s.profiles.list[0].commandline.as_deref(), Some("wsl.exe -d Debian"));
+    }
+
+    /// A 1.1.2 entry, as it wrote them.
+    fn old_entry(name: &str, commandline: &str) -> ProfileSettings {
+        ProfileSettings {
+            guid: Some("{from-1.1.2}".into()),
+            name: Some(name.into()),
+            commandline: Some(commandline.into()),
+            source: Some(DISCOVERED_SOURCE.into()),
+            color_scheme: Some("Vintage".into()),
+            hidden: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn with_entries(entries: Vec<ProfileSettings>) -> Settings {
+        let mut s = Settings::default();
+        s.profiles.list = entries;
+        s
+    }
+
+    #[test]
+    fn old_commandlines_of_ours_are_rewritten() {
+        for (old, name, new) in [
+            ("wsl.exe -d Alpine --cd ~", "Alpine", "wsl.exe ~ -d Alpine"),
+            (r#"wsl.exe -d "My Distro" --cd ~"#, "My Distro", r#"wsl.exe ~ -d "My Distro""#),
+            // Below build 18362, for `~` as well.
+            ("wsl.exe -d Alpine --cd ~", "Alpine", "wsl.exe -d Alpine"),
+            ("wsl.exe ~ -d Alpine", "Alpine", "wsl.exe -d Alpine"),
+        ] {
+            let mut s = with_entries(vec![old_entry(name, old)]);
+            assert_eq!(s.refresh_discovered(&[found(name, new)], true), RefreshReport::default());
+            assert_eq!(s.profiles.list.len(), 1);
+            let p = &s.profiles.list[0];
+            assert_eq!(p.commandline.as_deref(), Some(new));
+            // All the rest stays.
+            assert_eq!(p.name.as_deref(), Some(name));
+            assert_eq!(p.guid.as_deref(), Some("{from-1.1.2}"));
+            assert_eq!(p.color_scheme.as_deref(), Some("Vintage"));
+            assert_eq!(p.hidden, Some(true));
+        }
+    }
+
+    #[test]
+    fn renamed_old_entry_is_recognised_by_its_commandline() {
+        // Neither the name nor the GUID tell: only the old form does.
+        let mut s = with_entries(vec![old_entry("My box", "wsl.exe -d Alpine --cd ~")]);
+        let report = s.refresh_discovered(&[found("Alpine", "wsl.exe ~ -d Alpine")], true);
+        assert_eq!(report, RefreshReport::default());
+        assert_eq!(names(&s), ["My box"]);
+        assert_eq!(s.profiles.list[0].commandline.as_deref(), Some("wsl.exe ~ -d Alpine"));
+    }
+
+    #[test]
+    fn customized_commandlines_are_left_alone() {
+        for custom in [
+            "wsl.exe -d Alpine --cd /srv",
+            "wsl.exe -d Alpine --cd ~ -u bob",
+            "wsl.exe -d Alpine -u bob",
+            "wsl -d Alpine --cd ~",
+            r"C:\Windows\System32\wsl.exe -d Alpine --cd ~",
+            "WSL.EXE -d Alpine --cd ~",
+            "wsl.exe --cd ~ -d Alpine",
+            "wsl.exe -d Other --cd ~",
+            // No `~`: someone may have removed it on purpose.
+            "wsl.exe -d Alpine",
+        ] {
+            let mut s = with_entries(vec![old_entry("Alpine", custom)]);
+            let report = s.refresh_discovered(&[found("Alpine", "wsl.exe ~ -d Alpine")], true);
+            assert_eq!(report, RefreshReport::default(), "{custom}");
+            assert_eq!(s.profiles.list[0].commandline.as_deref(), Some(custom));
+        }
+    }
+
+    #[test]
+    fn only_our_entries_and_distros_are_rewritten() {
+        // Not discovered by us: not touched, and not added a second time.
+        let mut theirs = old_entry("Mine", "wsl.exe -d Alpine --cd ~");
+        theirs.source = None;
+        let mut s = with_entries(vec![theirs.clone()]);
+        assert_eq!(s.refresh_discovered(&[found("Alpine", "wsl.exe ~ -d Alpine")], true), RefreshReport::default());
+        assert_eq!(s.profiles.list, [theirs]);
+        // A shell that isn't a distro keeps whatever it was given.
+        let mut s = with_entries(vec![old_entry("bash", "wsl.exe -d bash --cd ~")]);
+        s.refresh_discovered(&[found("bash", "/bin/bash -l")], true);
+        assert_eq!(s.profiles.list[0].commandline.as_deref(), Some("wsl.exe -d bash --cd ~"));
+    }
+
+    #[test]
+    fn wsl_home_can_be_left_out() {
+        assert_eq!(without_wsl_home("wsl.exe ~ -d Alpine"), "wsl.exe -d Alpine");
+        assert_eq!(without_wsl_home(r#"wsl.exe ~ -d "My Distro""#), r#"wsl.exe -d "My Distro""#);
+        assert_eq!(without_wsl_home("wsl.exe -d Alpine --cd ~"), "wsl.exe -d Alpine");
+        assert_eq!(without_wsl_home("wsl.exe -d Alpine"), "wsl.exe -d Alpine");
+        assert_eq!(without_wsl_home("cmd.exe /k echo ~ x"), "cmd.exe /k echo ~ x");
     }
 
     #[test]
@@ -1463,18 +1599,22 @@ mod tests {
         let report = |added: &[&str], removed: &[&str]| RefreshReport {
             added: added.iter().map(|s| s.to_string()).collect(),
             removed: removed.iter().map(|s| s.to_string()).collect(),
+            wsl_kept: false,
         };
-        assert_eq!(report(&[], &[]).summary(true), "No changes.");
-        assert_eq!(report(&["a", "b"], &["c"]).summary(true), "Added a, b. Removed c.");
-        assert_eq!(report(&[], &["c"]).summary(true), "Removed c.");
-        assert_eq!(report(&[], &[]).summary(false), "No changes. WSL couldn't be read, so existing WSL profiles were kept.");
-        assert_eq!(report(&[], &["1", "2", "3", "4", "5", "6"]).summary(true), "Removed 1, 2, 3, 4, 2 more.");
+        assert_eq!(report(&[], &[]).summary(), "No changes.");
+        assert_eq!(report(&["a", "b"], &["c"]).summary(), "Added a, b. Removed c.");
+        assert_eq!(report(&[], &["c"]).summary(), "Removed c.");
+        let kept = RefreshReport { wsl_kept: true, ..Default::default() };
+        assert_eq!(kept.summary(), "No changes. WSL couldn't be read, so existing WSL profiles were kept.");
+        assert_eq!(report(&[], &["1", "2", "3", "4", "5", "6"]).summary(), "Removed 1, 2, 3, 4, 2 more.");
         let long = "é".repeat(50);
-        assert_eq!(report(&[&long], &[]).summary(true), format!("Added {}….", "é".repeat(32)));
+        assert_eq!(report(&[&long], &[]).summary(), format!("Added {}….", "é".repeat(32)));
 
         let mut merged = report(&["a"], &["c"]);
         merged.merge(report(&["a", "b"], &["c"]));
         assert_eq!(merged, report(&["a", "b"], &["c"]));
+        merged.merge(kept);
+        assert!(merged.wsl_kept);
     }
 
     #[test]

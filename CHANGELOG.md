@@ -20,7 +20,10 @@
 - With no profile left to show (an empty list, or all hidden), wt++ opens the
   system's shell instead of closing, and also if the default profile's command
   can't be started.
-- WSL profiles work on Windows 10 before version 1903, which has no `--cd`.
+- WSL profiles on Windows 10's built-in WSL opened with only
+  `[process exited with code -1]`. They now start with `wsl.exe ~ -d <distro>`
+  instead of `--cd ~` (just `-d <distro>` before version 1903). Profiles wt++
+  created are updated once; a command line you changed stays as it is.
 
 ## 1.1.2 — 2026-11-08
 

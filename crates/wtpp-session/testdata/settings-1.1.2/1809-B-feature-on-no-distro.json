@@ -1,0 +1,121 @@
+{
+    "initialCols": 120,
+    "initialRows": 30,
+    "copyOnSelect": false,
+    "wordDelimiters": " /\\()\"'-.,:;<>~!@#$%^&*|+=[]{}~?│",
+    "confirmCloseAllTabs": true,
+    "focusFollowMouse": false,
+    "compatibility.allowOSC52": true,
+    "wtpp.rememberWindowBounds": true,
+    "multiLinePasteWarning": true,
+    "largePasteWarning": true,
+    "showTabsInTitlebar": true,
+    "theme": "dark",
+    "tabWidthMode": "equal",
+    "alwaysShowTabs": true,
+    "experimental.rightClickContextMenu": false,
+    "rendering.graphicsAPI": "automatic",
+    "profiles": {
+        "defaults": {},
+        "list": [
+            {
+                "guid": "{f6a21d39-c4c4-eb43-f84e-7836e212ce26}",
+                "name": "Windows PowerShell",
+                "commandline": "powershell.exe -NoLogo",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{5f4b95f4-3983-db3c-e4e0-d5548d13118d}",
+                "name": "Command Prompt",
+                "commandline": "C:\\Windows\\system32\\cmd.exe",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{982277cb-9625-fb45-4bf3-0aa8e6fd91ae}",
+                "name": "Invalid command line option: -l",
+                "commandline": "wsl.exe -d \"Invalid command line option: -l\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{0d10b44b-4d3a-54ef-08cd-f1eb0707fd3c}",
+                "name": "Usage: wsl.exe [option] ...",
+                "commandline": "wsl.exe -d \"Usage: wsl.exe [option] ...\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{cc4b0882-dcfd-ef2d-991d-11f97d5bcd20}",
+                "name": "Options:",
+                "commandline": "wsl.exe -d Options: --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{cd0a44aa-afff-e8ad-bd5f-c4043bcbe87e}",
+                "name": "-d, --distribution <DistributionName>",
+                "commandline": "wsl.exe -d \"-d, --distribution <DistributionName>\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{fe195ccb-f619-0df3-eb1e-40b867e86146}",
+                "name": "Launch the specified distribition.",
+                "commandline": "wsl.exe -d \"Launch the specified distribition.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{8d248c9f-d310-6fef-148d-6739d706f65e}",
+                "name": "-e, --exec <CommandLine>",
+                "commandline": "wsl.exe -d \"-e, --exec <CommandLine>\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{82d8be57-708a-1e18-f1d2-e3bd9def6ca3}",
+                "name": "Execute the specified Linux command. The remainder of the arguments are",
+                "commandline": "wsl.exe -d \"Execute the specified Linux command. The remainder of the arguments are\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{d49109f0-a37a-d508-1aac-bfc503b4e2e1}",
+                "name": "used as the command line to execute.",
+                "commandline": "wsl.exe -d \"used as the command line to execute.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{5d4c5255-dfe1-4c8c-1a92-784e05ec7faf}",
+                "name": "-u, --user <UserName>",
+                "commandline": "wsl.exe -d \"-u, --user <UserName>\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{7649b953-d601-3128-38dc-6704fa8dff89}",
+                "name": "Run as the specified user.",
+                "commandline": "wsl.exe -d \"Run as the specified user.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{5daaf2e4-c8a8-bf3c-421f-8cd34f35ae15}",
+                "name": "--help",
+                "commandline": "wsl.exe -d --help --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{6250e1a5-bac8-fc90-35c1-21d84b360a7f}",
+                "name": "Display this usage information.",
+                "commandline": "wsl.exe -d \"Display this usage information.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{07d01707-b497-e58f-35c0-edcb04738512}",
+                "name": "--",
+                "commandline": "wsl.exe -d -- --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{71192b59-6f97-1000-8ff4-28e88a97dc7f}",
+                "name": "Stop parsing arguments and pass the remainder to the Linux process.",
+                "commandline": "wsl.exe -d \"Stop parsing arguments and pass the remainder to the Linux process.\" --cd ~",
+                "source": "wtpp.discovered"
+            }
+        ]
+    },
+    "schemes": [],
+    "actions": []
+}

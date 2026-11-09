@@ -145,16 +145,18 @@ fn registered_distro_names(distros: &[RegisteredDistro], default: Option<&str>) 
     first.chain(rest).map(|d| d.name.clone()).collect()
 }
 
-/// Arguments of a distro's profile. `--cd` is new in Windows 10 1903 (build
-/// 18362), and before that makes wsl print its usage instead of starting.
+/// Arguments of a distro's profile, opening in the Linux home. `~` as the
+/// first argument is new in Windows 10 1903 (build 18362). Not `--cd ~`: on
+/// inbox WSL (10.0.19041) that fails with "cannot find the file specified".
 #[cfg_attr(not(windows), allow(dead_code))]
 fn wsl_args(distro: &str, windows_build: Option<u32>) -> Vec<String> {
-    const CD_SINCE_BUILD: u32 = 18362;
-    let mut args = vec!["-d".to_string(), distro.to_string()];
-    if windows_build.is_none_or(|b| b >= CD_SINCE_BUILD) {
-        args.extend(["--cd".to_string(), "~".to_string()]);
+    const HOME_SINCE_BUILD: u32 = 18362;
+    let args = ["-d".to_string(), distro.to_string()];
+    if windows_build.is_none_or(|b| b >= HOME_SINCE_BUILD) {
+        std::iter::once("~".to_string()).chain(args).collect()
+    } else {
+        args.to_vec()
     }
-    args
 }
 
 /// Run `command` for its stdout and whether it succeeded. `None` if it took
@@ -609,14 +611,14 @@ mod tests {
     }
 
     #[test]
-    fn cd_only_where_windows_has_it() {
+    fn home_only_where_windows_has_it() {
         let commandline = |build| wtpp_config::settings::join_commandline("wsl.exe", &wsl_args("Debian", build));
         assert_eq!(commandline(Some(17763)), "wsl.exe -d Debian");
         assert_eq!(commandline(Some(18361)), "wsl.exe -d Debian");
-        // Exactly what 1.1.2 wrote, so nothing changes for most users.
-        assert_eq!(commandline(Some(18362)), "wsl.exe -d Debian --cd ~");
-        assert_eq!(commandline(Some(26100)), "wsl.exe -d Debian --cd ~");
-        assert_eq!(commandline(None), "wsl.exe -d Debian --cd ~");
+        assert_eq!(commandline(Some(18362)), "wsl.exe ~ -d Debian");
+        assert_eq!(commandline(Some(19044)), "wsl.exe ~ -d Debian");
+        assert_eq!(commandline(Some(26100)), "wsl.exe ~ -d Debian");
+        assert_eq!(commandline(None), "wsl.exe ~ -d Debian");
     }
 
     #[test]
@@ -631,7 +633,7 @@ mod tests {
         }
         assert_eq!(
             join_commandline("wsl.exe", &wsl_args("My Distro", Some(26100))),
-            r#"wsl.exe -d "My Distro" --cd ~"#
+            r#"wsl.exe ~ -d "My Distro""#
         );
     }
 
@@ -643,7 +645,7 @@ mod tests {
         println!("{discovery:#?}");
         assert!(discovery.profiles.iter().any(|p| p.name == "Command Prompt"));
         for p in discovery.profiles.iter().filter(|p| p.program == "wsl.exe") {
-            assert_eq!(p.args[..2], ["-d".to_string(), p.name.clone()]);
+            assert_eq!(p.args[p.args.len() - 2..], ["-d".to_string(), p.name.clone()]);
         }
     }
 
@@ -672,6 +674,13 @@ mod tests {
         let (_, success) = output_with_timeout(shell("exit 3"), long).unwrap().unwrap();
         assert!(!success);
         assert_eq!(output_with_timeout(Command::new("wtpp-no-such-program"), long).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        // LxssManager disabled makes wsl.exe exit with 0xC0000409, and rc -1 is
+        // common: all that matters of the code is that it isn't 0.
+        #[cfg(windows)]
+        for code in ["-1", "-1073740791"] {
+            let (_, success) = output_with_timeout(shell(&format!("exit {code}")), long).unwrap().unwrap();
+            assert!(!success, "{code}");
+        }
     }
 
     #[test]
@@ -699,5 +708,228 @@ mod tests {
         let (stdout, success) = output_with_timeout(shell(script), Duration::from_secs(30)).unwrap().unwrap();
         assert!(success);
         assert!(stdout.len() > 100_000, "{}", stdout.len());
+    }
+
+    // ---- real captures from Windows 10 VMs: `wsl.exe -l -q`, exact bytes ----
+
+    /// A capture's stdout and exit code (signed, as Windows' codes come out).
+    struct Capture {
+        stdout: &'static [u8],
+        rc: i64,
+    }
+
+    macro_rules! capture {
+        ($state:literal) => {
+            capture!($state, "wsl-l-q")
+        };
+        ($state:literal, $command:literal) => {
+            Capture {
+                stdout: include_bytes!(concat!("../testdata/wsl/", $state, "/", $command, ".stdout.bin")),
+                rc: include_str!(concat!("../testdata/wsl/", $state, "/", $command, ".rc")).trim().parse().unwrap(),
+            }
+        };
+    }
+
+    impl Capture {
+        fn parsed(&self) -> Option<Vec<String>> {
+            parse_wsl_list(self.stdout, self.rc == 0)
+        }
+
+        /// The lines 1.1.2 turned into profiles.
+        fn lines(&self) -> Vec<String> {
+            let text = decode_wsl_output(self.stdout).unwrap();
+            wsl_output_lines(&text).map(str::to_string).collect()
+        }
+    }
+
+    fn state_a() -> Capture {
+        capture!("A-feature-off")
+    }
+
+    fn state_1809() -> Capture {
+        capture!("1809-B-feature-on-no-distro")
+    }
+
+    #[test]
+    fn captures_parse() {
+        let a = state_a();
+        assert_eq!(a.rc, 1);
+        assert_eq!(a.parsed(), None);
+        let d = capture!("D-feature-enabled-pending-reboot");
+        assert_eq!(d.rc, 1);
+        assert_eq!(d.parsed(), None);
+        let b = capture!("B-feature-on-no-distro");
+        assert_eq!((b.rc, b.stdout.len()), (0, 0));
+        assert_eq!(b.parsed(), list(&[]));
+        let c = capture!("C-wsl1-two-distros");
+        assert_eq!(c.rc, 0);
+        assert_eq!(c.parsed(), list(&["Alpine", "test-distro"]));
+        assert_eq!(capture!("C1-distros-lxss-stopped").parsed(), list(&["Alpine", "test-distro"]));
+        let c2 = capture!("C2-distros-lxss-disabled");
+        assert_eq!((c2.rc, c2.stdout.len()), (-1073740791, 0));
+        assert_eq!(c2.parsed(), None);
+        let old = state_1809();
+        assert_eq!(old.rc, -1);
+        assert_eq!(old.parsed(), None);
+        // Other things it prints when it can't list anything.
+        assert_eq!(capture!("B-feature-on-no-distro", "wsl--version").parsed(), None);
+        assert_eq!(capture!("B-feature-on-no-distro", "wsl-l").parsed(), None);
+    }
+
+    #[test]
+    fn captured_text_is_rejected_whatever_the_exit_code() {
+        for c in [
+            state_a(),
+            state_1809(),
+            capture!("D-feature-enabled-pending-reboot"),
+            capture!("B-feature-on-no-distro", "wsl--version"),
+            capture!("B-feature-on-no-distro", "wsl-l"),
+        ] {
+            assert_eq!(parse_wsl_list(c.stdout, true), None, "{:?}", c.lines().first());
+            assert!(!c.lines().is_empty());
+        }
+    }
+
+    #[test]
+    fn no_captured_junk_line_passes_for_a_distro() {
+        for c in [state_a(), state_1809(), capture!("B-feature-on-no-distro", "wsl--version")] {
+            for line in c.lines() {
+                assert!(!is_plausible_distro_name(&line), "{line:?}");
+            }
+        }
+    }
+
+    fn v112_profile(name: &str) -> wtpp_config::settings::ProfileSettings {
+        use wtpp_config::settings::{DISCOVERED_SOURCE, guid_for, join_commandline};
+        let args: Vec<String> = ["-d", name, "--cd", "~"].iter().map(|s| s.to_string()).collect();
+        wtpp_config::settings::ProfileSettings {
+            guid: Some(guid_for(name)),
+            name: Some(name.into()),
+            commandline: Some(join_commandline("wsl.exe", &args)),
+            source: Some(DISCOVERED_SOURCE.into()),
+            ..Default::default()
+        }
+    }
+
+    /// The found list and `wsl_known` of a machine in a captured state where
+    /// the registry has nothing, so `wsl.exe` gets asked.
+    fn discovered_in(capture: &Capture) -> (Vec<wtpp_config::settings::DiscoveredProfile>, bool) {
+        use wtpp_config::settings::{DiscoveredProfile, join_commandline};
+        let parsed = capture.parsed();
+        let wsl_known = parsed.is_some();
+        let mut found = vec![
+            DiscoveredProfile { name: "Windows PowerShell".into(), commandline: "powershell.exe -NoLogo".into(), icon: None },
+            DiscoveredProfile { name: "Command Prompt".into(), commandline: r"C:\Windows\system32\cmd.exe".into(), icon: None },
+        ];
+        found.extend(parsed.unwrap_or_default().into_iter().map(|d| DiscoveredProfile {
+            commandline: join_commandline("wsl.exe", &wsl_args(&d, Some(19044))),
+            name: d,
+            icon: None,
+        }));
+        (found, wsl_known)
+    }
+
+    #[test]
+    fn captured_junk_goes_and_everything_else_stays() {
+        use wtpp_config::settings::ProfileSettings;
+        const KEPT_DISTROS: [&str; 4] = ["Ubuntu-22.04", "Alpine", "test-distro", "kali-linux"];
+        for capture in [state_a(), state_1809(), capture!("D-feature-enabled-pending-reboot")] {
+            let junk = capture.lines();
+            assert!(junk.len() > 10);
+            let (found, wsl_known) = discovered_in(&capture);
+            assert!(!wsl_known);
+
+            let mut s = wtpp_config::Settings::default();
+            s.profiles.list.push(ProfileSettings { color_scheme: Some("Vintage".into()), ..v112_profile("Command Prompt") });
+            s.profiles.list.extend(junk.iter().map(|l| v112_profile(l)));
+            s.profiles.list.extend(KEPT_DISTROS.iter().map(|d| v112_profile(d)));
+            // The user's own, however junk it looks.
+            s.profiles.list.push(ProfileSettings {
+                name: Some(junk[0].clone() + " (mine)"),
+                commandline: Some("wsl.exe -d \"not a distro\"".into()),
+                ..Default::default()
+            });
+
+            let report = s.refresh_discovered(&found, wsl_known);
+            assert_eq!(report.removed, junk);
+            assert_eq!(report.added, ["Windows PowerShell"]);
+            assert!(report.wsl_kept, "real WSL profiles were kept, so say so");
+            let names: Vec<&str> = s.profiles.list.iter().filter_map(|p| p.name.as_deref()).collect();
+            let mine = junk[0].clone() + " (mine)";
+            let mut want = vec!["Command Prompt"];
+            want.extend(KEPT_DISTROS);
+            want.extend([mine.as_str(), "Windows PowerShell"]);
+            assert_eq!(names, want);
+            assert_eq!(s.profiles.list[0].color_scheme.as_deref(), Some("Vintage"));
+        }
+    }
+
+    /// settings.json as 1.1.2 really wrote it in those VMs.
+    fn real_1_1_2(json: &str) -> wtpp_config::Settings {
+        let settings = wtpp_config::Settings::parse(json).unwrap();
+        assert!(!settings.profiles_discovered, "1.1.2 has no such flag: this file gets its one run");
+        settings
+    }
+
+    fn assert_only_real_shells_left(s: &wtpp_config::Settings) {
+        let names: Vec<&str> = s.profiles.list.iter().filter_map(|p| p.name.as_deref()).collect();
+        assert_eq!(names, ["Windows PowerShell", "Command Prompt"]);
+    }
+
+    /// WSL off: no registry key, usage text, rc 1. wsl_known is false, the
+    /// junk goes anyway, and there's no note, as no WSL profile exists.
+    #[test]
+    fn real_settings_upgrade_with_wsl_off() {
+        for (json, capture) in [
+            (include_str!("../testdata/settings-1.1.2/A-feature-off.json"), state_a()),
+            (include_str!("../testdata/settings-1.1.2/1809-B-feature-on-no-distro.json"), state_1809()),
+        ] {
+            let mut s = real_1_1_2(json);
+            // That file's junk is that capture's lines (1.1.2 skipped repeats).
+            let junk: Vec<String> = s.profiles.list[2..].iter().filter_map(|p| p.name.clone()).collect();
+            let mut lines = capture.lines();
+            let mut seen = std::collections::HashSet::new();
+            lines.retain(|l| seen.insert(l.clone()));
+            assert_eq!(junk, lines);
+
+            let (found, wsl_known) = discovered_in(&capture);
+            assert!(!wsl_known);
+            let report = s.refresh_discovered(&found, wsl_known);
+            assert_eq!(report.removed, junk);
+            assert_eq!(report.added, Vec::<String>::new());
+            assert_only_real_shells_left(&s);
+            assert_eq!(report.summary().matches("WSL").count(), 0, "{}", report.summary());
+        }
+    }
+
+    /// 1.1.2's junk is still in the file, and by now WSL works, listing nothing.
+    #[test]
+    fn real_settings_upgrade_after_wsl_got_enabled() {
+        let mut s = real_1_1_2(include_str!("../testdata/settings-1.1.2/D2-pending-then-rebooted-settings-kept.json"));
+        assert_eq!(s.profiles.list.len(), 23);
+        let (found, wsl_known) = discovered_in(&capture!("B-feature-on-no-distro"));
+        assert!(wsl_known);
+        let report = s.refresh_discovered(&found, wsl_known);
+        assert_eq!(report.removed.len(), 21);
+        assert!(!report.wsl_kept);
+        assert_only_real_shells_left(&s);
+    }
+
+    /// Real distros and 1.1.2's broken `--cd ~`: fixed in place, not doubled.
+    #[test]
+    fn upgrade_with_real_distros_rewrites_commandlines() {
+        use wtpp_config::settings::ProfileSettings;
+        let mut s = wtpp_config::Settings::default();
+        s.profiles.list.push(ProfileSettings { color_scheme: Some("Vintage".into()), ..v112_profile("Alpine") });
+        s.profiles.list.push(ProfileSettings { name: Some("Testing".into()), guid: Some("{x}".into()), ..v112_profile("test-distro") });
+        let (found, wsl_known) = discovered_in(&capture!("C-wsl1-two-distros"));
+        let report = s.refresh_discovered(&found, wsl_known);
+        assert_eq!(report.added, ["Windows PowerShell", "Command Prompt"]);
+        assert_eq!(report.removed, Vec::<String>::new());
+        assert_eq!(s.profiles.list[0].commandline.as_deref(), Some("wsl.exe ~ -d Alpine"));
+        assert_eq!(s.profiles.list[0].color_scheme.as_deref(), Some("Vintage"));
+        assert_eq!(s.profiles.list[1].commandline.as_deref(), Some("wsl.exe ~ -d test-distro"));
+        assert_eq!(s.profiles.list[1].name.as_deref(), Some("Testing"));
+        assert_eq!(s.profiles.list.len(), 4);
     }
 }

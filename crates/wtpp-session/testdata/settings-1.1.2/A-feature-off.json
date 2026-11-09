@@ -1,0 +1,163 @@
+{
+    "initialCols": 120,
+    "initialRows": 30,
+    "copyOnSelect": false,
+    "wordDelimiters": " /\\()\"'-.,:;<>~!@#$%^&*|+=[]{}~?│",
+    "confirmCloseAllTabs": true,
+    "focusFollowMouse": false,
+    "compatibility.allowOSC52": true,
+    "wtpp.rememberWindowBounds": true,
+    "multiLinePasteWarning": true,
+    "largePasteWarning": true,
+    "showTabsInTitlebar": true,
+    "theme": "dark",
+    "tabWidthMode": "equal",
+    "alwaysShowTabs": true,
+    "experimental.rightClickContextMenu": false,
+    "rendering.graphicsAPI": "automatic",
+    "profiles": {
+        "defaults": {},
+        "list": [
+            {
+                "guid": "{f6a21d39-c4c4-eb43-f84e-7836e212ce26}",
+                "name": "Windows PowerShell",
+                "commandline": "powershell.exe -NoLogo",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{5f4b95f4-3983-db3c-e4e0-d5548d13118d}",
+                "name": "Command Prompt",
+                "commandline": "C:\\Windows\\system32\\cmd.exe",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{1914e455-a8bc-321e-df01-25b1107f7fc1}",
+                "name": "Copyright (c) Microsoft Corporation. All rights reserved.",
+                "commandline": "wsl.exe -d \"Copyright (c) Microsoft Corporation. All rights reserved.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{bc21b89a-1ed8-551f-194d-b658f345497c}",
+                "name": "Usage: wsl.exe [Argument]",
+                "commandline": "wsl.exe -d \"Usage: wsl.exe [Argument]\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{2c557a9b-d827-92bf-7069-df278725b4be}",
+                "name": "Arguments:",
+                "commandline": "wsl.exe -d Arguments: --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{c5f21018-66a2-1afe-6058-9607f0b9ac29}",
+                "name": "--install <Options>",
+                "commandline": "wsl.exe -d \"--install <Options>\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{b56177df-9828-1ca0-c128-883398c3c255}",
+                "name": "Install Windows Subsystem for Linux features. If no options are specified,",
+                "commandline": "wsl.exe -d \"Install Windows Subsystem for Linux features. If no options are specified,\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{fb0732e0-ffd1-0e7e-cdf4-b872a5af4db5}",
+                "name": "the recommended features will be installed along with the default distribution.",
+                "commandline": "wsl.exe -d \"the recommended features will be installed along with the default distribution.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{825e0325-54e3-db50-eda3-9d4acbd3c3ed}",
+                "name": "To view the default distribution as well as a list of other valid distributions,",
+                "commandline": "wsl.exe -d \"To view the default distribution as well as a list of other valid distributions,\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{e664556e-d06e-ebcf-2120-4d0c201eaabe}",
+                "name": "use 'wsl --list --online'.",
+                "commandline": "wsl.exe -d \"use 'wsl --list --online'.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{cc4b0882-dcfd-ef2d-991d-11f97d5bcd20}",
+                "name": "Options:",
+                "commandline": "wsl.exe -d Options: --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{feb8ab32-d8de-4ba9-b104-39da62b3224a}",
+                "name": "--distribution, -d [Argument]",
+                "commandline": "wsl.exe -d \"--distribution, -d [Argument]\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{ffb9c03c-fa19-1171-af2e-edbe1cbe2404}",
+                "name": "Specifies the distribution to be downloaded and installed by name.",
+                "commandline": "wsl.exe -d \"Specifies the distribution to be downloaded and installed by name.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{b896b838-c3d1-08bf-63b0-054ac15bfe50}",
+                "name": "A valid distribution name (not case sensitive).",
+                "commandline": "wsl.exe -d \"A valid distribution name (not case sensitive).\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{a954eeeb-6cd9-6c04-9238-8ab8830adca3}",
+                "name": "Examples:",
+                "commandline": "wsl.exe -d Examples: --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{db853bed-989b-d6e0-8fb1-fc770c24a6eb}",
+                "name": "wsl --install -d Ubuntu",
+                "commandline": "wsl.exe -d \"wsl --install -d Ubuntu\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{c1c58376-07bc-3e7d-4e9c-2daedb31dada}",
+                "name": "wsl --install --distribution Debian",
+                "commandline": "wsl.exe -d \"wsl --install --distribution Debian\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{00e9ccad-60b7-3eca-a956-5ace1b8924df}",
+                "name": "--list, -l [Options]",
+                "commandline": "wsl.exe -d \"--list, -l [Options]\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{2803cc8f-0aa8-c10d-9fb6-76fa6099cb78}",
+                "name": "Lists distributions.",
+                "commandline": "wsl.exe -d \"Lists distributions.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{00663ca7-1009-368c-5f42-94aa1ab77525}",
+                "name": "--online, -o",
+                "commandline": "wsl.exe -d \"--online, -o\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{af69eed3-6d5b-00c5-0691-ce596d2613a4}",
+                "name": "Displays a list of available distributions for install with 'wsl --install'.",
+                "commandline": "wsl.exe -d \"Displays a list of available distributions for install with 'wsl --install'.\" --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{5daaf2e4-c8a8-bf3c-421f-8cd34f35ae15}",
+                "name": "--help",
+                "commandline": "wsl.exe -d --help --cd ~",
+                "source": "wtpp.discovered"
+            },
+            {
+                "guid": "{c5357332-24e4-3be6-a2ff-86107845ea83}",
+                "name": "Display usage information.",
+                "commandline": "wsl.exe -d \"Display usage information.\" --cd ~",
+                "source": "wtpp.discovered"
+            }
+        ]
+    },
+    "schemes": [],
+    "actions": []
+}

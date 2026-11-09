@@ -335,7 +335,7 @@ impl App {
         if let Some(dir) = args.starting_directory {
             profile.starting_directory = Some(dir.to_string_lossy().into_owned());
             // WSL profiles open in the Linux home unless told otherwise.
-            profile.commandline = profile.commandline.replace(" --cd ~", "");
+            profile.commandline = wtpp_config::settings::without_wsl_home(&profile.commandline);
         }
         if let Some(commandline) = args.commandline {
             profile.commandline = commandline;
