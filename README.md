@@ -49,6 +49,21 @@ between windows; `WTPP_WAYLAND=1` runs it as a Wayland app without those.
 - Ctrl+Backspace, Ctrl+Delete and Shift+Enter work in every shell, cmd included.
 - Shortcuts work on any keyboard layout, and the defaults avoid OS hotkeys.
 
+## New panes in the current directory
+
+Splitting a pane or duplicating a tab starts the new one where you are.
+Command Prompt and shells on Linux and macOS need nothing for that. wt++ has
+PowerShell (by wrapping its prompt, after your profile) and bash in WSL (by
+`PROMPT_COMMAND`, unless your `.bashrc` sets its own) tell it the directory.
+Other shells can report it like they do for Windows Terminal, e.g. zsh in WSL:
+
+```zsh
+precmd() { printf '\e]9;9;%s\e\\' "$PWD" }
+```
+
+Settings → Interaction → **New panes start in the current directory** turns
+all of this off.
+
 ## Default terminal
 
 Settings → Startup → **Make wt++ the default**:

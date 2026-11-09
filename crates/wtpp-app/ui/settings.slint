@@ -42,6 +42,7 @@ export global SettingsData {
     in-out property <bool> confirm-close;
     in-out property <bool> multi-line-paste-warning;
     in-out property <bool> focus-follow-mouse;
+    in-out property <bool> inherit-cwd;
     in-out property <bool> allow-osc52;
     in-out property <bool> remember-bounds;
     in-out property <bool> large-paste-warning;
@@ -344,6 +345,17 @@ component InteractionPage inherits VerticalLayout {
             checked <=> SettingsData.focus-follow-mouse;
             toggled => {
                 SettingsData.set-value("focusFollowMouse", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "New panes start in the current directory";
+        description: "Splitting a pane or duplicating a tab opens it where you are. wt++ has PowerShell and WSL's bash tell it where that is; applies to shells started after the change.";
+        Switch {
+            checked <=> SettingsData.inherit-cwd;
+            toggled => {
+                SettingsData.set-value("inheritWorkingDirectory", self.checked ? "true" : "false");
             }
         }
     }

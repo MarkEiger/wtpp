@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Splitting a pane or duplicating a tab opens the new one in the directory
+  you're in, not where the profile starts. That works without setup for
+  Command Prompt, PowerShell, bash in WSL, and shells on Linux and macOS;
+  other shells in WSL need one line (see the README). A Windows drive carries
+  over between WSL and Windows shells (`/mnt/c/src` ↔ `C:\src`); a directory
+  that's only in Linux, to the same distro. It can be turned off in Settings →
+  Interaction.
+- An OSC 7 or OSC 9;9 (Windows Terminal's) current-directory report from any
+  shell is understood.
+
 ## 1.2.0 — 2026-11-09
 
 - Windows 10: Enter, Backspace, arrows, Tab and Ctrl+C did nothing in Command

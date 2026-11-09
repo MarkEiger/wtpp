@@ -506,6 +506,10 @@ pub struct Settings {
     /// That happens once; afterwards only "Refresh shell list" changes them.
     #[serde(rename = "wtpp.profilesDiscovered")]
     pub profiles_discovered: bool,
+    /// Split panes and duplicated tabs start in the current directory, and
+    /// PowerShell and WSL's bash are set up to report it (wt++ addition).
+    #[serde(rename = "wtpp.inheritWorkingDirectory")]
+    pub inherit_working_directory: bool,
     pub multi_line_paste_warning: bool,
     pub large_paste_warning: bool,
     pub show_tabs_in_titlebar: bool,
@@ -544,6 +548,7 @@ impl Default for Settings {
             initial_position: None,
             remember_window_bounds: true,
             profiles_discovered: false,
+            inherit_working_directory: true,
             multi_line_paste_warning: true,
             large_paste_warning: true,
             show_tabs_in_titlebar: true,
@@ -666,7 +671,7 @@ pub fn is_plausible_distro_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-fn is_wsl_program(program: &str) -> bool {
+pub fn is_wsl_program(program: &str) -> bool {
     let file = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
     file == "wsl.exe" || file == "wsl"
 }
@@ -1576,6 +1581,15 @@ mod tests {
         s.default_profile = Some("bash".into());
         s.profiles.list[0].hidden = Some(true);
         assert_eq!(s.visible_profiles()[s.default_profile_index()].name, "zsh");
+    }
+
+    #[test]
+    fn inherit_working_directory_setting() {
+        assert!(Settings::parse("{}").unwrap().inherit_working_directory);
+        let off = Settings::parse(r#"{ "wtpp.inheritWorkingDirectory": false }"#).unwrap();
+        assert!(!off.inherit_working_directory);
+        assert!(off.to_json().contains("\"wtpp.inheritWorkingDirectory\": false"));
+        assert_eq!(Settings::parse(&off.to_json()).unwrap(), off);
     }
 
     #[test]

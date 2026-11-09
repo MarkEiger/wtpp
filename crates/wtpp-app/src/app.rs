@@ -1,7 +1,7 @@
 //! Window state: tabs, their pane trees, and the sessions behind each pane.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -563,6 +563,29 @@ impl App {
         }
     }
 
+    /// Where a new pane running `target`, opened from `source`, starts: in
+    /// `source`'s current directory, as far as it carries over to `target`'s
+    /// shell (see `starting_directory_from`). `None` if it doesn't, if it's
+    /// unknown or gone, or if that's turned off.
+    fn inherited_cwd(&self, source: &Pane, target: &ResolvedProfile) -> Option<String> {
+        if !self.settings.inherit_working_directory {
+            return None;
+        }
+        let session = &source.session;
+        let program = &session.profile().program;
+        // PowerShell's location isn't its process's directory, and wsl.exe's
+        // is a Windows one: those only know what the shell reports.
+        let process = if is_powershell(program) || wtpp_config::settings::is_wsl_program(program) {
+            None
+        } else {
+            session.process_cwd().map(|p| p.to_string_lossy().into_owned())
+        };
+        let cwd = process.or_else(|| session.reported_cwd())?;
+        let dir = wtpp_config::cwd::starting_directory_from(&cwd, &source.profile.commandline, &target.commandline);
+        log::info!("new pane from {cwd:?} starts in {dir:?}");
+        dir.filter(|dir| Path::new(dir).is_dir())
+    }
+
     /// Everything the session needs to start a profile's shell.
     fn session_profile(&self, p: &ResolvedProfile) -> wtpp_session::Profile {
         let commandline = commandline_for_start(&p.commandline, p.starting_directory.as_deref());
@@ -595,6 +618,18 @@ impl App {
         };
         profile.word_delimiters = self.settings.word_delimiters.clone();
         profile.env = p.environment.iter().map(|(k, v)| (k.clone(), expand_env(v))).collect();
+        // Shells whose directory can't be read from outside report it.
+        if self.settings.inherit_working_directory {
+            if let Some(args) = wtpp_config::cwd::powershell_args_with_hook(&program, &profile.args) {
+                profile.args = args;
+            } else if wtpp_config::settings::is_wsl_program(&program) {
+                let get = |name: &str| profile.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
+                let wslenv = get("WSLENV").or_else(|| std::env::var("WSLENV").ok());
+                let env = wtpp_config::cwd::wsl_prompt_env(get("PROMPT_COMMAND").is_some(), wslenv.as_deref());
+                profile.env.retain(|k, _| !k.eq_ignore_ascii_case("WSLENV"));
+                profile.env.extend(env);
+            }
+        }
         profile
     }
 
@@ -656,7 +691,7 @@ impl App {
         let Some(pane) = self.panes.get(&target) else { return };
         let side = side.unwrap_or(if pane.rect.w >= pane.rect.h { Direction::Right } else { Direction::Down });
         let new_first = matches!(side, Direction::Left | Direction::Up);
-        let profile = if duplicate {
+        let mut profile = if duplicate {
             pane.profile.clone()
         } else {
             match self.profiles.get(self.settings.default_profile_index()) {
@@ -664,6 +699,9 @@ impl App {
                 None => return,
             }
         };
+        if let Some(dir) = self.inherited_cwd(pane, &profile) {
+            profile.starting_directory = Some(dir);
+        }
 
         let id = self.alloc_id();
         let area = self.content_area();
@@ -1373,7 +1411,13 @@ impl App {
         match action {
             Action::NewTab(index) => self.new_tab(index.unwrap_or_else(|| self.settings.default_profile_index())),
             Action::DuplicateTab => match self.focused_pane() {
-                Some(pane) => self.new_tab_with(pane.profile.clone()),
+                Some(pane) => {
+                    let mut profile = pane.profile.clone();
+                    if let Some(dir) = self.inherited_cwd(pane, &profile) {
+                        profile.starting_directory = Some(dir);
+                    }
+                    self.new_tab_with(profile)
+                }
                 None => return false,
             },
             Action::CloseTab => self.close_tab(self.active),

@@ -152,6 +152,7 @@ where
             }
 
             // Parse the incoming bytes.
+            self.event_proxy.pty_output(&buf[..unprocessed]);
             state.parser.advance(&mut **terminal, &buf[..unprocessed]);
 
             processed += unprocessed;

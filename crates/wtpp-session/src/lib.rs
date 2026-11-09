@@ -4,6 +4,7 @@
 //! event loop, or ours for a console handed over by Windows; see [`Pipes`]). The UI thread locks [`Session::term`] to read the grid when it
 //! renders, and receives [`SessionEvent`]s through the callback it supplied.
 
+pub mod cwd;
 pub mod profiles;
 
 use std::borrow::Cow;
@@ -142,12 +143,24 @@ pub struct Listener {
     callback: Arc<Callback>,
     pty: Arc<OnceLock<Io>>,
     size: Arc<FairMutex<GridSize>>,
+    cwd_scanner: Arc<Mutex<cwd::CwdScanner>>,
+    /// The directory the shell last reported (see [`cwd::parse_cwd_osc`]).
+    reported_cwd: Arc<Mutex<Option<String>>>,
 }
 
 impl Listener {
     fn reply(&self, text: String) {
         if let Some(pty) = self.pty.get() {
             pty.input(Cow::Owned(text.into_bytes()));
+        }
+    }
+
+    fn scan_output(&self, bytes: &[u8]) {
+        let found = self.cwd_scanner.lock().ok().and_then(|mut scanner| scanner.feed(bytes));
+        if let Some(dir) = found
+            && let Ok(mut reported) = self.reported_cwd.lock()
+        {
+            *reported = Some(dir);
         }
     }
 }
@@ -174,6 +187,10 @@ impl EventListener for Listener {
             Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
         }
     }
+
+    fn pty_output(&self, bytes: &[u8]) {
+        self.scan_output(bytes);
+    }
 }
 
 type SharedTerm = Arc<FairMutex<Term<Listener>>>;
@@ -185,6 +202,8 @@ pub struct Session {
     profile: Profile,
     /// The process the session started (or was handed): the shell.
     pid: Option<u32>,
+    /// See [`Listener::reported_cwd`].
+    reported_cwd: Arc<Mutex<Option<String>>>,
     /// For a handed-over console (see [`Pipes::keep_alive`]).
     _keep_alive: Vec<File>,
 }
@@ -200,6 +219,8 @@ impl Session {
             callback: Arc::new(on_event),
             pty: Arc::new(OnceLock::new()),
             size: shared_size.clone(),
+            cwd_scanner: Default::default(),
+            reported_cwd: Default::default(),
         };
 
         let config = Config {
@@ -244,7 +265,8 @@ impl Session {
         let _ = listener.pty.set(io.clone());
         event_loop.spawn();
 
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, _keep_alive: Vec::new() })
+        let reported_cwd = listener.reported_cwd.clone();
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, _keep_alive: Vec::new() })
     }
 
     /// A session on a console Windows handed over (see [`Pipes`]): a thread
@@ -270,10 +292,12 @@ impl Session {
 
         let reader_term = term.clone();
         let callback = listener.callback.clone();
+        let scanner = listener.clone();
         std::thread::Builder::new().name("handoff-output".into()).spawn(move || {
             let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
             let mut buf = vec![0u8; 64 * 1024];
             while let Ok(n @ 1..) = output.read(&mut buf) {
+                scanner.scan_output(&buf[..n]);
                 parser.advance(&mut *reader_term.lock(), &buf[..n]);
                 callback(SessionEvent::Wakeup);
             }
@@ -292,7 +316,8 @@ impl Session {
         let _ = listener.pty.set(io.clone());
         // The console host starts at its own default size.
         io.resize(size);
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, _keep_alive: keep_alive })
+        let reported_cwd = listener.reported_cwd.clone();
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, _keep_alive: keep_alive })
     }
 
     pub fn term(&self) -> &Arc<FairMutex<Term<Listener>>> {
@@ -306,6 +331,16 @@ impl Session {
     /// The shell's process id (the program a handed-over console started).
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    /// The directory the shell last reported, if it does (OSC 7 or 9;9).
+    pub fn reported_cwd(&self) -> Option<String> {
+        self.reported_cwd.lock().ok()?.clone()
+    }
+
+    /// The shell process's working directory (see [`cwd::process_cwd`]).
+    pub fn process_cwd(&self) -> Option<std::path::PathBuf> {
+        cwd::process_cwd(self.pid?)
     }
 
     pub fn size(&self) -> GridSize {

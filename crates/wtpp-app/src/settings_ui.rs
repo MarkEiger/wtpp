@@ -229,6 +229,7 @@ impl App {
         data.set_confirm_close(s.confirm_close_all_tabs);
         data.set_multi_line_paste_warning(s.multi_line_paste_warning);
         data.set_focus_follow_mouse(s.focus_follow_mouse);
+        data.set_inherit_cwd(s.inherit_working_directory);
         data.set_allow_osc52(s.allow_osc52);
         data.set_remember_bounds(s.remember_window_bounds);
         data.set_large_paste_warning(s.large_paste_warning);
@@ -385,6 +386,7 @@ impl App {
                 "confirmCloseAllTabs" => s.confirm_close_all_tabs = flag,
                 "multiLinePasteWarning" => s.multi_line_paste_warning = flag,
                 "focusFollowMouse" => s.focus_follow_mouse = flag,
+                "inheritWorkingDirectory" => s.inherit_working_directory = flag,
                 "allowOSC52" => s.allow_osc52 = flag,
                 "rememberWindowBounds" => s.remember_window_bounds = flag,
                 "largePasteWarning" => s.large_paste_warning = flag,

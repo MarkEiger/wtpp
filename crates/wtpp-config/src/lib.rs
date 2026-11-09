@@ -2,6 +2,7 @@
 //! and key bindings.
 
 pub mod actions;
+pub mod cwd;
 pub mod keymap;
 pub mod schemes;
 pub mod settings;
