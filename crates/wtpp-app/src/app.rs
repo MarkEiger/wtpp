@@ -1939,16 +1939,27 @@ fn is_powershell(program: &str) -> bool {
 /// Bytes that delete the word before the cursor at a shell's prompt, where
 /// the console host can't be given Ctrl+Backspace itself. PSReadLine (5.1's
 /// included): select the word, then delete the selection, which does nothing
-/// at the start of the line. cmd has no such keys: one Backspace per character.
+/// at the start of the line. Anything else that reads a line in the shell's
+/// own process (cmd, `set /p`, Read-Host) has no such keys, and would take them
+/// as moving and deleting: one Backspace per character, which do nothing
+/// before the start of the input. They suit a custom PowerShell prompt too.
 fn backward_kill_word(session: &Session) -> Option<Vec<u8>> {
     let program = &session.profile().program;
-    if is_powershell(program) {
-        Some(b"\x1b[1;6D\x1b[3~".to_vec())
-    } else if is_cmd(program) {
-        Some(vec![0x7f; chars_to_prev_word(&text_before_cursor(session))])
-    } else {
-        None
+    if !is_powershell(program) && !is_cmd(program) {
+        return None;
     }
+    let before = text_before_cursor(session);
+    if is_powershell(program) && is_psreadline_prompt(&before) {
+        Some(b"\x1b[1;6D\x1b[3~".to_vec())
+    } else {
+        Some(vec![0x7f; chars_to_prev_word(&before)])
+    }
+}
+
+/// Does this text before the cursor look like PowerShell's default prompt
+/// line (`PS C:\Users\me> ...`)? Then PSReadLine is what's reading it.
+fn is_psreadline_prompt(before: &[char]) -> bool {
+    before.starts_with(&['P', 'S', ' ']) && before.contains(&'>')
 }
 
 /// Text from the start of the cursor's line to the cursor, following soft wraps.
@@ -2150,6 +2161,19 @@ mod tests {
         assert_eq!(back("C:\\Users\\me>"), 1);
         assert_eq!(back(""), 0);
         assert_eq!(back("   "), 3);
+        let prompt = |s: &str| is_psreadline_prompt(&s.chars().collect::<Vec<_>>());
+        assert!(prompt("PS C:\\Users\\me> "));
+        assert!(prompt("PS C:\\Users\\me> echo one"));
+        assert!(prompt("PS Microsoft.PowerShell.Core\\FileSystem::\\\\wsl.localhost\\Debian> x"));
+        // Read-Host, `set /p`, custom prompts, a continuation line.
+        assert!(!prompt("abc def"));
+        assert!(!prompt("Name: abc def"));
+        assert!(!prompt("x: abc"));
+        assert!(!prompt("C:\\Users\\me>echo one"));
+        assert!(!prompt(">> abc"));
+        assert!(!prompt("PS no prompt end yet"));
+        assert!(!prompt("PSabc> x"));
+        assert!(!prompt(""));
         assert!(is_powershell(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"));
         assert!(is_powershell("pwsh"));
         assert!(!is_powershell("cmd.exe"));

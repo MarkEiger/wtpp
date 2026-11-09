@@ -9,8 +9,9 @@
   ordinary sequences. There, Ctrl+Backspace and Ctrl+Delete delete a word at
   the prompt, and Shift+Enter acts as Alt+Enter, which adds a line in Claude
   Code.
-  Known limitation: on Windows 10 1809, Shift+Enter doesn't add a line in
-  Claude Code.
+  Known limitations: on Windows 10 1809, Shift+Enter doesn't add a line in
+  Claude Code. In Command Prompt, Ctrl+Backspace right after very fast typing
+  can delete too little, as it goes by what's on screen so far.
 - A WSL profile's starting directory is used; the Linux home won out over it.
   A path inside Linux (`/home/me`) opens the Linux home instead, as wsl.exe
   can't start there on all versions; before, such a profile opened no tab, or
