@@ -77,7 +77,8 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
-        /// wt++: a console host asked for win32-input-mode (`CSI ? 9001 h`).
+        /// wt++: the console host asked for win32-input-mode (`CSI ? 9001 h`
+        /// before any text); see `Term::console_host_can_ask`.
         const WIN32_INPUT             = 1 << 23;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
@@ -321,6 +322,11 @@ pub struct Term<T> {
     /// The stack for the keyboard modes.
     keyboard_mode_stack: Vec<KeyboardModes>,
 
+    /// wt++: the stream hasn't shown text yet. Only here is `CSI ? 9001 h` the
+    /// console host's: programs can print it too, and an inbox conhost passes
+    /// that on without being able to take key events. Answered once.
+    console_host_can_ask: bool,
+
     /// Currently inactive keyboard mode stack.
     inactive_keyboard_mode_stack: Vec<KeyboardModes>,
 
@@ -434,6 +440,7 @@ impl<T> Term<T> {
             tabs,
             inactive_keyboard_mode_stack: Default::default(),
             keyboard_mode_stack: Default::default(),
+            console_host_can_ask: true,
             active_charset: Default::default(),
             vi_mode_cursor: Default::default(),
             cursor_style: Default::default(),
@@ -1062,6 +1069,8 @@ impl<T: EventListener> Handler for Term<T> {
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
+        self.console_host_can_ask = false;
+
         // Number of cells the char will occupy.
         let width = match c.width() {
             Some(width) => width,
@@ -1938,7 +1947,7 @@ impl<T: EventListener> Handler for Term<T> {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
-                if mode == 9001 {
+                if mode == 9001 && mem::take(&mut self.console_host_can_ask) {
                     self.mode.insert(TermMode::WIN32_INPUT);
                 }
                 debug!("Ignoring unknown mode {mode} in set_private_mode");
@@ -2005,7 +2014,7 @@ impl<T: EventListener> Handler for Term<T> {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
                 if mode == 9001 {
-                    self.mode.remove(TermMode::WIN32_INPUT);
+                    self.console_host_can_ask = false;
                 }
                 debug!("Ignoring unknown mode {mode} in unset_private_mode");
                 return;

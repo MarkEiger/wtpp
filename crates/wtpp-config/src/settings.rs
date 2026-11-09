@@ -666,11 +666,15 @@ pub fn is_plausible_distro_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+fn is_wsl_program(program: &str) -> bool {
+    let file = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    file == "wsl.exe" || file == "wsl"
+}
+
 /// The distro a profile runs, if it runs `wsl.exe`: its `-d`, else its name.
 fn wsl_distro_of(p: &ProfileSettings) -> Option<String> {
     let (program, args) = split_commandline(p.commandline.as_deref()?);
-    let file = program.rsplit(['/', '\\']).next().unwrap_or(&program).to_ascii_lowercase();
-    if file != "wsl.exe" && file != "wsl" {
+    if !is_wsl_program(&program) {
         return None;
     }
     let distro = args.iter().position(|a| a == "-d" || a == "--distribution").and_then(|i| args.get(i + 1));
@@ -698,12 +702,20 @@ fn is_same_shell(p: &ProfileSettings, d: &DiscoveredProfile) -> bool {
     forms.contains(&d.commandline) && p.commandline.as_ref().is_some_and(|c| forms.contains(c))
 }
 
+/// Is this starting directory a path inside the distro a WSL profile runs?
+/// Windows can't start a process there (and `/tmp` could be `C:\tmp`), and
+/// `--cd` with such a path fails on inbox wsl.exe: it opens in the Linux home.
+pub fn is_wsl_linux_dir(commandline: &str, dir: &str) -> bool {
+    let dir = dir.trim();
+    is_wsl_program(&split_commandline(commandline).0) && (dir == "~" || dir.starts_with("~/") || dir.starts_with('/'))
+}
+
 /// The command line to start a profile with. A starting directory takes over
-/// from the Linux home a generated WSL profile opens in, unless it means that
-/// very home.
+/// from the Linux home a generated WSL profile opens in, unless it's a path
+/// in Linux (see [`is_wsl_linux_dir`]).
 pub fn commandline_for_start(commandline: &str, starting_directory: Option<&str>) -> String {
     match starting_directory.map(str::trim) {
-        Some(dir) if !dir.is_empty() && dir != "~" => without_wsl_home(commandline),
+        Some(dir) if !dir.is_empty() && !is_wsl_linux_dir(commandline, dir) => without_wsl_home(commandline),
         _ => commandline.to_string(),
     }
 }
@@ -1517,6 +1529,21 @@ mod tests {
         assert_eq!(start("wsl.exe ~ -d Alpine", Some("~")), "wsl.exe ~ -d Alpine");
         // Other programs keep theirs.
         assert_eq!(start("cmd.exe /k echo ~ x", Some(r"C:\code")), "cmd.exe /k echo ~ x");
+    }
+
+    #[test]
+    fn linux_paths_are_not_windows_directories() {
+        for dir in ["/home/bob", "/tmp", "/", "~", "~/src", " /tmp "] {
+            assert!(is_wsl_linux_dir("wsl.exe ~ -d Alpine", dir), "{dir}");
+            assert!(is_wsl_linux_dir(r"C:\Windows\System32\WSL.EXE -d Alpine", dir), "{dir}");
+            assert_eq!(commandline_for_start("wsl.exe ~ -d Alpine", Some(dir)), "wsl.exe ~ -d Alpine");
+        }
+        for dir in [r"C:\code", r"\\wsl$\Alpine\root", "%USERPROFILE%", "relative"] {
+            assert!(!is_wsl_linux_dir("wsl.exe ~ -d Alpine", dir), "{dir}");
+        }
+        // Only for WSL.
+        assert!(!is_wsl_linux_dir("/bin/bash -l", "/tmp"));
+        assert!(!is_wsl_linux_dir("cmd.exe", "/tmp"));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use slint::wgpu_30::wgpu;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use wtpp_config::settings::{commandline_for_start, expand_env, split_commandline};
+use wtpp_config::settings::{commandline_for_start, expand_env, is_wsl_linux_dir, split_commandline};
 use wtpp_config::{Action, BellStyle, CloseOnExit, CursorShape, KeyEncoding, Keymap, ResolvedProfile, Settings};
 use wtpp_input::{Key, KeyStyle, Mods};
 use wtpp_render::{Frame, Highlight, HighlightKind, Renderer, SharedFonts, Theme};
@@ -521,7 +521,15 @@ impl App {
         };
         let session = match pipes {
             Some(pipes) => Session::from_pipes(&session_profile, size, pipes, on_event),
-            None => Session::spawn(&session_profile, size, on_event),
+            // A folder that's gone (or never was) isn't worth losing the tab
+            // over. Anything else fails the same way the second time.
+            None => Session::spawn(&session_profile, size, on_event.clone()).or_else(|e| {
+                let Some(dir) = session_profile.cwd.as_ref().filter(|dir| !dir.is_dir()) else { return Err(e) };
+                log::warn!("{}: can't start in {}, using the home folder: {e:#}", profile.name, dir.display());
+                let mut at_home = profile.clone();
+                at_home.starting_directory = None;
+                Session::spawn(&self.session_profile(&at_home), size, on_event)
+            }),
         };
         match session {
             Ok(session) => {
@@ -562,6 +570,12 @@ impl App {
         let mut profile = wtpp_session::Profile::new(&p.name, &program, &[]);
         profile.args = args;
         profile.cwd = Some(match &p.starting_directory {
+            Some(dir) if is_wsl_linux_dir(&p.commandline, dir) => {
+                if dir.trim() != "~" {
+                    log::warn!("{}: starting directory {dir} is in Linux, which wsl.exe can't start in; opening in the Linux home", p.name);
+                }
+                home_dir()
+            }
             Some(dir) if !dir.trim().is_empty() => PathBuf::from(expand_env(dir)),
             _ => home_dir(),
         });
@@ -1308,6 +1322,21 @@ impl App {
             pane.session.write(delete.repeat(n));
             return true;
         }
+        // Without key events (inbox conhost) Ctrl+Backspace is only a plain
+        // Backspace. At the shell's own prompt, get the same result some other
+        // way; a program running under it gets the plain key (no emulation).
+        if key == Some((Key::Backspace, Mods::CTRL)) {
+            let opts = pane.session.encode_options();
+            if opts.style == KeyStyle::Windows
+                && !opts.win32_input
+                && !pane.session.pid().is_some_and(crate::platform::has_children)
+                && let Some(bytes) = backward_kill_word(&pane.session)
+            {
+                pane.session.term().lock().selection = None;
+                pane.session.write(bytes);
+                return true;
+            }
+        }
         // Claude Code under cmd or PowerShell reads keys through the console,
         // which keeps Alt but drops Shift from Enter: give it Alt+Enter (ESC CR,
         // its "insert newline"). PSReadLine keeps its own Shift+Enter otherwise.
@@ -1902,6 +1931,69 @@ fn is_cmd(program: &str) -> bool {
     file == "cmd" || file == "cmd.exe"
 }
 
+fn is_powershell(program: &str) -> bool {
+    let file = program.rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+    matches!(file.strip_suffix(".exe").unwrap_or(&file), "powershell" | "pwsh")
+}
+
+/// Bytes that delete the word before the cursor at a shell's prompt, where
+/// the console host can't be given Ctrl+Backspace itself. PSReadLine (5.1's
+/// included): select the word, then delete the selection, which does nothing
+/// at the start of the line. cmd has no such keys: one Backspace per character.
+fn backward_kill_word(session: &Session) -> Option<Vec<u8>> {
+    let program = &session.profile().program;
+    if is_powershell(program) {
+        Some(b"\x1b[1;6D\x1b[3~".to_vec())
+    } else if is_cmd(program) {
+        Some(vec![0x7f; chars_to_prev_word(&text_before_cursor(session))])
+    } else {
+        None
+    }
+}
+
+/// Text from the start of the cursor's line to the cursor, following soft wraps.
+fn text_before_cursor(session: &Session) -> Vec<char> {
+    use wtpp_session::alacritty_terminal::index::Line;
+    use wtpp_session::alacritty_terminal::term::cell::Flags;
+
+    let term = session.term().lock();
+    let grid = term.grid();
+    let cursor = &grid.cursor;
+    let last = grid.columns() - 1;
+    let mut line = cursor.point.line;
+    while line.0 > 0 && grid[Line(line.0 - 1)][Column(last)].flags.contains(Flags::WRAPLINE) {
+        line = Line(line.0 - 1);
+    }
+    let mut out = Vec::new();
+    while line <= cursor.point.line {
+        let end = if line == cursor.point.line { cursor.point.column.0 + cursor.input_needs_wrap as usize } else { last + 1 };
+        for c in 0..end.min(last + 1) {
+            let cell = &grid[line][Column(c)];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                out.push(cell.c);
+            }
+        }
+        line = Line(line.0 + 1);
+    }
+    out
+}
+
+/// How many characters Ctrl+Backspace removes: back over blanks, then over
+/// a word or a run of punctuation.
+fn chars_to_prev_word(before: &[char]) -> usize {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut chars = before.iter().rev().copied().peekable();
+    let mut n = 0;
+    while chars.next_if(|c| c.is_whitespace()).is_some() {
+        n += 1;
+    }
+    let word = chars.peek().copied().is_some_and(is_word);
+    while chars.next_if(|&c| !c.is_whitespace() && is_word(c) == word).is_some() {
+        n += 1;
+    }
+    n
+}
+
 /// Text from the cursor to the end of its line, following soft wraps.
 fn cursor_line(session: &Session) -> Vec<char> {
     use wtpp_session::alacritty_terminal::index::Line;
@@ -2048,6 +2140,19 @@ mod tests {
 
     #[test]
     fn kill_word_counts() {
+        let back = |s: &str| chars_to_prev_word(&s.chars().collect::<Vec<_>>());
+        assert_eq!(back("C:\\Users\\me>echo one two"), 3);
+        assert_eq!(back("C:\\Users\\me>echo one two  "), 5);
+        assert_eq!(back("C:\\Users\\me>cd ..\\foo"), 3);
+        assert_eq!(back("C:\\Users\\me>cd ..\\"), 3);
+        assert_eq!(back("C:\\Users\\me>x"), 1);
+        // An empty input: what's sent at its start does nothing.
+        assert_eq!(back("C:\\Users\\me>"), 1);
+        assert_eq!(back(""), 0);
+        assert_eq!(back("   "), 3);
+        assert!(is_powershell(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"));
+        assert!(is_powershell("pwsh"));
+        assert!(!is_powershell("cmd.exe"));
         let count = |s: &str| chars_to_next_word(&s.chars().collect::<Vec<_>>());
         assert_eq!(count("two three   "), 4); // "two "
         assert_eq!(count("wo three"), 3); // mid-word: rest of word + space

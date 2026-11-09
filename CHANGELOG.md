@@ -6,9 +6,17 @@
   Prompt and PowerShell, because the console that comes with Windows 10 ignores
   the key events wt++ sent it. wt++ now sends those only to a console that asks
   for them (Windows 11 does, and works as before), and otherwise the keys'
-  ordinary sequences. There, Ctrl+Backspace and Ctrl+Delete delete a word, and
-  Shift+Enter acts as Alt+Enter, which adds a line in Claude Code.
+  ordinary sequences. There, Ctrl+Backspace and Ctrl+Delete delete a word at
+  the prompt, and Shift+Enter acts as Alt+Enter, which adds a line in Claude
+  Code.
+  Known limitation: on Windows 10 1809, Shift+Enter doesn't add a line in
+  Claude Code.
 - A WSL profile's starting directory is used; the Linux home won out over it.
+  A path inside Linux (`/home/me`) opens the Linux home instead, as wsl.exe
+  can't start there on all versions; before, such a profile opened no tab, or
+  the wrong folder.
+- A starting directory that doesn't exist no longer means no tab: it opens in
+  your home folder.
 - Windows: on some Windows 10 / WSL1 setups, WSL's usage text or an error
   message turned into one junk profile per line. wt++ now reads the list of
   distros from the registry, like Windows Terminal, and only accepts

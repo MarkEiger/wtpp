@@ -169,6 +169,20 @@ pub fn runs_under(root: u32, exe: &str) -> bool {
     }
 }
 
+/// Whether process `pid` has started a process that's still running. Windows
+/// only; elsewhere `false`.
+pub fn has_children(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        imp::processes().iter().any(|&(_, parent, _)| parent == pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// The mouse pointer in screen coordinates (physical pixels, as `window`'s
 /// position is measured), where the OS tells us: not on Wayland, where
 /// callers work it out from the window position.
@@ -452,19 +466,19 @@ mod imp {
         dirs.into_iter().map(|d| d.join(&with_ext)).find(|p| p.exists())
     }
 
-    pub fn runs_under(root: u32, exe: &str) -> bool {
+    /// (pid, parent pid, name) of every process.
+    pub fn processes() -> Vec<(u32, u32, String)> {
         use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
         };
 
-        // (pid, parent pid, name) of every process.
         let mut procs = Vec::new();
         // SAFETY: a snapshot we close; `entry` is sized as the API requires.
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snap == INVALID_HANDLE_VALUE {
-                return false;
+                return procs;
             }
             let mut entry: PROCESSENTRY32W = std::mem::zeroed();
             entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -477,6 +491,11 @@ mod imp {
             }
             CloseHandle(snap);
         }
+        procs
+    }
+
+    pub fn runs_under(root: u32, exe: &str) -> bool {
+        let procs = processes();
         // Walk down from `root`. Parent ids can be stale (an exited parent's
         // id reused), so only processes found under `root` are followed.
         let mut todo = vec![root];
