@@ -698,9 +698,17 @@ fn is_same_shell(p: &ProfileSettings, d: &DiscoveredProfile) -> bool {
     forms.contains(&d.commandline) && p.commandline.as_ref().is_some_and(|c| forms.contains(c))
 }
 
-/// A command line without what opens a generated WSL profile in the Linux
-/// home, for when it's told to open in some directory instead.
-pub fn without_wsl_home(commandline: &str) -> String {
+/// The command line to start a profile with. A starting directory takes over
+/// from the Linux home a generated WSL profile opens in, unless it means that
+/// very home.
+pub fn commandline_for_start(commandline: &str, starting_directory: Option<&str>) -> String {
+    match starting_directory.map(str::trim) {
+        Some(dir) if !dir.is_empty() && dir != "~" => without_wsl_home(commandline),
+        _ => commandline.to_string(),
+    }
+}
+
+fn without_wsl_home(commandline: &str) -> String {
     let line = commandline.replace(" --cd ~", "");
     match line.strip_prefix("wsl.exe ~ ") {
         Some(rest) => format!("wsl.exe {rest}"),
@@ -1495,6 +1503,20 @@ mod tests {
         assert_eq!(without_wsl_home("wsl.exe -d Alpine --cd ~"), "wsl.exe -d Alpine");
         assert_eq!(without_wsl_home("wsl.exe -d Alpine"), "wsl.exe -d Alpine");
         assert_eq!(without_wsl_home("cmd.exe /k echo ~ x"), "cmd.exe /k echo ~ x");
+    }
+
+    #[test]
+    fn starting_directory_beats_the_wsl_home() {
+        let start = commandline_for_start;
+        assert_eq!(start("wsl.exe ~ -d Alpine", Some(r"C:\code")), "wsl.exe -d Alpine");
+        assert_eq!(start("wsl.exe -d Alpine --cd ~", Some(r"C:\code")), "wsl.exe -d Alpine");
+        assert_eq!(start("wsl.exe ~ -d Alpine", Some("%USERPROFILE%")), "wsl.exe -d Alpine");
+        // No directory, or that same home.
+        assert_eq!(start("wsl.exe ~ -d Alpine", None), "wsl.exe ~ -d Alpine");
+        assert_eq!(start("wsl.exe ~ -d Alpine", Some("  ")), "wsl.exe ~ -d Alpine");
+        assert_eq!(start("wsl.exe ~ -d Alpine", Some("~")), "wsl.exe ~ -d Alpine");
+        // Other programs keep theirs.
+        assert_eq!(start("cmd.exe /k echo ~ x", Some(r"C:\code")), "cmd.exe /k echo ~ x");
     }
 
     #[test]

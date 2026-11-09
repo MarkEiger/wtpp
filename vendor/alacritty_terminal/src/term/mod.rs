@@ -77,6 +77,8 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        /// wt++: a console host asked for win32-input-mode (`CSI ? 9001 h`).
+        const WIN32_INPUT             = 1 << 23;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -1849,8 +1851,9 @@ impl<T: EventListener> Handler for Term<T> {
         self.keyboard_mode_stack = Default::default();
         self.inactive_keyboard_mode_stack = Default::default();
 
-        // Preserve vi mode across resets.
-        self.mode &= TermMode::VI;
+        // Preserve vi mode across resets, and what the console host asked for
+        // (wt++): a program's reset isn't the console host changing its mind.
+        self.mode &= TermMode::VI | TermMode::WIN32_INPUT;
         self.mode.insert(TermMode::default());
 
         self.event_proxy.send_event(Event::CursorBlinkingChange);
@@ -1935,6 +1938,9 @@ impl<T: EventListener> Handler for Term<T> {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
+                if mode == 9001 {
+                    self.mode.insert(TermMode::WIN32_INPUT);
+                }
                 debug!("Ignoring unknown mode {mode} in set_private_mode");
                 return;
             },
@@ -1998,6 +2004,9 @@ impl<T: EventListener> Handler for Term<T> {
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
+                if mode == 9001 {
+                    self.mode.remove(TermMode::WIN32_INPUT);
+                }
                 debug!("Ignoring unknown mode {mode} in unset_private_mode");
                 return;
             },

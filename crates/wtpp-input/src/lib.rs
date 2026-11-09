@@ -60,13 +60,18 @@ pub enum KeyStyle {
     /// bash, zsh, fish, sh… (readline/zle defaults).
     #[default]
     Unix,
-    /// cmd, Windows PowerShell, pwsh (matches Windows Terminal's bytes).
+    /// cmd, Windows PowerShell, pwsh: key events if the console host takes
+    /// them (see [`EncodeOptions::win32_input`]), else the bytes it translates
+    /// to the same keys.
     Windows,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EncodeOptions {
     pub style: KeyStyle,
+    /// The console host understands win32-input-mode. Without it (Windows 10's
+    /// inbox conhost) such sequences are dropped, keys and all.
+    pub win32_input: bool,
     /// DECCKM: cursor keys send SS3 (`ESC O x`) instead of CSI.
     pub app_cursor: bool,
     /// The app enabled kitty keyboard protocol "disambiguate escape codes".
@@ -79,6 +84,7 @@ impl Default for EncodeOptions {
     fn default() -> Self {
         Self {
             style: KeyStyle::Unix,
+            win32_input: false,
             app_cursor: false,
             kitty_disambiguate: false,
             // ESC CR: what most TUIs (editors, chat-style CLIs) treat as
@@ -93,6 +99,7 @@ pub fn encode(key: Key, mods: Mods, opts: &EncodeOptions) -> Option<Vec<u8>> {
     // cmd/PowerShell read Windows key events, not VT; give ConPTY the exact
     // key (like Windows Terminal) rather than a sequence it has to guess at.
     if opts.style == KeyStyle::Windows
+        && opts.win32_input
         && !matches!(key, Key::Char(_) if !mods.ctrl && !mods.alt)
         && let Some(bytes) = encode_win32(key, mods)
     {
@@ -118,7 +125,8 @@ pub fn encode(key: Key, mods: Mods, opts: &EncodeOptions) -> Option<Vec<u8>> {
 
         Key::Backspace => match (mods.ctrl, mods.alt, opts.style) {
             // Delete word backwards: ^W is unix-word-rubout in bash and zsh;
-            // ^H is BackwardKillWord in PSReadLine (and what WT sends).
+            // ^H is BackwardKillWord in PSReadLine (and what WT sends), and
+            // what conhost turns into the Ctrl+Backspace key; ^W would be typed.
             (true, _, KeyStyle::Unix) => vec![0x17],
             (true, _, KeyStyle::Windows) => vec![0x08],
             (false, true, _) => b"\x1b\x7f".to_vec(),
@@ -127,8 +135,8 @@ pub fn encode(key: Key, mods: Mods, opts: &EncodeOptions) -> Option<Vec<u8>> {
 
         Key::Escape => vec![0x1b],
 
-        // Delete word forwards: ESC d is readline/zle kill-word; PSReadLine
-        // understands the xterm-style CSI 3;5~ through ConPTY.
+        // Delete word forwards: ESC d is readline/zle kill-word; conhost turns
+        // the xterm-style CSI 3;5~ into the Ctrl+Delete key for PSReadLine.
         Key::Delete if mods == Mods::CTRL && opts.style == KeyStyle::Unix => b"\x1bd".to_vec(),
 
         Key::Insert => tilde(2, mods),
@@ -353,13 +361,63 @@ mod tests {
 
     #[test]
     fn windows_style_sends_key_events() {
-        let win = |o: &mut EncodeOptions| o.style = KeyStyle::Windows;
+        let win = |o: &mut EncodeOptions| {
+            o.style = KeyStyle::Windows;
+            o.win32_input = true;
+        };
         assert_eq!(enc_with(Key::Backspace, Mods::CTRL, win), b"\x1b[8;14;127;1;8;1_\x1b[8;14;127;0;8;1_");
         assert_eq!(enc_with(Key::Delete, Mods::CTRL, win), b"\x1b[46;83;0;1;264;1_\x1b[46;83;0;0;264;1_");
         assert_eq!(enc_with(Key::Enter, Mods::SHIFT, win), b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_");
         assert_eq!(enc_with(Key::Char('c'), Mods::CTRL, win), b"\x1b[67;46;3;1;8;1_\x1b[67;46;3;0;8;1_");
         // Plain text stays plain.
         assert_eq!(enc_with(Key::Char('a'), Mods::NONE, win), b"a");
+    }
+
+    /// Without win32-input-mode: what conhost's VT input turns into these keys.
+    #[test]
+    fn windows_style_without_key_events() {
+        let vt = |key, mods| enc_with(key, mods, |o| o.style = KeyStyle::Windows);
+        let table: [(Key, Mods, &[u8]); 26] = [
+            (Key::Enter, Mods::NONE, b"\r"),
+            (Key::Enter, Mods::ALT, b"\x1b\r"),
+            (Key::Backspace, Mods::NONE, b"\x7f"),
+            (Key::Backspace, Mods::CTRL, b"\x08"),
+            (Key::Backspace, Mods::ALT, b"\x1b\x7f"),
+            (Key::Delete, Mods::NONE, b"\x1b[3~"),
+            (Key::Delete, Mods::CTRL, b"\x1b[3;5~"),
+            (Key::Insert, Mods::NONE, b"\x1b[2~"),
+            (Key::PageUp, Mods::NONE, b"\x1b[5~"),
+            (Key::PageDown, Mods::NONE, b"\x1b[6~"),
+            (Key::Up, Mods::NONE, b"\x1b[A"),
+            (Key::Down, Mods::NONE, b"\x1b[B"),
+            (Key::Right, Mods::NONE, b"\x1b[C"),
+            (Key::Left, Mods::NONE, b"\x1b[D"),
+            (Key::Left, Mods::CTRL, b"\x1b[1;5D"),
+            (Key::Home, Mods::NONE, b"\x1b[H"),
+            (Key::End, Mods::NONE, b"\x1b[F"),
+            (Key::Tab, Mods::NONE, b"\t"),
+            (Key::Tab, Mods::SHIFT, b"\x1b[Z"),
+            (Key::Char('c'), Mods::CTRL, b"\x03"),
+            (Key::Char('b'), Mods::ALT, b"\x1bb"),
+            (Key::Escape, Mods::NONE, b"\x1b"),
+            (Key::F(1), Mods::NONE, b"\x1bOP"),
+            (Key::F(4), Mods::NONE, b"\x1bOS"),
+            (Key::F(5), Mods::NONE, b"\x1b[15~"),
+            (Key::F(12), Mods::NONE, b"\x1b[24~"),
+        ];
+        for (key, mods, bytes) in table {
+            assert_eq!(vt(key, mods), bytes, "{key:?} {mods:?}");
+        }
+        // Nothing of win32-input-mode, whatever the key.
+        assert_eq!(vt(Key::Char('a'), Mods::NONE), b"a");
+        assert!(!vt(Key::Enter, Mods::SHIFT).ends_with(b"_"));
+    }
+
+    #[test]
+    fn unix_style_never_sends_key_events() {
+        let unix = |o: &mut EncodeOptions| o.win32_input = true;
+        assert_eq!(enc_with(Key::Enter, Mods::NONE, unix), b"\r");
+        assert_eq!(enc_with(Key::Backspace, Mods::CTRL, unix), [0x17]);
     }
 
     #[test]

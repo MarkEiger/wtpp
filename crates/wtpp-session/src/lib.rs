@@ -347,6 +347,9 @@ impl Session {
         let mode = *self.term.lock().mode();
         EncodeOptions {
             style: self.profile.key_style,
+            // Only once the console host has asked for it: until then (or if
+            // it never does) it gets VT, which all of them translate to keys.
+            win32_input: self.profile.force_win32_input || mode.contains(TermMode::WIN32_INPUT),
             app_cursor: mode.contains(TermMode::APP_CURSOR),
             kitty_disambiguate: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
             ..EncodeOptions::default()
@@ -369,6 +372,107 @@ impl Drop for Session {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod win32_input_tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn term() -> Term<VoidListener> {
+        Term::new(Config::default(), &GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 }, VoidListener)
+    }
+
+    fn asked_for(chunks: &[&[u8]]) -> bool {
+        let mut term = term();
+        let mut parser: Processor = Default::default();
+        for chunk in chunks {
+            parser.advance(&mut term, chunk);
+        }
+        term.mode().contains(TermMode::WIN32_INPUT)
+    }
+
+    #[test]
+    fn seen_in_the_output() {
+        assert!(!asked_for(&[]));
+        assert!(!asked_for(&[b"plain text \x1b[?25h\x1b[?1004h\x1b[2J"]));
+        // As conhost starts up, and in one parameter list.
+        assert!(asked_for(&[b"\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J"]));
+        assert!(asked_for(&[b"\x1b[?1004;9001h"]));
+        assert!(asked_for(&[b"text\r\n\x1b[?9001htext"]));
+    }
+
+    #[test]
+    fn honours_turning_it_off() {
+        assert!(!asked_for(&[b"\x1b[?9001h\x1b[?9001l"]));
+        assert!(asked_for(&[b"\x1b[?9001l\x1b[?9001h"]));
+    }
+
+    #[test]
+    fn split_across_reads() {
+        let bytes = b"before\x1b[?9001hafter";
+        for at in 0..=bytes.len() {
+            assert!(asked_for(&[&bytes[..at], &bytes[at..]]), "split at {at}");
+        }
+        let one_by_one: Vec<&[u8]> = bytes.chunks(1).collect();
+        assert!(asked_for(&one_by_one));
+        // Nor is it fooled by parts of it, or other modes.
+        assert!(!asked_for(&[b"\x1b[?900", b"1"]));
+        assert!(!asked_for(&[b"\x1b[9001h", b"?9001h", b"\x1b[?90011h"]));
+    }
+
+    /// It's the console host's request, not the program's state.
+    #[test]
+    fn survives_a_terminal_reset() {
+        assert!(asked_for(&[b"\x1b[?9001h\x1bc"]));
+    }
+
+    /// The real console host of the machine running the tests: on Windows 11
+    /// it asks (and everything that worked there depends on it), and the bytes
+    /// for when it doesn't do what they should.
+    #[cfg(windows)]
+    #[test]
+    fn real_console_host() {
+        use std::time::{Duration, Instant};
+        let size = GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
+        let session = Session::spawn(&Profile::new("cmd", "cmd.exe", &["/q", "/d"]), size, |_| {}).unwrap();
+        let screen = |session: &Session| {
+            let term = session.term().lock();
+            let grid = term.grid();
+            let lines = (0..24).map(|l| {
+                (0..80)
+                    .map(|c| grid[alacritty_terminal::index::Line(l)][alacritty_terminal::index::Column(c)].c)
+                    .collect::<String>()
+            });
+            lines.collect::<Vec<_>>().join("\n")
+        };
+        let wait_for = |what: &dyn Fn() -> bool| {
+            let start = Instant::now();
+            while !what() && start.elapsed() < Duration::from_secs(15) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            what()
+        };
+        let asked = wait_for(&|| session.encode_options().win32_input);
+        println!("console host asked for win32-input-mode: {asked}");
+        if profiles::windows_build().is_some_and(|b| b >= 26100) {
+            assert!(asked);
+        }
+
+        // Backspace, Ctrl+Backspace, Left, Delete, Home, End, Enter as VT.
+        session.write(&b"echo wtpp-oneX\x7f two\x08three\x1b[D\x1b[3~e\x1b[H\x1b[Fz\r"[..]);
+        let shown = wait_for(&|| screen(&session).lines().any(|l| l.trim_end() == "wtpp-one threez"));
+        assert!(shown, "{}", screen(&session));
+
+        // The same keys as they're really sent here, key events or not.
+        let key = |key| wtpp_input::encode(key, wtpp_input::Mods::NONE, &session.encode_options()).unwrap();
+        session.write(&b"echo wtpp-encodedX"[..]);
+        session.write(key(wtpp_input::Key::Backspace));
+        session.write(key(wtpp_input::Key::Enter));
+        let shown = wait_for(&|| screen(&session).lines().any(|l| l.trim_end() == "wtpp-encoded"));
+        assert!(shown, "{}", screen(&session));
     }
 }
 

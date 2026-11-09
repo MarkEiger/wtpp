@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Windows 10: Enter, Backspace, arrows, Tab and Ctrl+C did nothing in Command
+  Prompt and PowerShell, because the console that comes with Windows 10 ignores
+  the key events wt++ sent it. wt++ now sends those only to a console that asks
+  for them (Windows 11 does, and works as before), and otherwise the keys'
+  ordinary sequences. There, Ctrl+Backspace and Ctrl+Delete delete a word, and
+  Shift+Enter acts as Alt+Enter, which adds a line in Claude Code.
+- A WSL profile's starting directory is used; the Linux home won out over it.
 - Windows: on some Windows 10 / WSL1 setups, WSL's usage text or an error
   message turned into one junk profile per line. wt++ now reads the list of
   distros from the registry, like Windows Terminal, and only accepts
@@ -20,6 +27,7 @@
 - With no profile left to show (an empty list, or all hidden), wt++ opens the
   system's shell instead of closing, and also if the default profile's command
   can't be started.
+- A hung `wsl.exe` no longer stays behind when wt++ closes during a refresh.
 - WSL profiles on Windows 10's built-in WSL opened with only
   `[process exited with code -1]`. They now start with `wsl.exe ~ -d <distro>`
   instead of `--cd ~` (just `-d <distro>` before version 1903). Profiles wt++

@@ -247,7 +247,7 @@ fn load_settings() -> wtpp_config::Settings {
 /// file that doesn't parse is never written to: it may only need a typo
 /// fixed, so the shells then only last as long as this run. `requester` is
 /// the window whose Refresh button asked for this.
-fn apply_shells(discovery: &Discovery, requester: Option<WindowId>) {
+fn apply_discovery(discovery: &Discovery, requester: Option<WindowId>) {
     use wtpp_config::settings::join_commandline;
     let found: Vec<DiscoveredProfile> = discovery
         .profiles
@@ -258,14 +258,17 @@ fn apply_shells(discovery: &Discovery, requester: Option<WindowId>) {
             icon: p.icon.clone(),
         })
         .collect();
-    let wsl_known = discovery.wsl_known;
+    apply_shells(&found, discovery.wsl_known, requester);
+}
+
+fn apply_shells(found: &[DiscoveredProfile], wsl_known: bool, requester: Option<WindowId>) {
     let path = wtpp_config::settings::settings_path();
     let (loaded, error) = wtpp_config::Settings::load(&path);
     // If it broke after startup, the windows still have the last good settings.
     let running = || window_ids().first().and_then(|&id| entry(id)).and_then(|e| e.app.try_borrow().ok().map(|a| a.settings.clone()));
     let mut settings = if error.is_some() { running().unwrap_or(loaded) } else { loaded };
     let before = settings.clone();
-    let mut report = settings.refresh_discovered(&found, wsl_known);
+    let mut report = settings.refresh_discovered(found, wsl_known);
     settings.profiles_discovered = true;
     log::info!("shells: added {:?}, removed {:?}, WSL known: {wsl_known}", report.added, report.removed);
     let not_saved = match error {
@@ -284,15 +287,25 @@ fn apply_shells(discovery: &Discovery, requester: Option<WindowId>) {
             format!("Couldn't save {}, so this lasts until wt++ closes: {e}", path.display())
         }),
     };
-    UNSAVED_SHELLS.with(|shells| *shells.borrow_mut() = not_saved.is_some().then(|| (found.clone(), wsl_known)));
+    UNSAVED_SHELLS.with(|shells| *shells.borrow_mut() = not_saved.is_some().then(|| (found.to_vec(), wsl_known)));
     for id in window_ids() {
         with_window(id, |app| {
-            let draft = app.on_shells_changed(settings.clone(), &found, wsl_known);
+            let draft = app.on_shells_changed(settings.clone(), found, wsl_known);
             if requester == Some(id) {
                 report.merge(draft.unwrap_or_default());
                 app.settings_shells_refreshed(&report, not_saved.as_deref());
             }
         });
+    }
+}
+
+/// settings.json changed. If it had kept the shells out, and now loads but
+/// hasn't had them (fixed by hand, from before the flag), this is its one run.
+fn merge_unsaved_shells() {
+    let Some((found, wsl_known)) = UNSAVED_SHELLS.with(|shells| shells.borrow().clone()) else { return };
+    let (settings, error) = wtpp_config::Settings::load(&wtpp_config::settings::settings_path());
+    if error.is_none() && !settings.profiles_discovered {
+        apply_shells(&found, wsl_known, None);
     }
 }
 
@@ -320,7 +333,7 @@ fn refresh_shells(requester: WindowId) {
         let discovery = wtpp_session::profiles::discover();
         slint::invoke_from_event_loop(move || {
             show_shell_refresh(false);
-            apply_shells(&discovery, Some(requester));
+            apply_discovery(&discovery, Some(requester));
         })
         .ok();
     });
@@ -431,6 +444,7 @@ fn watch_settings(path: &std::path::Path) -> Option<notify::RecommendedWatcher> 
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 pending.store(false, std::sync::atomic::Ordering::Release);
                 slint::invoke_from_event_loop(|| {
+                    merge_unsaved_shells();
                     for_each_window(|app| app.on_settings_file_changed());
                 })
                 .ok();
@@ -729,7 +743,7 @@ fn on_assets_loaded(fonts: wtpp_render::FontSystem, discovery: Option<Discovery>
         // Another wt++ (a handoff's) may have got there first.
         let (current, error) = wtpp_config::Settings::load(&wtpp_config::settings::settings_path());
         if error.is_some() || !current.profiles_discovered {
-            apply_shells(&discovery, None);
+            apply_discovery(&discovery, None);
         }
     }
     for id in window_ids() {

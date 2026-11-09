@@ -17,6 +17,9 @@ pub struct Profile {
     pub cwd: Option<PathBuf>,
     pub env: HashMap<String, String>,
     pub key_style: KeyStyle,
+    /// Send key events (win32-input-mode) without waiting for the console
+    /// host to ask for them: the user said so, or it's known to take them.
+    pub force_win32_input: bool,
     /// Scrollback lines.
     pub history: usize,
     /// Cursor shape until the running app asks for a different one.
@@ -33,6 +36,7 @@ impl Profile {
         Profile {
             name: name.into(),
             key_style: key_style_for(&program),
+            force_win32_input: false,
             program,
             args: args.iter().map(|s| s.to_string()).collect(),
             cwd: None,
@@ -167,6 +171,9 @@ fn wsl_args(distro: &str, windows_build: Option<u32>) -> Vec<String> {
 fn output_with_timeout(mut command: Command, timeout: Duration) -> std::io::Result<Option<(Vec<u8>, bool)>> {
     use std::io::Read;
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    // The timeout below is a thread's: it dies with wt++, this doesn't.
+    #[cfg(windows)]
+    let _job = windows::KillWithUs::new(&child);
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -227,6 +234,9 @@ fn unix_profiles(
     profiles
 }
 
+#[cfg(all(windows, test))]
+pub(crate) use windows::windows_build;
+
 #[cfg(windows)]
 mod windows {
     use super::{Discovery, Profile, RegisteredDistro};
@@ -234,6 +244,11 @@ mod windows {
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::Duration;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
     use windows_sys::Win32::System::Registry::{
         HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegCloseKey,
         RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
@@ -241,6 +256,48 @@ mod windows {
 
     const LXSS_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
     const WSL_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// A job object that takes its processes with it when closed, which
+    /// wt++ exiting does too. Without one, things only stay as they were.
+    pub struct KillWithUs(HANDLE);
+
+    impl KillWithUs {
+        pub fn new(child: &std::process::Child) -> Option<KillWithUs> {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: no name or attributes; the handle is closed in drop.
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                log::warn!("couldn't create a job object: {}", std::io::Error::last_os_error());
+                return None;
+            }
+            let job = KillWithUs(job);
+            // SAFETY: all-zero is valid for this plain struct.
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `limits` is of the class's type and size; both handles are open.
+            let assigned = unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const c_void,
+                    size_of_val(&limits) as u32,
+                ) != 0
+                    && AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) != 0
+            };
+            if !assigned {
+                log::warn!("couldn't put a process in a job object: {}", std::io::Error::last_os_error());
+                return None;
+            }
+            Some(job)
+        }
+    }
+
+    impl Drop for KillWithUs {
+        fn drop(&mut self) {
+            // SAFETY: opened in new, closed once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
 
     pub fn discover() -> Discovery {
         let mut profiles = Vec::new();
@@ -349,7 +406,7 @@ mod windows {
 
     /// Windows' build number. From the registry: unlike GetVersionEx, it
     /// doesn't depend on the application manifest.
-    fn windows_build() -> Option<u32> {
+    pub fn windows_build() -> Option<u32> {
         let key = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
         let build = reg_string(HKEY_LOCAL_MACHINE, key, "CurrentBuildNumber")?.trim().parse().ok();
         log::info!("Windows build {build:?}");
@@ -646,6 +703,20 @@ mod tests {
         assert!(discovery.profiles.iter().any(|p| p.name == "Command Prompt"));
         for p in discovery.profiles.iter().filter(|p| p.program == "wsl.exe") {
             assert_eq!(p.args[p.args.len() - 2..], ["-d".to_string(), p.name.clone()]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn job_takes_the_process_along() {
+        let mut child = shell("ping -n 60 127.0.0.1 > nul").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let job = windows::KillWithUs::new(&child).expect("a job");
+        assert!(child.try_wait().unwrap().is_none());
+        drop(job);
+        let started = Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(started.elapsed() < Duration::from_secs(5), "still running");
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

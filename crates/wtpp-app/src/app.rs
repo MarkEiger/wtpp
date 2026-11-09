@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use slint::wgpu_30::wgpu;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use wtpp_config::settings::{expand_env, split_commandline};
+use wtpp_config::settings::{commandline_for_start, expand_env, split_commandline};
 use wtpp_config::{Action, BellStyle, CloseOnExit, CursorShape, KeyEncoding, Keymap, ResolvedProfile, Settings};
 use wtpp_input::{Key, KeyStyle, Mods};
 use wtpp_render::{Frame, Highlight, HighlightKind, Renderer, SharedFonts, Theme};
@@ -334,8 +334,6 @@ impl App {
         };
         if let Some(dir) = args.starting_directory {
             profile.starting_directory = Some(dir.to_string_lossy().into_owned());
-            // WSL profiles open in the Linux home unless told otherwise.
-            profile.commandline = wtpp_config::settings::without_wsl_home(&profile.commandline);
         }
         if let Some(commandline) = args.commandline {
             profile.commandline = commandline;
@@ -559,7 +557,8 @@ impl App {
 
     /// Everything the session needs to start a profile's shell.
     fn session_profile(&self, p: &ResolvedProfile) -> wtpp_session::Profile {
-        let (program, args) = split_commandline(&expand_env(&p.commandline));
+        let commandline = commandline_for_start(&p.commandline, p.starting_directory.as_deref());
+        let (program, args) = split_commandline(&expand_env(&commandline));
         let mut profile = wtpp_session::Profile::new(&p.name, &program, &[]);
         profile.args = args;
         profile.cwd = Some(match &p.starting_directory {
@@ -571,6 +570,8 @@ impl App {
             KeyEncoding::Unix => KeyStyle::Unix,
             KeyEncoding::Windows => KeyStyle::Windows,
         };
+        // A handoff's console host is WT's OpenConsole, which takes them.
+        profile.force_win32_input = p.key_encoding == KeyEncoding::Windows;
         profile.history = p.history_size as usize;
         profile.cursor_shape = match p.cursor_shape {
             CursorShape::Bar => TermCursor::Beam,
@@ -1303,7 +1304,7 @@ impl App {
         // by deleting up to the next word on the line we can see.
         if key == Some((Key::Delete, Mods::CTRL)) && pane.emulate_kill_word {
             let n = chars_to_next_word(&cursor_line(&pane.session));
-            let delete = wtpp_input::encode_win32(Key::Delete, Mods::NONE).unwrap_or_default();
+            let delete = wtpp_input::encode(Key::Delete, Mods::NONE, &pane.session.encode_options()).unwrap_or_default();
             pane.session.write(delete.repeat(n));
             return true;
         }
@@ -1314,7 +1315,7 @@ impl App {
             && pane.session.profile().key_style == KeyStyle::Windows
             && pane.session.pid().is_some_and(|pid| crate::platform::runs_under(pid, "claude.exe"))
         {
-            let alt_enter = wtpp_input::encode_win32(Key::Enter, Mods::ALT).unwrap_or_default();
+            let alt_enter = wtpp_input::encode(Key::Enter, Mods::ALT, &pane.session.encode_options()).unwrap_or_default();
             pane.session.term().lock().selection = None;
             pane.session.write(alt_enter);
             return true;
