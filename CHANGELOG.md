@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 — 2026-11-09
 
 - Windows 10: Enter, Backspace, arrows, Tab and Ctrl+C did nothing in Command
   Prompt and PowerShell, because the console that comes with Windows 10 ignores
