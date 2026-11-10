@@ -231,6 +231,7 @@ impl App {
         data.set_focus_follow_mouse(s.focus_follow_mouse);
         data.set_inherit_cwd(s.inherit_working_directory);
         data.set_allow_osc52(s.allow_osc52);
+        data.set_reload_env(s.reload_environment_variables);
         data.set_remember_bounds(s.remember_window_bounds);
         data.set_large_paste_warning(s.large_paste_warning);
         data.set_tabs_in_titlebar(s.show_tabs_in_titlebar);
@@ -388,6 +389,7 @@ impl App {
                 "focusFollowMouse" => s.focus_follow_mouse = flag,
                 "inheritWorkingDirectory" => s.inherit_working_directory = flag,
                 "allowOSC52" => s.allow_osc52 = flag,
+                "reloadEnvironmentVariables" => s.reload_environment_variables = flag,
                 "rememberWindowBounds" => s.remember_window_bounds = flag,
                 "largePasteWarning" => s.large_paste_warning = flag,
                 "showTabsInTitlebar" => s.show_tabs_in_titlebar = flag,

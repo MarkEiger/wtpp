@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Windows: new tabs and panes get the environment as it's set now. After you
+  change PATH or another variable (in System Properties, or an installer
+  does), new shells have it without restarting wt++, like in Windows Terminal
+  (same setting: `compatibility.reloadEnvironmentVariables`, Settings →
+  Interaction). Variables only wt++ was started with (by a launcher) are kept;
+  PATH is the one Windows has, so to keep a developer prompt's PATH, start
+  wt++ from it with the setting off. A program in a profile's command line is
+  found in the new PATH too. Consoles handed to wt++ as the default terminal
+  keep their own environment.
+- A program that keeps adding keyboard modes without removing them no longer
+  crashes the pane after 4096 of them.
+
 ## 1.2.1 — 2026-11-10
 
 - Splitting a pane or duplicating a tab opens the new one in the directory

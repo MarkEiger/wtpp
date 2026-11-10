@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use slint::wgpu_30::wgpu;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use wtpp_config::settings::{commandline_for_start, expand_env, is_wsl_linux_dir, split_commandline};
+use wtpp_config::settings::{commandline_for_start, expand_env, expand_env_with, is_wsl_linux_dir, split_commandline};
 use wtpp_config::{Action, BellStyle, CloseOnExit, CursorShape, KeyEncoding, Keymap, ResolvedProfile, Settings};
 use wtpp_input::{Key, KeyStyle, Mods};
 use wtpp_render::{Frame, Highlight, HighlightKind, Renderer, SharedFonts, Theme};
@@ -588,6 +588,15 @@ impl App {
 
     /// Everything the session needs to start a profile's shell.
     fn session_profile(&self, p: &ResolvedProfile) -> wtpp_session::Profile {
+        // Windows: the environment as it's set now, not as wt++ got it.
+        let base_env = (cfg!(windows) && self.settings.reload_environment_variables)
+            .then(wtpp_session::env::pane_environment)
+            .flatten();
+        let var = |name: &str| match &base_env {
+            Some(vars) => vars.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone()),
+            None => std::env::var(name).ok(),
+        };
+        let expand_env = |s: &str| expand_env_with(s, var);
         let commandline = commandline_for_start(&p.commandline, p.starting_directory.as_deref());
         let (program, args) = split_commandline(&expand_env(&commandline));
         let mut profile = wtpp_session::Profile::new(&p.name, &program, &[]);
@@ -624,12 +633,13 @@ impl App {
                 profile.args = args;
             } else if wtpp_config::settings::is_wsl_program(&program) {
                 let get = |name: &str| profile.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
-                let wslenv = get("WSLENV").or_else(|| std::env::var("WSLENV").ok());
+                let wslenv = get("WSLENV").or_else(|| var("WSLENV"));
                 let env = wtpp_config::cwd::wsl_prompt_env(get("PROMPT_COMMAND").is_some(), wslenv.as_deref());
                 profile.env.retain(|k, _| !k.eq_ignore_ascii_case("WSLENV"));
                 profile.env.extend(env);
             }
         }
+        profile.base_env = base_env;
         profile
     }
 

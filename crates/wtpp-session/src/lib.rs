@@ -5,6 +5,7 @@
 //! renders, and receives [`SessionEvent`]s through the callback it supplied.
 
 pub mod cwd;
+pub mod env;
 pub mod profiles;
 
 use std::borrow::Cow;
@@ -241,15 +242,41 @@ impl Session {
     ) -> anyhow::Result<Session> {
         let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
 
-        let mut env = profile.env.clone();
-        env.entry("TERM".into()).or_insert_with(|| "xterm-256color".into());
-        env.entry("COLORTERM".into()).or_insert_with(|| "truecolor".into());
+        // The profile's own variables over the base, if there is one.
+        let mut env: std::collections::HashMap<String, String> = match &profile.base_env {
+            Some(base) => {
+                let ours = |k: &str| profile.env.keys().any(|o| o.eq_ignore_ascii_case(k));
+                base.iter().filter(|(k, _)| !ours(k)).cloned().chain(profile.env.clone()).collect()
+            }
+            None => profile.env.clone(),
+        };
+        let has = |env: &std::collections::HashMap<String, String>, k: &str| env.keys().any(|e| e.eq_ignore_ascii_case(k));
+        if !has(&env, "TERM") {
+            env.insert("TERM".into(), "xterm-256color".into());
+        }
+        if !has(&env, "COLORTERM") {
+            env.insert("COLORTERM".into(), "truecolor".into());
+        }
+        env.retain(|k, _| !k.eq_ignore_ascii_case("TERM_PROGRAM"));
         env.insert("TERM_PROGRAM".into(), "wtpp".into());
+        // CreateProcess looks the program up in wt++'s PATH, which may be out
+        // of date: look it up in the new pane's.
+        #[cfg(windows)]
+        let program = match env.iter().find(|(k, _)| k.eq_ignore_ascii_case("PATH")) {
+            Some((_, path)) if profile.base_env.is_some() => {
+                profiles::find_program(&profile.program, path).unwrap_or_else(|| profile.program.clone())
+            }
+            _ => profile.program.clone(),
+        };
+        #[cfg(not(windows))]
+        let program = profile.program.clone();
 
         let options = tty::Options {
-            shell: Some(tty::Shell::new(profile.program.clone(), profile.args.clone())),
+            shell: Some(tty::Shell::new(program, profile.args.clone())),
             working_directory: profile.cwd.clone(),
             drain_on_exit: true,
+            #[cfg(windows)]
+            inherit_env: profile.base_env.is_none(),
             env,
             #[cfg(windows)]
             escape_args: true,
@@ -474,6 +501,24 @@ mod win32_input_tests {
         // Nor is it fooled by parts of it, or other modes.
         assert!(!asked_for(&[b"\x1b[?900", b"1"]));
         assert!(!asked_for(&[b"\x1b[9001h", b"\x1b[?90011h"]));
+    }
+
+    /// Programs that push keyboard modes and never pop them (or die first)
+    /// fill the stack: the oldest go, nothing breaks.
+    #[test]
+    fn keyboard_mode_stack_overflow() {
+        let mut term = Term::new(
+            Config { kitty_keyboard: true, ..Config::default() },
+            &GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 },
+            VoidListener,
+        );
+        let mut parser: Processor = Default::default();
+        for _ in 0..5000 {
+            parser.advance(&mut term, b"\x1b[>1u");
+        }
+        assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+        parser.advance(&mut term, b"\x1b[<10000u");
+        assert!(!term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
     }
 
     /// It's the console host's request, not the program's state: a reset

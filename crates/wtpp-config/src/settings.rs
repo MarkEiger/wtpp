@@ -496,6 +496,10 @@ pub struct Settings {
     /// Let apps set the clipboard with OSC 52.
     #[serde(rename = "compatibility.allowOSC52")]
     pub allow_osc52: bool,
+    /// Windows: new shells get the environment as it's set now (in System
+    /// Properties, or by an installer), not as it was when wt++ started.
+    #[serde(rename = "compatibility.reloadEnvironmentVariables")]
+    pub reload_environment_variables: bool,
     /// "x,y" in screen pixels; empty means let the system decide.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_position: Option<String>,
@@ -545,6 +549,7 @@ impl Default for Settings {
             confirm_close_all_tabs: true,
             focus_follow_mouse: false,
             allow_osc52: true,
+            reload_environment_variables: true,
             initial_position: None,
             remember_window_bounds: true,
             profiles_discovered: false,
@@ -1056,6 +1061,11 @@ pub fn join_commandline(program: &str, args: &[String]) -> String {
 /// Expand Windows-style `%VAR%` references (and a leading `~` to the home
 /// directory), as WT does for command lines and starting directories.
 pub fn expand_env(s: &str) -> String {
+    expand_env_with(s, |name| std::env::var(name).ok())
+}
+
+/// [`expand_env`] with the variables from `var`.
+pub fn expand_env_with(s: &str, var: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(start) = rest.find('%') {
@@ -1064,9 +1074,9 @@ pub fn expand_env(s: &str) -> String {
         match after.find('%') {
             Some(end) if end > 0 => {
                 let name = &after[..end];
-                match std::env::var(name) {
-                    Ok(v) => out.push_str(&v),
-                    Err(_) => out.push_str(&rest[start..start + end + 2]),
+                match var(name) {
+                    Some(v) => out.push_str(&v),
+                    None => out.push_str(&rest[start..start + end + 2]),
                 }
                 rest = &after[end + 1..];
             }
@@ -1079,9 +1089,9 @@ pub fn expand_env(s: &str) -> String {
     out.push_str(rest);
     if let Some(tail) = out.strip_prefix('~')
         && (tail.is_empty() || tail.starts_with(['/', '\\']))
-        && let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        && let Some(home) = var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
     {
-        return format!("{}{tail}", home.to_string_lossy());
+        return format!("{home}{tail}");
     }
     out
 }
@@ -1581,6 +1591,18 @@ mod tests {
         s.default_profile = Some("bash".into());
         s.profiles.list[0].hidden = Some(true);
         assert_eq!(s.visible_profiles()[s.default_profile_index()].name, "zsh");
+    }
+
+    #[test]
+    fn reload_environment_setting() {
+        assert!(Settings::parse("{}").unwrap().reload_environment_variables);
+        // Windows Terminal's name, so an imported or shared file means the same.
+        let off = Settings::parse(r#"{ "compatibility.reloadEnvironmentVariables": false }"#).unwrap();
+        assert!(!off.reload_environment_variables);
+        assert_eq!(Settings::parse(&off.to_json()).unwrap(), off);
+        assert!(!off.extra.contains_key("compatibility.reloadEnvironmentVariables"));
+        let vars = |name: &str| (name == "P").then(|| "fresh".to_string());
+        assert_eq!(expand_env_with("%P%;x;%NOPE%", vars), "fresh;x;%NOPE%");
     }
 
     #[test]

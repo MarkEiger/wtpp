@@ -16,6 +16,9 @@ pub struct Profile {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: HashMap<String, String>,
+    /// The environment to start from instead of wt++'s own (see
+    /// [`crate::env::pane_environment`]); `env` still goes over it.
+    pub base_env: Option<crate::env::Vars>,
     pub key_style: KeyStyle,
     /// Send key events (win32-input-mode) without waiting for the console
     /// host to ask for them: the user said so, or it's known to take them.
@@ -41,6 +44,7 @@ impl Profile {
             args: args.iter().map(|s| s.to_string()).collect(),
             cwd: None,
             env: HashMap::new(),
+            base_env: None,
             history: 9001,
             cursor_shape: CursorShape::Beam,
             word_delimiters: ",│`|:\"' ()[]{}<>\t".into(),
@@ -195,6 +199,23 @@ fn output_with_timeout(mut command: Command, timeout: Duration) -> std::io::Resu
     };
     let drained = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(250));
     Ok(receiver.recv_timeout(drained).ok().map(|bytes| (bytes, status.success())))
+}
+
+/// Where CreateProcess would find `program` if this were its PATH: System32,
+/// Windows, then `path`'s directories, adding `.exe` if it has no extension.
+/// Quoted if it has a space, for the command line. `None` if it has a
+/// directory already, or isn't found.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn find_program(program: &str, path: &str) -> Option<String> {
+    if program.contains(['\\', '/', ':']) || program.starts_with('"') {
+        return None;
+    }
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let dirs = [format!(r"{root}\System32"), root].into_iter().chain(path.split(';').map(|d| d.trim().trim_matches('"').to_string()));
+    let file = if Path::new(program).extension().is_some() { program.to_string() } else { format!("{program}.exe") };
+    let found = dirs.filter(|d| !d.is_empty()).map(|d| Path::new(&d).join(&file)).find(|c| c.is_file())?;
+    let found = found.to_string_lossy().into_owned();
+    Some(if found.contains(' ') { format!("\"{found}\"") } else { found })
 }
 
 /// Profiles from `$SHELL` and `/etc/shells`, deduplicated by shell name
@@ -704,6 +725,29 @@ mod tests {
         for p in discovery.profiles.iter().filter(|p| p.program == "wsl.exe") {
             assert_eq!(p.args[p.args.len() - 2..], ["-d".to_string(), p.name.clone()]);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn programs_found_in_a_given_path() {
+        let root = std::env::var("SystemRoot").unwrap();
+        let found = |p: &str, path: &str| find_program(p, path).map(|f| f.to_lowercase());
+        assert_eq!(found("cmd", ""), Some(format!(r"{root}\System32\cmd.exe").to_lowercase()));
+        assert_eq!(found("cmd.exe", r"C:\nowhere"), Some(format!(r"{root}\System32\cmd.exe").to_lowercase()));
+        let ps = format!(r"{root}\System32\WindowsPowerShell\v1.0");
+        assert_eq!(found("powershell", &format!(r"C:\nowhere;;{ps}")), Some(format!(r"{ps}\powershell.exe").to_lowercase()));
+        // Only what that PATH has, and nothing with a directory of its own.
+        assert_eq!(found("powershell", ""), None);
+        assert_eq!(found("wtpp-no-such-program", &ps), None);
+        assert_eq!(found(r"C:\x\y.exe", &ps), None);
+        assert_eq!(found("./y", &ps), None);
+        // A space: quoted for the command line.
+        let dir = std::env::temp_dir().join(format!("wtpp find {}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tool.exe"), b"").unwrap();
+        let got = find_program("tool", &dir.to_string_lossy()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(got.starts_with('"') && got.ends_with(r#"tool.exe""#), "{got}");
     }
 
     #[cfg(windows)]

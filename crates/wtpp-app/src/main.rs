@@ -520,6 +520,9 @@ fn wire_settings(ui: &MainWindow, id: WindowId) {
 
 fn main() -> anyhow::Result<()> {
     init_logging();
+    // What the registry's environment was, to tell later what was deleted.
+    #[cfg(windows)]
+    wtpp_session::env::remember_startup_environment();
     wsl::ensure_gpu_env();
 
     let started = std::time::Instant::now();

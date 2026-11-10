@@ -44,6 +44,7 @@ export global SettingsData {
     in-out property <bool> focus-follow-mouse;
     in-out property <bool> inherit-cwd;
     in-out property <bool> allow-osc52;
+    in-out property <bool> reload-env;
     in-out property <bool> remember-bounds;
     in-out property <bool> large-paste-warning;
 
@@ -367,6 +368,17 @@ component InteractionPage inherits VerticalLayout {
             checked <=> SettingsData.allow-osc52;
             toggled => {
                 SettingsData.set-value("allowOSC52", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    if SettingsData.is-windows: Card {
+        title: "New shells get the current environment";
+        description: "After you change PATH or another variable (in System Properties, or an installer does), new tabs and panes have it without restarting wt++. Off: they get wt++'s environment from when it started.";
+        Switch {
+            checked <=> SettingsData.reload-env;
+            toggled => {
+                SettingsData.set-value("reloadEnvironmentVariables", self.checked ? "true" : "false");
             }
         }
     }

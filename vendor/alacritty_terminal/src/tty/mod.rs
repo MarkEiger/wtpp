@@ -35,6 +35,10 @@ pub struct Options {
     /// Extra environment variables.
     pub env: HashMap<String, String>,
 
+    /// wtpp: `env` is the whole environment, not added to wt++'s own.
+    #[cfg(target_os = "windows")]
+    pub inherit_env: bool,
+
     /// Specifies whether the Windows shell arguments should be escaped.
     ///
     /// - When `true`: Arguments will be escaped according to the standard C runtime rules.

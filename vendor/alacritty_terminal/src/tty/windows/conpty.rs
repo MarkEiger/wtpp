@@ -205,7 +205,7 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     let cmdline = win32_string(&cmdline(config));
     let cwd = config.working_directory.as_ref().map(win32_string);
     let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
-    let custom_env_block = convert_custom_env(&config.env);
+    let custom_env_block = convert_custom_env(&config.env, config.inherit_env);
     let custom_env_block_pointer = match &custom_env_block {
         Some(custom_env_block) => {
             creation_flags |= CREATE_UNICODE_ENVIRONMENT;
@@ -247,15 +247,18 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
 // deduplicating environment variables, so do that here while converting.
 //
 // https://learn.microsoft.com/en-us/previous-versions/troubleshoot/windows/win32/createprocess-cannot-eliminate-duplicate-variables#environment-variables
-fn convert_custom_env(custom_env: &HashMap<String, String>) -> Option<Vec<u16>> {
+fn convert_custom_env(custom_env: &HashMap<String, String>, inherit: bool) -> Option<Vec<u16>> {
     // Windows inherits parent's env when no `lpEnvironment` parameter is specified.
-    if custom_env.is_empty() {
+    if custom_env.is_empty() && inherit {
         return None;
     }
 
     let mut converted_block = Vec::new();
     let mut all_env_keys = HashSet::new();
-    for (custom_key, custom_value) in custom_env {
+    // wtpp: sorted, as Windows likes an environment block.
+    let mut custom: Vec<_> = custom_env.iter().collect();
+    custom.sort_by_key(|(k, _)| k.to_uppercase());
+    for (custom_key, custom_value) in custom {
         let custom_key_os = OsStr::new(custom_key);
         if all_env_keys.insert(custom_key_os.to_ascii_uppercase()) {
             add_windows_env_key_value_to_block(
@@ -272,7 +275,7 @@ fn convert_custom_env(custom_env: &HashMap<String, String>) -> Option<Vec<u16>> 
     }
 
     // Pull the current process environment after, to avoid overwriting the user provided one.
-    for (inherited_key, inherited_value) in std::env::vars_os() {
+    for (inherited_key, inherited_value) in std::env::vars_os().filter(|_| inherit) {
         if all_env_keys.insert(inherited_key.to_ascii_uppercase()) {
             add_windows_env_key_value_to_block(
                 &mut converted_block,

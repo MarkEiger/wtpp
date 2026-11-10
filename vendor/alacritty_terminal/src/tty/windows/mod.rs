@@ -229,6 +229,7 @@ mod test {
             working_directory: None,
             drain_on_exit: true,
             env: Default::default(),
+            inherit_env: true,
             escape_args: false,
         };
         assert_eq!(cmdline(&options), "echo hello world");

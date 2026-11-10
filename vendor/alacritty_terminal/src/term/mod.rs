@@ -1303,8 +1303,9 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Pushing `{mode:?}` keyboard mode into the stack");
 
+        // wtpp fix: dropped the oldest title instead (and panicked without one).
         if self.keyboard_mode_stack.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH {
-            let removed = self.title_stack.remove(0);
+            let removed = self.keyboard_mode_stack.remove(0);
             trace!(
                 "Removing '{removed:?}' from bottom of keyboard mode stack that exceeds its \
                  maximum depth"

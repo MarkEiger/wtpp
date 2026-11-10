@@ -64,6 +64,16 @@ precmd() { printf '\e]9;9;%s\e\\' "$PWD" }
 Settings → Interaction → **New panes start in the current directory** turns
 all of this off.
 
+## Environment variables (Windows)
+
+New tabs and panes get the environment Windows has now, as Windows Terminal
+does, so a PATH you changed (or an installer did) is there without restarting
+wt++. Variables that only wt++'s own process has (set by whatever started it)
+are kept, but PATH and the other variables Windows defines are taken from
+Windows. To give shells the environment wt++ was started with instead, e.g. a
+developer prompt's, turn off Settings → Interaction → **New shells get the
+current environment** (`"compatibility.reloadEnvironmentVariables": false`).
+
 ## Default terminal
 
 Settings → Startup → **Make wt++ the default**:
