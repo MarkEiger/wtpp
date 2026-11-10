@@ -13,6 +13,13 @@
   keep their own environment.
 - A program that keeps adding keyboard modes without removing them no longer
   crashes the pane after 4096 of them.
+- A new pane opens in the directory you're in also when its name has a `%`
+  or starts with `~` (it was expanded like a setting). Split from a directory
+  that's been deleted, it opens where its profile starts, not in the directory
+  the pane before it started in.
+- Linux: settings.json no longer reloads several times a second for as long
+  as wt++ runs (each read of it counted as a change), and an error in it is
+  logged once per change.
 
 ## 1.2.1 — 2026-11-10
 

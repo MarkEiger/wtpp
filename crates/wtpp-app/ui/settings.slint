@@ -352,7 +352,7 @@ component InteractionPage inherits VerticalLayout {
 
     Card {
         title: "New panes start in the current directory";
-        description: "Splitting a pane or duplicating a tab opens it where you are. wt++ has PowerShell and WSL's bash tell it where that is; applies to shells started after the change.";
+        description: "Splitting a pane or duplicating a tab opens it in the directory you're in.";
         Switch {
             checked <=> SettingsData.inherit-cwd;
             toggled => {

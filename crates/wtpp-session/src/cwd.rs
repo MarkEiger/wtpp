@@ -158,11 +158,12 @@ fn local_hostname() -> Option<String> {
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
-        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+        // A directory that's been removed reads as "<path> (deleted)".
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok().filter(|dir| dir.is_dir())
     }
     #[cfg(target_os = "macos")]
     {
-        macos::process_cwd(pid)
+        macos::process_cwd(pid).filter(|dir| dir.is_dir())
     }
     #[cfg(all(windows, target_pointer_width = "64"))]
     {
@@ -376,6 +377,24 @@ mod tests {
     #[test]
     fn own_process_cwd() {
         assert_eq!(process_cwd(std::process::id()), std::env::current_dir().ok());
+    }
+
+    /// A shell whose directory was removed (/proc says "<dir> (deleted)") has none.
+    #[cfg(unix)]
+    #[test]
+    fn removed_directory_is_no_directory() {
+        let dir = std::env::temp_dir().join(format!("wtpp-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut child = std::process::Command::new("sleep").arg("30").current_dir(&dir).spawn().unwrap();
+        let before = process_cwd(child.id());
+        std::fs::remove_dir(&dir).unwrap();
+        let after = process_cwd(child.id());
+        child.kill().ok();
+        child.wait().ok();
+        if cfg!(target_os = "linux") {
+            assert_eq!(before, Some(dir.clone()));
+        }
+        assert_eq!(after, None);
     }
 
     /// cmd's `cd` is the process's; PowerShell's `Set-Location` isn't.

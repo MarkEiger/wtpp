@@ -40,6 +40,9 @@ pub(crate) struct Gpu {
 pub(crate) struct Pane {
     session: Session,
     pub(crate) profile: ResolvedProfile,
+    /// A directory it was started in instead of the profile's (another
+    /// pane's current one, or `-d`'s); a restart starts there again.
+    started_in: Option<PathBuf>,
     theme: Theme,
     title: Option<String>,
     /// Logical rectangle inside the content area.
@@ -332,13 +335,10 @@ impl App {
             crate::close_window(self.id);
             return;
         };
-        if let Some(dir) = args.starting_directory {
-            profile.starting_directory = Some(dir.to_string_lossy().into_owned());
-        }
         if let Some(commandline) = args.commandline {
             profile.commandline = commandline;
         }
-        self.new_tab_with(profile);
+        self.new_tab_in(profile, args.starting_directory);
         // A profile that can't start (a bad command line) mustn't take wt++
         // down with it: Settings is where to fix it.
         if self.tabs.is_empty() {
@@ -459,8 +459,10 @@ impl App {
         })
     }
 
-    fn spawn_pane(&mut self, id: PaneId, profile: ResolvedProfile, rect: Rect) -> bool {
-        self.spawn_pane_on(id, profile, rect, None)
+    /// Start a pane running `profile`, in `start_in` if given (see
+    /// `Pane::started_in`), else where the profile says.
+    fn spawn_pane(&mut self, id: PaneId, profile: ResolvedProfile, rect: Rect, start_in: Option<PathBuf>) -> bool {
+        self.spawn_pane_on(id, profile, rect, start_in, None)
     }
 
     /// Start a pane: the profile's shell, or with `pipes`, a console Windows
@@ -470,10 +472,11 @@ impl App {
         id: PaneId,
         profile: ResolvedProfile,
         rect: Rect,
+        start_in: Option<PathBuf>,
         pipes: Option<wtpp_session::Pipes>,
     ) -> bool {
         let Some(size) = self.grid_size(&profile, rect) else { return false };
-        let session_profile = self.session_profile(&profile);
+        let session_profile = self.session_profile(&profile, start_in.as_deref());
         let pending = self.redraw_pending.clone();
         let on_event = move |event| match event {
             SessionEvent::Wakeup => {
@@ -528,7 +531,7 @@ impl App {
                 log::warn!("{}: can't start in {}, using the home folder: {e:#}", profile.name, dir.display());
                 let mut at_home = profile.clone();
                 at_home.starting_directory = None;
-                Session::spawn(&self.session_profile(&at_home), size, on_event)
+                Session::spawn(&self.session_profile(&at_home, None), size, on_event)
             }),
         };
         match session {
@@ -542,6 +545,7 @@ impl App {
                     Pane {
                         session,
                         profile,
+                        started_in: start_in,
                         theme,
                         title: None,
                         rect,
@@ -567,7 +571,7 @@ impl App {
     /// `source`'s current directory, as far as it carries over to `target`'s
     /// shell (see `starting_directory_from`). `None` if it doesn't, if it's
     /// unknown or gone, or if that's turned off.
-    fn inherited_cwd(&self, source: &Pane, target: &ResolvedProfile) -> Option<String> {
+    fn inherited_cwd(&self, source: &Pane, target: &ResolvedProfile) -> Option<PathBuf> {
         if !self.settings.inherit_working_directory {
             return None;
         }
@@ -581,13 +585,15 @@ impl App {
             session.process_cwd().map(|p| p.to_string_lossy().into_owned())
         };
         let cwd = process.or_else(|| session.reported_cwd())?;
-        let dir = wtpp_config::cwd::starting_directory_from(&cwd, &source.profile.commandline, &target.commandline);
+        let dir = wtpp_config::cwd::starting_directory_from(&cwd, &source.profile.commandline, &target.commandline)
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_dir());
         log::info!("new pane from {cwd:?} starts in {dir:?}");
-        dir.filter(|dir| Path::new(dir).is_dir())
+        dir
     }
 
     /// Everything the session needs to start a profile's shell.
-    fn session_profile(&self, p: &ResolvedProfile) -> wtpp_session::Profile {
+    fn session_profile(&self, p: &ResolvedProfile, start_in: Option<&Path>) -> wtpp_session::Profile {
         // Windows: the environment as it's set now, not as wt++ got it.
         let base_env = (cfg!(windows) && self.settings.reload_environment_variables)
             .then(wtpp_session::env::pane_environment)
@@ -597,20 +603,15 @@ impl App {
             None => std::env::var(name).ok(),
         };
         let expand_env = |s: &str| expand_env_with(s, var);
-        let commandline = commandline_for_start(&p.commandline, p.starting_directory.as_deref());
+        let dir = match start_in {
+            Some(dir) => Some(StartDir::Literal(dir.to_string_lossy().into_owned())),
+            None => p.starting_directory.clone().map(StartDir::Setting),
+        };
+        let commandline = commandline_for_start(&p.commandline, dir.as_ref().map(StartDir::text));
         let (program, args) = split_commandline(&expand_env(&commandline));
         let mut profile = wtpp_session::Profile::new(&p.name, &program, &[]);
         profile.args = args;
-        profile.cwd = Some(match &p.starting_directory {
-            Some(dir) if is_wsl_linux_dir(&p.commandline, dir) => {
-                if dir.trim() != "~" {
-                    log::warn!("{}: starting directory {dir} is in Linux, which wsl.exe can't start in; opening in the Linux home", p.name);
-                }
-                home_dir()
-            }
-            Some(dir) if !dir.trim().is_empty() => PathBuf::from(expand_env(dir)),
-            _ => home_dir(),
-        });
+        profile.cwd = Some(start_directory(&p.name, &p.commandline, dir.as_ref(), expand_env).unwrap_or_else(home_dir));
         profile.key_style = match p.key_encoding {
             KeyEncoding::Auto => wtpp_session::profiles::key_style_for(&program),
             KeyEncoding::Unix => KeyStyle::Unix,
@@ -678,7 +679,7 @@ impl App {
         profile.commandline = format!("\"{program}\"");
         profile.key_encoding = KeyEncoding::Windows;
         let id = self.alloc_id();
-        if !self.spawn_pane_on(id, profile, self.content_area(), Some(handoff.into_pipes())) {
+        if !self.spawn_pane_on(id, profile, self.content_area(), None, Some(handoff.into_pipes())) {
             return;
         }
         self.tabs.push(Tab::new(TabKind::Terminal { root: Node::Leaf(id), focused: id, zoomed: false }));
@@ -687,8 +688,12 @@ impl App {
     }
 
     fn new_tab_with(&mut self, profile: ResolvedProfile) {
+        self.new_tab_in(profile, None);
+    }
+
+    fn new_tab_in(&mut self, profile: ResolvedProfile, start_in: Option<PathBuf>) {
         let id = self.alloc_id();
-        if !self.spawn_pane(id, profile, self.content_area()) {
+        if !self.spawn_pane(id, profile, self.content_area(), start_in) {
             return;
         }
         self.tabs.push(Tab::new(TabKind::Terminal { root: Node::Leaf(id), focused: id, zoomed: false }));
@@ -701,7 +706,7 @@ impl App {
         let Some(pane) = self.panes.get(&target) else { return };
         let side = side.unwrap_or(if pane.rect.w >= pane.rect.h { Direction::Right } else { Direction::Down });
         let new_first = matches!(side, Direction::Left | Direction::Up);
-        let mut profile = if duplicate {
+        let profile = if duplicate {
             pane.profile.clone()
         } else {
             match self.profiles.get(self.settings.default_profile_index()) {
@@ -709,9 +714,7 @@ impl App {
                 None => return,
             }
         };
-        if let Some(dir) = self.inherited_cwd(pane, &profile) {
-            profile.starting_directory = Some(dir);
-        }
+        let start_in = self.inherited_cwd(pane, &profile);
 
         let id = self.alloc_id();
         let area = self.content_area();
@@ -719,7 +722,7 @@ impl App {
         *zoomed = false;
         root.split(target, id, side.axis(), new_first);
         let rect = root.layout(area, PANE_GAP).into_iter().find(|(p, _)| *p == id).unwrap().1;
-        let spawned = self.spawn_pane(id, profile, rect);
+        let spawned = self.spawn_pane(id, profile, rect, start_in);
         if let TabKind::Terminal { root, focused, .. } = &mut self.tabs[self.active].kind {
             if spawned {
                 *focused = id;
@@ -957,9 +960,9 @@ impl App {
     /// Start the pane's profile again in the same place.
     fn restart_pane(&mut self, id: PaneId) {
         let Some(old) = self.panes.remove(&id) else { return };
-        let (profile, rect) = (old.profile.clone(), old.rect);
+        let (profile, rect, start_in) = (old.profile.clone(), old.rect, old.started_in.clone());
         drop(old);
-        if !self.spawn_pane(id, profile, rect) {
+        if !self.spawn_pane(id, profile, rect, start_in) {
             self.close_pane(id);
             return;
         }
@@ -1422,11 +1425,9 @@ impl App {
             Action::NewTab(index) => self.new_tab(index.unwrap_or_else(|| self.settings.default_profile_index())),
             Action::DuplicateTab => match self.focused_pane() {
                 Some(pane) => {
-                    let mut profile = pane.profile.clone();
-                    if let Some(dir) = self.inherited_cwd(pane, &profile) {
-                        profile.starting_directory = Some(dir);
-                    }
-                    self.new_tab_with(profile)
+                    let profile = pane.profile.clone();
+                    let start_in = self.inherited_cwd(pane, &profile);
+                    self.new_tab_in(profile, start_in)
                 }
                 None => return false,
             },
@@ -2180,9 +2181,63 @@ pub fn mouse_report(mode: TermMode, button: u8, down: bool, motion: bool, col: u
     Some(vec![0x1b, b'[', b'M', 32 + code as u8, 32 + col as u8, 32 + row as u8])
 }
 
+/// A directory a pane is to start in.
+enum StartDir {
+    /// From the profile's `startingDirectory`: `%VAR%` and `~` expand.
+    Setting(String),
+    /// A directory as it is (another pane's, `-d`'s): `%` and `~` can be
+    /// part of its name.
+    Literal(String),
+}
+
+impl StartDir {
+    fn text(&self) -> &str {
+        match self {
+            StartDir::Setting(dir) | StartDir::Literal(dir) => dir,
+        }
+    }
+}
+
+/// The working directory for a pane's shell; `None` for the home folder (no
+/// directory, or a Linux one for wsl.exe, which can't start there).
+fn start_directory(name: &str, commandline: &str, dir: Option<&StartDir>, expand: impl Fn(&str) -> String) -> Option<PathBuf> {
+    let text = dir?.text();
+    if is_wsl_linux_dir(commandline, text) {
+        if text.trim() != "~" {
+            log::warn!("{name}: starting directory {text} is in Linux, which wsl.exe can't start in; opening in the Linux home");
+        }
+        return None;
+    }
+    match dir? {
+        StartDir::Literal(dir) => Some(PathBuf::from(dir)),
+        StartDir::Setting(dir) if !dir.trim().is_empty() => Some(PathBuf::from(expand(dir))),
+        StartDir::Setting(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_directories_are_taken_literally() {
+        let expand = |s: &str| expand_env_with(s, |name| (name == "HOME" || name == "USERPROFILE").then(|| "/home/me".to_string()));
+        let start = |dir: StartDir| start_directory("p", "/bin/bash -l", Some(&dir), expand);
+        // Another pane's directory, or -d's: `%` and `~` are part of the name.
+        assert_eq!(start(StartDir::Literal("/tmp/wtpp t/x%HOME%y".into())), Some(PathBuf::from("/tmp/wtpp t/x%HOME%y")));
+        assert_eq!(start(StartDir::Literal("~".into())), Some(PathBuf::from("~")));
+        assert_eq!(start(StartDir::Literal(r"C:\100%USERPROFILE%".into())), Some(PathBuf::from(r"C:\100%USERPROFILE%")));
+        // A profile's setting expands.
+        assert_eq!(start(StartDir::Setting("%HOME%/src".into())), Some(PathBuf::from("/home/me/src")));
+        assert_eq!(start(StartDir::Setting("~/src".into())), Some(PathBuf::from("/home/me/src")));
+        assert_eq!(start(StartDir::Setting("  ".into())), None);
+        assert_eq!(start_directory("p", "/bin/bash -l", None, expand), None);
+        // wsl.exe can't start in a Linux directory, either way.
+        for dir in [StartDir::Literal("/home/me".into()), StartDir::Setting("/home/me".into())] {
+            assert_eq!(start_directory("p", "wsl.exe ~ -d Debian", Some(&dir), expand), None);
+        }
+        assert_eq!(start_directory("p", "wsl.exe ~ -d Debian", Some(&StartDir::Literal(r"\\wsl$\Debian\x%y".into())), expand), Some(PathBuf::from(r"\\wsl$\Debian\x%y")));
+    }
 
     #[test]
     fn exe_path_titles() {

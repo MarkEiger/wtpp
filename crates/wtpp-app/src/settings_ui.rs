@@ -524,8 +524,8 @@ impl App {
     /// The settings file changed on disk (edited by hand, or another window).
     pub fn on_settings_file_changed(&mut self) {
         let (settings, error) = Settings::load(&self.settings_path);
+        // Logged once, by the watcher, not here for each window.
         if let Some(error) = error {
-            log::warn!("settings: {error}");
             if self.draft.is_some() {
                 self.set_status(&format!("settings.json has an error: {error}"), true);
             }

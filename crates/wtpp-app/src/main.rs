@@ -427,27 +427,57 @@ fn apply_launch_settings(ui: &MainWindow, settings: &wtpp_config::Settings, firs
 
 /// Reload settings when `settings.json` changes on disk.
 fn watch_settings(path: &std::path::Path) -> Option<notify::RecommendedWatcher> {
+    let path = path.to_path_buf();
+    watch_file(&path.clone(), move || {
+        let path = path.clone();
+        slint::invoke_from_event_loop(move || {
+            // Once, not once per window.
+            if let (_, Some(error)) = wtpp_config::Settings::load(&path) {
+                log::warn!("settings: {error}");
+            }
+            merge_unsaved_shells();
+            for_each_window(|app| app.on_settings_file_changed());
+        })
+        .ok();
+    })
+}
+
+/// Whether a watcher event for the file means it may have changed. Opening
+/// and reading it don't (on Linux they're events too: reading the file after
+/// a change would otherwise set off the next reload, forever).
+fn is_change(kind: &notify::EventKind) -> bool {
+    use notify::EventKind;
+    use notify::event::{AccessKind, AccessMode, ModifyKind};
+    match kind {
+        EventKind::Create(_) | EventKind::Remove(_) => true,
+        EventKind::Modify(ModifyKind::Metadata(_)) => false,
+        EventKind::Modify(_) => true,
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) | EventKind::Any | EventKind::Other => false,
+    }
+}
+
+/// Call `changed` (on its own thread) once a burst of changes to `path`
+/// is over: editors write in steps (a temporary file and a rename, or
+/// truncating then writing).
+fn watch_file(path: &std::path::Path, changed: impl Fn() + Send + Sync + 'static) -> Option<notify::RecommendedWatcher> {
     use notify::Watcher;
     let dir = path.parent()?.to_path_buf();
     std::fs::create_dir_all(&dir).ok()?;
     let file_name = path.file_name()?.to_os_string();
     let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let changed = std::sync::Arc::new(changed);
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else { return };
-        if !event.paths.iter().any(|p| p.file_name() == Some(&file_name)) {
+        if !is_change(&event.kind) || !event.paths.iter().any(|p| p.file_name() == Some(&file_name)) {
             return;
         }
-        // Editors write in bursts; coalesce into one reload.
         if !pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            let pending = pending.clone();
+            let (pending, changed) = (pending.clone(), changed.clone());
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 pending.store(false, std::sync::atomic::Ordering::Release);
-                slint::invoke_from_event_loop(|| {
-                    merge_unsaved_shells();
-                    for_each_window(|app| app.on_settings_file_changed());
-                })
-                .ok();
+                changed();
             });
         }
     })
@@ -455,6 +485,94 @@ fn watch_settings(path: &std::path::Path) -> Option<notify::RecommendedWatcher> 
     .ok()?;
     watcher.watch(&dir, notify::RecursiveMode::NonRecursive).map_err(|e| log::warn!("can't watch settings: {e}")).ok()?;
     Some(watcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Reading the file is no change; an editor's save is one, however it
+    /// writes; wt++'s own save is one too.
+    #[test]
+    fn settings_file_changes() {
+        let dir = std::env::temp_dir().join(format!("wtpp-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "{}").unwrap();
+        let count = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = count.clone();
+        let _watcher = watch_file(&path, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        let settle = || std::thread::sleep(Duration::from_millis(700));
+        let changes = || count.swap(0, Ordering::SeqCst);
+        settle();
+        changes();
+
+        for _ in 0..20 {
+            let _ = wtpp_config::Settings::load(&path);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        settle();
+        assert_eq!(changes(), 0, "reading");
+
+        // Write a temporary file, then rename it over (many editors).
+        std::fs::write(dir.join("settings.json.swp"), "{ \"copyOnSelect\": true }").unwrap();
+        std::fs::rename(dir.join("settings.json.swp"), &path).unwrap();
+        settle();
+        assert_eq!(changes(), 1, "temporary file and rename");
+
+        // Truncate, then write (others).
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().write(true).truncate(true).open(&path).unwrap();
+            file.write_all(b"{ \"copyOnSelect\"").unwrap();
+            file.flush().unwrap();
+            file.write_all(b": false }").unwrap();
+        }
+        settle();
+        assert_eq!(changes(), 1, "truncate and write");
+
+        // wt++'s own save.
+        wtpp_config::Settings::default().save(&path).unwrap();
+        settle();
+        assert_eq!(changes(), 1, "save");
+        for _ in 0..5 {
+            let _ = wtpp_config::Settings::load(&path);
+        }
+        settle();
+        assert_eq!(changes(), 0, "reading after a save");
+
+        // A broken file is a change like any other, and then quiet.
+        std::fs::write(&path, "{ broken").unwrap();
+        settle();
+        assert_eq!(changes(), 1, "broken");
+        let _ = wtpp_config::Settings::load(&path);
+        settle();
+        assert_eq!(changes(), 0, "reading a broken file");
+
+        drop(_watcher);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn which_events_are_changes() {
+        use notify::EventKind;
+        use notify::event::*;
+        assert!(is_change(&EventKind::Create(CreateKind::File)));
+        assert!(is_change(&EventKind::Remove(RemoveKind::Any)));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Data(DataChange::Any))));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Name(RenameMode::To))));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Any)));
+        assert!(is_change(&EventKind::Access(AccessKind::Close(AccessMode::Write))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Open(AccessMode::Any))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Close(AccessMode::Read))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Read)));
+        assert!(!is_change(&EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime))));
+    }
 }
 
 fn wire_settings(ui: &MainWindow, id: WindowId) {
