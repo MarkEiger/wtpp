@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 — 2026-11-10
 
 - Splitting a pane or duplicating a tab opens the new one in the directory
   you're in, not where the profile starts. That works without setup for
