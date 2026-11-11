@@ -145,6 +145,8 @@ pub struct Listener {
     pty: Arc<OnceLock<Io>>,
     size: Arc<FairMutex<GridSize>>,
     cwd_scanner: Arc<Mutex<cwd::CwdScanner>>,
+    /// The last of the output, to say in the log what rang the bell.
+    recent_output: Arc<Mutex<Vec<u8>>>,
     /// The directory the shell last reported (see [`cwd::parse_cwd_osc`]).
     reported_cwd: Arc<Mutex<Option<String>>>,
 }
@@ -157,6 +159,12 @@ impl Listener {
     }
 
     fn scan_output(&self, bytes: &[u8]) {
+        const KEPT: usize = 160;
+        if let Ok(mut recent) = self.recent_output.lock() {
+            recent.extend_from_slice(&bytes[bytes.len().saturating_sub(KEPT)..]);
+            let extra = recent.len().saturating_sub(KEPT);
+            recent.drain(..extra);
+        }
         let found = self.cwd_scanner.lock().ok().and_then(|mut scanner| scanner.feed(bytes));
         if let Some(dir) = found
             && let Ok(mut reported) = self.reported_cwd.lock()
@@ -173,7 +181,12 @@ impl EventListener for Listener {
             Event::Wakeup => cb(SessionEvent::Wakeup),
             Event::Title(t) => cb(SessionEvent::Title(Some(t))),
             Event::ResetTitle => cb(SessionEvent::Title(None)),
-            Event::Bell => cb(SessionEvent::Bell),
+            Event::Bell => {
+                // Which program rings, and why, is otherwise anyone's guess.
+                let recent = self.recent_output.lock().map(|r| r.escape_ascii().to_string()).unwrap_or_default();
+                log::info!("bell; the output up to here ends: {recent}");
+                cb(SessionEvent::Bell)
+            }
             Event::ClipboardStore(_, text) => cb(SessionEvent::ClipboardStore(text)),
             Event::PtyWrite(text) => self.reply(text),
             Event::TextAreaSizeRequest(format) => {
@@ -221,6 +234,7 @@ impl Session {
             pty: Arc::new(OnceLock::new()),
             size: shared_size.clone(),
             cwd_scanner: Default::default(),
+            recent_output: Default::default(),
             reported_cwd: Default::default(),
         };
 
@@ -538,6 +552,91 @@ mod win32_input_tests {
         let mut profile = Profile::new("t", "cmd.exe", &[]);
         profile.cwd = Some(std::path::PathBuf::from(r"C:\wtpp-no-such-folder"));
         assert!(Session::spawn(&profile, size, |_| {}).is_err());
+    }
+
+    /// Typing at a prompt rings no bell: the shells as wt++ starts them (the
+    /// environment built afresh, the directory reports), keys one by one.
+    /// With WTPP_TEST_WSL_DISTRO set, that distro's shell too.
+    #[cfg(windows)]
+    #[test]
+    fn typing_rings_no_bell() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        let size = GridSize { cols: 120, rows: 30, cell_width: 8, cell_height: 16 };
+        let mut shells = vec![Profile::new("cmd", "cmd.exe", &[]), Profile::new("powershell", "powershell.exe", &["-NoLogo", "-NoProfile"])];
+        shells[1].args = wtpp_config::cwd::powershell_args_with_hook("powershell.exe", &shells[1].args).unwrap();
+        if let Ok(distro) = std::env::var("WTPP_TEST_WSL_DISTRO") {
+            let mut wsl = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
+            wsl.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None));
+            shells.push(wsl);
+        }
+        for mut profile in shells {
+            profile.base_env = env::pane_environment();
+            assert!(profile.base_env.is_some());
+            profile.cwd = std::env::var("SystemRoot").ok().map(Into::into);
+            let bells = Arc::new(AtomicUsize::new(0));
+            let counter = bells.clone();
+            let session = Session::spawn(&profile, size, move |e| {
+                if matches!(e, SessionEvent::Bell) {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+            .unwrap();
+            let shown = |text: &str| {
+                let term = session.term().lock();
+                let grid = term.grid();
+                (0..30).any(|l| {
+                    let line: String =
+                        (0..120).map(|c| grid[alacritty_terminal::index::Line(l)][alacritty_terminal::index::Column(c)].c).collect();
+                    line.trim_end() == text
+                })
+            };
+            // A prompt first: the directory report is how we know there's one.
+            let start = Instant::now();
+            let ready = |s: &Session| s.reported_cwd().is_some() || (profile.name == "cmd" && start.elapsed() > Duration::from_secs(3));
+            while !ready(&session) && start.elapsed() < Duration::from_secs(30) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            for key in "echo wtpp-typed\r".chars() {
+                session.write(key.to_string().into_bytes());
+                std::thread::sleep(Duration::from_millis(60));
+            }
+            let start = Instant::now();
+            while !shown("wtpp-typed") && start.elapsed() < Duration::from_secs(20) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            assert!(shown("wtpp-typed"), "{}: the keys didn't arrive", profile.name);
+            assert_eq!(bells.load(Ordering::SeqCst), 0, "{}", profile.name);
+        }
+    }
+
+    /// The bell itself still rings, once per BEL outside a title or other OSC.
+    #[test]
+    fn bells_are_counted_outside_osc_only() {
+        use alacritty_terminal::event::{Event, EventListener};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Clone)]
+        struct Count(Arc<AtomicUsize>);
+        impl EventListener for Count {
+            fn send_event(&self, event: Event) {
+                if matches!(event, Event::Bell) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        let bells = Arc::new(AtomicUsize::new(0));
+        let size = GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
+        let mut term = Term::new(Config::default(), &size, Count(bells.clone()));
+        let mut parser: Processor = Default::default();
+        // What the shells wt++ sets up send at every prompt, in any pieces.
+        let prompt = b"\x1b]9;9;/home/me\x1b\\\x1b]0;me@pc: ~\x07\x1b]9;9;C:\\Users\\me\x1b\\PS C:\\Users\\me> \x1b]9;4;3;\x07\x1b]7;file://pc/home/me\x07";
+        for at in 0..=prompt.len() {
+            parser.advance(&mut term, &prompt[..at]);
+            parser.advance(&mut term, &prompt[at..]);
+        }
+        assert_eq!(bells.load(Ordering::SeqCst), 0);
+        parser.advance(&mut term, b"a\x07b\x07");
+        assert_eq!(bells.load(Ordering::SeqCst), 2);
     }
 
     /// The real console host of the machine running the tests: on Windows 11
