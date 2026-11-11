@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.1 — 2026-11-11
+
+- Windows: every key played the error sound in a window opened for a console
+  program (wt++ as the default terminal, such as Win+R → `cmd`) after a recent
+  Windows update: the window was in front without the keyboard focus. wt++
+  now takes the focus.
+- WSL: a pane split from a directory that is a symbolic link in Linux (`/bin`)
+  opened in the home folder. The directory bash reports is now the real one.
+
 ## 1.3.0 — 2026-11-11
 
 - Windows: new tabs and panes get the environment as it's set now. After you

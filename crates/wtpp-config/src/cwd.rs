@@ -113,7 +113,7 @@ pub fn powershell_args_with_hook(program: &str, args: &[String]) -> Option<Vec<S
 /// bash's PROMPT_COMMAND: report the directory at every prompt. Only from
 /// the environment, so a `.bashrc` that sets its own wins (and one that adds
 /// to it keeps this); other shells ignore it.
-pub const BASH_PROMPT_COMMAND: &str = r#"printf '\033]9;9;%s\033\\' "$PWD""#;
+pub const BASH_PROMPT_COMMAND: &str = r#"printf '\033]9;9;%s\033\\' "$(pwd -P 2>/dev/null || printf %s "$PWD")""#;
 
 /// Environment for a WSL profile so its bash reports the directory: our
 /// PROMPT_COMMAND, passed into WSL by WSLENV (added to what's there). Nothing
@@ -232,6 +232,8 @@ mod tests {
         assert_eq!(env(false, Some("PROMPT_COMMAND/u:FOO"))[1].1, "PROMPT_COMMAND/u:FOO");
         assert_eq!(env(false, Some("prompt_command"))[1].1, "prompt_command");
         assert!(env(true, Some("FOO")).is_empty());
-        assert_eq!(BASH_PROMPT_COMMAND, r#"printf '\033]9;9;%s\033\\' "$PWD""#);
+        // The directory without symbolic links (`/bin` is one to `/usr/bin`):
+        // Windows can't start a program in a Linux symbolic link.
+        assert!(BASH_PROMPT_COMMAND.contains("pwd -P"));
     }
 }

@@ -302,6 +302,7 @@ pub fn bring_to_front(window: &slint::Window) {
         unsafe {
             let foreground = GetForegroundWindow();
             if foreground == hwnd {
+                focus(hwnd);
                 return;
             }
             let theirs = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
@@ -313,6 +314,39 @@ pub fn bring_to_front(window: &slint::Window) {
             if attached {
                 AttachThreadInput(ours, theirs, 0);
             }
+            focus(hwnd);
+        }
+    }
+}
+
+/// See [`focus`]: called when a key arrives, in case the window lost the
+/// focus that way at some other moment.
+#[cfg(windows)]
+pub fn ensure_focus(window: &slint::Window) {
+    use slint::winit_030::WinitWindowAccessor;
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let hwnd = window.with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+        Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get() as windows_sys::Win32::Foundation::HWND),
+        _ => None,
+    });
+    if let Some(Some(hwnd)) = hwnd {
+        // SAFETY: plain window calls on a live handle of this thread.
+        unsafe { focus(hwnd) };
+    }
+}
+
+/// Give `hwnd` (a window of this thread) the keyboard focus if it's the
+/// active window but nothing is focused. Detaching from the other thread's
+/// input can leave it that way: Windows then sends every key as a system key
+/// (as with Alt held), and its default handling plays the error sound for
+/// each one.
+#[cfg(windows)]
+unsafe fn focus(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetActiveWindow, GetFocus, SetFocus};
+    unsafe {
+        if GetActiveWindow() == hwnd && GetFocus().is_null() {
+            log::info!("the window was active without the keyboard focus; focusing it");
+            SetFocus(hwnd);
         }
     }
 }

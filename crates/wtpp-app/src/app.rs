@@ -1299,6 +1299,8 @@ impl App {
     }
 
     pub fn on_key(&mut self, text: &str, mods: Mods) -> bool {
+        #[cfg(windows)]
+        crate::platform::ensure_focus(self.ui().window());
         let key = keys::from_slint(text, mods);
         // A non-Latin layout (Hebrew, Russian, ...) turns Ctrl+Shift+W into
         // Ctrl+Shift+ц. Like WT, shortcuts and Ctrl+letter control codes go
