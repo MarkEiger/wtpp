@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 — 2026-11-11
 
 - Windows: new tabs and panes get the environment as it's set now. After you
   change PATH or another variable (in System Properties, or an installer
