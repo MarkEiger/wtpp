@@ -255,8 +255,9 @@ fn unix_profiles(
     profiles
 }
 
-#[cfg(all(windows, test))]
-pub(crate) use windows::windows_build;
+/// The Windows build number (17763 is 1809), from the registry.
+#[cfg(windows)]
+pub use windows::windows_build;
 
 #[cfg(windows)]
 mod windows {

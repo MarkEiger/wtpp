@@ -1557,13 +1557,15 @@ impl App {
         }
         // Claude Code under cmd or PowerShell reads keys through the console,
         // which keeps Alt but drops Shift from Enter: give it Alt+Enter (ESC CR,
-        // its "insert newline"). PSReadLine keeps its own Shift+Enter otherwise.
+        // its "insert newline"), or where that doesn't arrive as one key, Ctrl+J
+        // (see `claude_newline`). PSReadLine keeps its own Shift+Enter otherwise.
         if key == Some((Key::Enter, Mods::SHIFT))
             && pane.session.profile().key_style == KeyStyle::Windows
             && pane.session.pid().is_some_and(|pid| crate::platform::runs_under(pid, "claude.exe"))
         {
-            let alt_enter = wtpp_input::encode(Key::Enter, Mods::ALT, &pane.session.encode_options()).unwrap_or_default();
-            self.send_keys(id, alt_enter);
+            let opts = pane.session.encode_options();
+            let newline = claude_newline(&opts, windows_build());
+            self.send_keys(id, newline);
             return true;
         }
         let bytes = match key {
@@ -2157,6 +2159,30 @@ impl App {
         }
         true
     }
+}
+
+/// The keys for "insert a newline" in Claude Code reading the console. Alt+Enter
+/// (ESC CR) is its own; but Windows 10 1809's console (before 1903) turns ESC
+/// CR into a plain Enter, which submits, and then Alt+Enter, with Alt stuck
+/// for the key after it. A line feed arrives there as one key, Ctrl+Enter
+/// with the character LF, which Claude Code reads as Ctrl+J: a newline too.
+fn claude_newline(opts: &wtpp_input::EncodeOptions, build: Option<u32>) -> Vec<u8> {
+    const ESC_CR_AS_ONE_KEY: u32 = 18362;
+    if !opts.win32_input && build.is_some_and(|b| b < ESC_CR_AS_ONE_KEY) {
+        return b"\n".to_vec();
+    }
+    wtpp_input::encode(Key::Enter, Mods::ALT, opts).unwrap_or_default()
+}
+
+/// The Windows build, once (`None` elsewhere).
+fn windows_build() -> Option<u32> {
+    #[cfg(windows)]
+    {
+        static BUILD: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+        *BUILD.get_or_init(wtpp_session::profiles::windows_build)
+    }
+    #[cfg(not(windows))]
+    None
 }
 
 /// What a pane whose shell exited shows under its output. Windows exit
@@ -2776,6 +2802,22 @@ mod tests {
             }
             assert_eq!(text_before_cursor(&session).iter().collect::<String>(), ">one ");
         }
+    }
+
+    #[test]
+    fn claude_newlines() {
+        let vt = wtpp_input::EncodeOptions { style: KeyStyle::Windows, ..Default::default() };
+        let win32 = wtpp_input::EncodeOptions { win32_input: true, ..vt.clone() };
+        // 1809: a line feed (Ctrl+J); ESC CR splits into Enter, then Alt+Enter.
+        assert_eq!(claude_newline(&vt, Some(17763)), b"\n");
+        // Later Windows 10 and 11: Alt+Enter.
+        assert_eq!(claude_newline(&vt, Some(19044)), b"\x1b\r");
+        assert_eq!(claude_newline(&vt, None), b"\x1b\r");
+        // With key events, it's the real Alt+Enter whatever the build.
+        let alt_enter = wtpp_input::encode(Key::Enter, Mods::ALT, &win32).unwrap();
+        assert_ne!(alt_enter, b"\x1b\r");
+        assert_eq!(claude_newline(&win32, Some(17763)), alt_enter);
+        assert_eq!(claude_newline(&win32, Some(26100)), alt_enter);
     }
 
     #[test]
