@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 — 2026-11-13
 
 - Linux and macOS: a profile's command line is read like a shell does (single
   quotes, backslashes), so `sh -c 'echo hello; exit 3'` runs; it failed with
