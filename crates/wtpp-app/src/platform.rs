@@ -50,6 +50,22 @@ pub fn print_line(text: &str) {
     println!("{text}");
 }
 
+/// Tell the user about an error that keeps wt++ from starting: a message
+/// box on Windows (a GUI app, it has no console to print to), stderr
+/// elsewhere (and the log).
+pub fn error_box(title: &str, text: &str) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (title, text) = (wide(title), wide(text));
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR) };
+    }
+    #[cfg(not(windows))]
+    eprintln!("{title}: {text}");
+}
+
 /// The terminal bell: the system's default sound.
 pub fn bell() {
     #[cfg(windows)]

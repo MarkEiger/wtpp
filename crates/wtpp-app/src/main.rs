@@ -383,6 +383,81 @@ fn wgpu_configuration(api: wtpp_config::GraphicsApi) -> WGPUConfiguration {
     WGPUConfiguration::Automatic(settings)
 }
 
+/// Slint's backend, for the user's `rendering.graphicsAPI`.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+fn backend_selector(settings: &wtpp_config::Settings, api: wtpp_config::GraphicsApi) -> slint::BackendSelector {
+    #[allow(unused_mut)]
+    let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(api));
+    // macOS: tabs in the title bar, like Safari and iTerm: the title bar
+    // turns transparent and the content extends under it.
+    #[cfg(target_os = "macos")]
+    if settings.show_tabs_in_titlebar {
+        use slint::winit_030::winit::platform::macos::WindowAttributesExtMacOS;
+        backend = backend.with_winit_window_attributes_hook(|attributes| {
+            platform::preview_window_attributes(
+                attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true),
+            )
+        });
+    }
+    #[cfg(target_os = "macos")]
+    if !settings.show_tabs_in_titlebar {
+        backend = backend.with_winit_window_attributes_hook(platform::preview_window_attributes);
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use slint::winit_030::winit::platform::wayland::WindowAttributesExtWayland;
+        use slint::winit_030::winit::platform::x11::EventLoopBuilderExtX11;
+        // Name the app (Wayland app_id, X11 class) so desktops match its
+        // windows to wtpp.desktop (icon, dock).
+        backend = backend.with_winit_window_attributes_hook(|attributes| {
+            platform::preview_window_attributes(WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp"))
+        });
+        // Prefer X11 (XWayland) where both exist: winit has no drag and drop
+        // on Wayland (file drops, tabs between windows: Wayland doesn't tell
+        // apps where their windows are). WTPP_WAYLAND=1 keeps Wayland.
+        if std::env::var_os("DISPLAY").is_some()
+            && std::env::var_os("WAYLAND_DISPLAY").is_some()
+            && std::env::var_os("WTPP_WAYLAND").is_none()
+        {
+            let mut event_loop = slint::winit_030::winit::event_loop::EventLoop::<slint::winit_030::SlintEvent>::with_user_event();
+            event_loop.with_x11();
+            backend = backend.with_winit_event_loop_builder(event_loop);
+        }
+    }
+    backend
+}
+
+/// Select the graphics backend. With the graphics API on automatic and no
+/// GPU that works (a VM, a remote session, a broken driver), the software
+/// renderer (`"rendering.graphicsAPI": "software"`) rather than no window.
+/// If even that fails, say so: on Windows there's nowhere else to see it.
+fn select_backend(settings: &wtpp_config::Settings) -> anyhow::Result<()> {
+    use wtpp_config::GraphicsApi;
+    let api = settings.graphics_api;
+    let selected = match backend_selector(settings, api).select() {
+        Err(e) if api == GraphicsApi::Automatic => {
+            log::warn!("no GPU to draw with ({e}); using the software renderer");
+            backend_selector(settings, GraphicsApi::Software).select()
+        }
+        selected => selected,
+    };
+    if let Err(e) = &selected {
+        log::error!("no graphics backend: {e}");
+        let path = wtpp_config::settings::settings_path();
+        platform::error_box(
+            "wt++ can't start",
+            &format!(
+                "wt++ found no way to draw its window: {e}\n\n\
+                 If this computer has no working graphics driver, the software renderer may still work. Add this \
+                 line to {}, inside the outer braces:\n\n    \"rendering.graphicsAPI\": \"software\",\n\n\
+                 Or set the environment variable SLINT_WGPU_CPU=1 before starting wt++.",
+                path.display()
+            ),
+        );
+    }
+    selected.context("no GPU backend available")
+}
+
 /// Window size from `initialCols`/`initialRows`. The size is an estimate from
 /// the default font (real metrics need the fonts, which load in the
 /// background), close enough to WT's behavior.
@@ -678,45 +753,7 @@ fn main() -> anyhow::Result<()> {
         log::error!("settings: {error}");
     }
 
-    #[allow(unused_mut)]
-    let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(settings.graphics_api));
-    // macOS: tabs in the title bar, like Safari and iTerm: the title bar
-    // turns transparent and the content extends under it.
-    #[cfg(target_os = "macos")]
-    if settings.show_tabs_in_titlebar {
-        use slint::winit_030::winit::platform::macos::WindowAttributesExtMacOS;
-        backend = backend.with_winit_window_attributes_hook(|attributes| {
-            platform::preview_window_attributes(
-                attributes.with_titlebar_transparent(true).with_fullsize_content_view(true).with_title_hidden(true),
-            )
-        });
-    }
-    #[cfg(target_os = "macos")]
-    if !settings.show_tabs_in_titlebar {
-        backend = backend.with_winit_window_attributes_hook(platform::preview_window_attributes);
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        use slint::winit_030::winit::platform::wayland::WindowAttributesExtWayland;
-        use slint::winit_030::winit::platform::x11::EventLoopBuilderExtX11;
-        // Name the app (Wayland app_id, X11 class) so desktops match its
-        // windows to wtpp.desktop (icon, dock).
-        backend = backend.with_winit_window_attributes_hook(|attributes| {
-            platform::preview_window_attributes(WindowAttributesExtWayland::with_name(attributes, "wtpp", "wtpp"))
-        });
-        // Prefer X11 (XWayland) where both exist: winit has no drag and drop
-        // on Wayland (file drops, tabs between windows: Wayland doesn't tell
-        // apps where their windows are). WTPP_WAYLAND=1 keeps Wayland.
-        if std::env::var_os("DISPLAY").is_some()
-            && std::env::var_os("WAYLAND_DISPLAY").is_some()
-            && std::env::var_os("WTPP_WAYLAND").is_none()
-        {
-            let mut event_loop = slint::winit_030::winit::event_loop::EventLoop::<slint::winit_030::SlintEvent>::with_user_event();
-            event_loop.with_x11();
-            backend = backend.with_winit_event_loop_builder(event_loop);
-        }
-    }
-    backend.select().context("no GPU backend available")?;
+    select_backend(&settings)?;
     log::info!("backend selected after {:?}", started.elapsed());
 
     // Shells are looked for once, not on every launch, so what the user
@@ -747,7 +784,10 @@ fn main() -> anyhow::Result<()> {
             }
         });
     } else {
-        create_window(settings, Some(args), None, Placement::First)?;
+        if let Err(e) = create_window(settings, Some(args), None, Placement::First) {
+            platform::error_box("wt++ can't start", &format!("wt++ couldn't open its window: {e:#}"));
+            return Err(e);
+        }
         log::info!("window created after {:?}", started.elapsed());
     }
     if let Some(listener) = listener {
