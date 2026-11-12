@@ -20,7 +20,8 @@ enum State {
     SkipEsc,
 }
 
-/// Finds directory reports in a raw output stream, read in any pieces.
+/// Finds directory reports (and other OSCs, see [`CwdScanner::feed_osc`])
+/// in a raw output stream, read in any pieces.
 #[derive(Debug, Default)]
 pub struct CwdScanner {
     state: State,
@@ -64,6 +65,11 @@ impl Reported {
 impl CwdScanner {
     /// The directories reported in `bytes`, in order.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<(CwdKind, String)> {
+        self.feed_osc(bytes).iter().filter_map(|osc| parse_cwd_report(osc)).collect()
+    }
+
+    /// The text of every OSC that ends in `bytes` (up to [`MAX_OSC`] long).
+    pub fn feed_osc(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
         let mut found = Vec::new();
         for &b in bytes {
             self.state = match (self.state, b) {
@@ -77,7 +83,7 @@ impl CwdScanner {
                 (State::Esc, _) => State::Ground,
                 (State::Osc | State::Skip, 0x07) => {
                     if self.state == State::Osc {
-                        found.extend(parse_cwd_report(&self.osc));
+                        found.push(self.osc.clone());
                     }
                     State::Ground
                 }
@@ -93,7 +99,7 @@ impl CwdScanner {
                 (State::Skip, _) => State::Skip,
                 (State::OscEsc | State::SkipEsc, b'\\') => {
                     if self.state == State::OscEsc {
-                        found.extend(parse_cwd_report(&self.osc));
+                        found.push(self.osc.clone());
                     }
                     State::Ground
                 }
@@ -262,7 +268,7 @@ mod macos {
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
-mod windows {
+pub(crate) mod windows {
     use std::ffi::c_void;
     use std::path::PathBuf;
     use windows_sys::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
@@ -282,20 +288,27 @@ mod windows {
     }
 
     /// x64 offsets: PEB.ProcessParameters, and in RTL_USER_PROCESS_PARAMETERS,
-    /// CurrentDirectory.DosPath (a UNICODE_STRING).
+    /// CurrentDirectory.DosPath and CommandLine (UNICODE_STRINGs).
     const PROCESS_PARAMETERS: usize = 0x20;
     const CURRENT_DIRECTORY: usize = 0x38;
+    const COMMAND_LINE: usize = 0x70;
 
-    struct Process(HANDLE);
+    pub(crate) struct Process(pub(crate) HANDLE);
 
     impl Drop for Process {
         fn drop(&mut self) {
-            // SAFETY: opened in process_cwd, closed once.
+            // SAFETY: opened in `open`, closed once.
             unsafe { CloseHandle(self.0) };
         }
     }
 
     impl Process {
+        pub(crate) fn open(pid: u32) -> Option<Process> {
+            // SAFETY: plain call; the handle is closed by `Process`.
+            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid) };
+            (!handle.is_null()).then_some(Process(handle))
+        }
+
         fn read<const N: usize>(&self, address: usize) -> Option<[u8; N]> {
             let mut buf = [0u8; N];
             let mut read = 0;
@@ -303,51 +316,61 @@ mod windows {
             let ok = unsafe { ReadProcessMemory(self.0, address as *const c_void, buf.as_mut_ptr().cast(), N, &mut read) };
             (ok != 0 && read == N).then_some(buf)
         }
+
+        /// The address of the process's RTL_USER_PROCESS_PARAMETERS.
+        fn parameters(&self) -> Option<usize> {
+            let mut info: BasicInformation = BasicInformation { exit_status: 0, peb: 0, affinity_mask: 0, base_priority: 0, pid: 0, parent_pid: 0 };
+            // SAFETY: `info` is PROCESS_BASIC_INFORMATION's size and layout.
+            let status = unsafe {
+                NtQueryInformationProcess(
+                    self.0,
+                    ProcessBasicInformation,
+                    (&mut info as *mut BasicInformation).cast(),
+                    size_of::<BasicInformation>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if status != 0 || info.peb == 0 {
+                return None;
+            }
+            Some(usize::from_le_bytes(self.read::<8>(info.peb + PROCESS_PARAMETERS)?))
+        }
+
+        /// The UNICODE_STRING at `address`.
+        fn unicode_string(&self, address: usize) -> Option<String> {
+            let string = self.read::<16>(address)?;
+            let len = u16::from_le_bytes([string[0], string[1]]) as usize;
+            let buffer = usize::from_le_bytes(string[8..16].try_into().ok()?);
+            if len == 0 || len % 2 != 0 {
+                return None;
+            }
+            let mut bytes = vec![0u8; len];
+            let mut read = 0;
+            // SAFETY: `bytes` holds `len` bytes.
+            let ok = unsafe { ReadProcessMemory(self.0, buffer as *const c_void, bytes.as_mut_ptr().cast(), len, &mut read) };
+            if ok == 0 || read != len {
+                return None;
+            }
+            let wide: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16(&wide).ok()
+        }
     }
 
     /// The process's current directory, read from its PEB, where Windows keeps it.
     pub fn process_cwd(pid: u32) -> Option<PathBuf> {
-        // SAFETY: plain call; the handle is closed by `Process`.
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid) };
-        if handle.is_null() {
-            return None;
-        }
-        let process = Process(handle);
-        let mut info: BasicInformation = BasicInformation { exit_status: 0, peb: 0, affinity_mask: 0, base_priority: 0, pid: 0, parent_pid: 0 };
-        // SAFETY: `info` is PROCESS_BASIC_INFORMATION's size and layout.
-        let status = unsafe {
-            NtQueryInformationProcess(
-                process.0,
-                ProcessBasicInformation,
-                (&mut info as *mut BasicInformation).cast(),
-                size_of::<BasicInformation>() as u32,
-                std::ptr::null_mut(),
-            )
-        };
-        if status != 0 || info.peb == 0 {
-            return None;
-        }
-        let params = usize::from_le_bytes(process.read::<8>(info.peb + PROCESS_PARAMETERS)?);
-        let dir = process.read::<16>(params + CURRENT_DIRECTORY)?;
-        let len = u16::from_le_bytes([dir[0], dir[1]]) as usize;
-        let buffer = usize::from_le_bytes(dir[8..16].try_into().ok()?);
-        if len == 0 || len > 0x8000 || len % 2 != 0 {
-            return None;
-        }
-        let mut bytes = vec![0u8; len];
-        let mut read = 0;
-        // SAFETY: `bytes` holds `len` bytes.
-        let ok = unsafe { ReadProcessMemory(process.0, buffer as *const c_void, bytes.as_mut_ptr().cast(), len, &mut read) };
-        if ok == 0 || read != len {
-            return None;
-        }
-        let wide: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        let mut path = String::from_utf16(&wide).ok()?;
+        let process = Process::open(pid)?;
+        let mut path = process.unicode_string(process.parameters()? + CURRENT_DIRECTORY)?;
         // Kept as "C:\dir\"; but "C:\" is a root.
         if path.len() > 3 && path.ends_with('\\') {
             path.pop();
         }
         Some(PathBuf::from(path))
+    }
+
+    /// The command line the process was started with, from its PEB.
+    pub(crate) fn process_commandline(pid: u32) -> Option<String> {
+        let process = Process::open(pid)?;
+        process.unicode_string(process.parameters()? + COMMAND_LINE)
     }
 }
 

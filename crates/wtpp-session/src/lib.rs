@@ -7,6 +7,7 @@
 pub mod cwd;
 pub mod env;
 pub mod profiles;
+pub mod ssh;
 
 use std::borrow::Cow;
 use std::fs::File;
@@ -156,6 +157,11 @@ pub struct Listener {
     reported_cwd: Arc<Mutex<cwd::Reported>>,
     /// When output last arrived.
     last_output: Arc<Mutex<Option<Instant>>>,
+    /// See [`Profile::ssh_token`].
+    ssh_token: Option<Arc<str>>,
+    /// The arguments of the ssh the shell reported running, until it reports
+    /// it's done (see `wtpp_config::ssh`).
+    reported_ssh: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 impl Listener {
@@ -175,12 +181,20 @@ impl Listener {
             let extra = recent.len().saturating_sub(KEPT);
             recent.drain(..extra);
         }
-        let found = self.cwd_scanner.lock().map(|mut scanner| scanner.feed(bytes)).unwrap_or_default();
-        if !found.is_empty()
-            && let Ok(mut reported) = self.reported_cwd.lock()
-        {
-            for (kind, dir) in found {
-                reported.record(kind, dir);
+        let found = self.cwd_scanner.lock().map(|mut scanner| scanner.feed_osc(bytes)).unwrap_or_default();
+        for osc in found {
+            if let Some((kind, dir)) = cwd::parse_cwd_report(&osc) {
+                if let Ok(mut reported) = self.reported_cwd.lock() {
+                    reported.record(kind, dir);
+                }
+            } else if let Some(token) = &self.ssh_token
+                && let Some(report) = wtpp_config::ssh::parse_report(&osc, token)
+                && let Ok(mut ssh) = self.reported_ssh.lock()
+            {
+                *ssh = match report {
+                    wtpp_config::ssh::Report::Started(args) => Some(args),
+                    wtpp_config::ssh::Report::Ended => None,
+                };
             }
         }
     }
@@ -232,6 +246,8 @@ pub struct Session {
     reported_cwd: Arc<Mutex<cwd::Reported>>,
     /// See [`Listener::last_output`].
     last_output: Arc<Mutex<Option<Instant>>>,
+    /// See [`Listener::reported_ssh`].
+    reported_ssh: Arc<Mutex<Option<Vec<String>>>>,
     /// For a handed-over console (see [`Pipes::keep_alive`]).
     _keep_alive: Vec<File>,
 }
@@ -251,6 +267,8 @@ impl Session {
             recent_output: Default::default(),
             reported_cwd: Default::default(),
             last_output: Default::default(),
+            ssh_token: profile.ssh_token.as_deref().filter(|t| !t.is_empty()).map(Arc::from),
+            reported_ssh: Default::default(),
         };
 
         let config = Config {
@@ -322,7 +340,8 @@ impl Session {
         event_loop.spawn();
 
         let reported_cwd = listener.reported_cwd.clone();
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), _keep_alive: Vec::new() })
+        let reported_ssh = listener.reported_ssh.clone();
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh, _keep_alive: Vec::new() })
     }
 
     /// A session on a console Windows handed over (see [`Pipes`]): a thread
@@ -383,7 +402,7 @@ impl Session {
         // The console host starts at its own default size.
         io.resize(size);
         let reported_cwd = listener.reported_cwd.clone();
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), _keep_alive: keep_alive })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh: listener.reported_ssh.clone(), _keep_alive: keep_alive })
     }
 
     /// A session for a program that couldn't be started: a terminal to say
@@ -392,7 +411,7 @@ impl Session {
         let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
         let reported_cwd = listener.reported_cwd.clone();
         let last_output = listener.last_output.clone();
-        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, last_output, _keep_alive: Vec::new() }
+        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, last_output, reported_ssh: listener.reported_ssh.clone(), _keep_alive: Vec::new() }
     }
 
     /// When the program's output last arrived, if it has printed anything.
@@ -421,6 +440,18 @@ impl Session {
     /// Everything the shell reported about its directory.
     pub fn reported_dirs(&self) -> cwd::Reported {
         self.reported_cwd.lock().map(|r| r.clone()).unwrap_or_default()
+    }
+
+    /// The arguments of the ssh the shell says it's running (with the pane's
+    /// token, see `wtpp_config::ssh`), as the user gave them.
+    pub fn reported_ssh(&self) -> Option<Vec<String>> {
+        self.reported_ssh.lock().ok()?.clone()
+    }
+
+    /// The ssh the shell runs in the foreground, found among its processes
+    /// (see [`ssh::foreground_ssh`]).
+    pub fn foreground_ssh(&self) -> Option<ssh::Found> {
+        ssh::foreground_ssh(self.pid?)
     }
 
     /// The shell process's working directory (see [`cwd::process_cwd`]).
@@ -612,7 +643,7 @@ mod win32_input_tests {
         shells[1].args = wtpp_config::cwd::powershell_args_with_hook("powershell.exe", &shells[1].args).unwrap();
         if let Ok(distro) = std::env::var("WTPP_TEST_WSL_DISTRO") {
             let mut wsl = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
-            wsl.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None));
+            wsl.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, &[]));
             shells.push(wsl);
         }
         for mut profile in shells {
@@ -926,7 +957,7 @@ mod shown_name_tests {
                 p.env.insert("HOME".into(), home_text.clone());
                 p.env.remove("ZDOTDIR");
                 let var = |n: &str| (n == "HOME").then(|| home_text.clone());
-                p.env.extend(wtpp_config::cwd::unix_prompt_env("zsh", Some(&integration.to_string_lossy()), var));
+                p.env.extend(wtpp_config::cwd::unix_prompt_env("zsh", Some(&integration.to_string_lossy()), var, true, &[]));
                 p.cwd = Some("/".into());
                 p
             };
@@ -951,7 +982,7 @@ mod shown_name_tests {
         let Ok(distro) = std::env::var("WTPP_TEST_WSL_DISTRO") else { return };
         let commandline = format!("wsl.exe ~ -d {distro}");
         let mut parent = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
-        parent.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None));
+        parent.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, &[]));
         let session = Session::spawn(&parent, SIZE, |_| {}).unwrap();
         assert!(wait(|| session.reported_cwd().is_some()));
         type_line(&session, "cd /bin");
@@ -965,11 +996,359 @@ mod shown_name_tests {
         let mut child = Profile::new("wsl", &program, &[]);
         child.args = args;
         child.cwd = Some(dir.into());
-        child.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, reported.logical.as_deref()));
+        child.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, reported.logical.as_deref(), true, &[]));
         let new = Session::spawn(&child, SIZE, |_| {}).unwrap();
         assert!(wait(|| new.reported_cwd().is_some()));
         type_line(&new, "pwd");
         assert!(wait(|| lines(&new).iter().any(|l| l == "/bin")), "{:?}", lines(&new));
         assert_eq!(new.reported_dirs().logical.as_deref(), Some("/bin"));
+    }
+}
+
+/// A pane in ssh: its shell reports it (and nothing else can), a new pane
+/// runs the same ssh, sharing the connection. Real shells through the real
+/// spawn path, real ssh (to a test address that never answers, so nothing
+/// logs in anywhere; see `real_sharing` for a real server).
+#[cfg(test)]
+mod ssh_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const SIZE: GridSize = GridSize { cols: 200, rows: 40, cell_width: 8, cell_height: 16 };
+
+    fn screen(session: &Session) -> Vec<String> {
+        let term = session.term().lock();
+        let grid = term.grid();
+        (0..SIZE.rows as i32)
+            .map(|l| {
+                (0..SIZE.cols as usize)
+                    .map(|c| grid[alacritty_terminal::index::Line(l)][alacritty_terminal::index::Column(c)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn wait(secs: u64, what: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while !what() && start.elapsed() < Duration::from_secs(secs) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        what()
+    }
+
+    fn type_line(session: &Session, line: &str) {
+        session.write(format!("{line}\r").into_bytes());
+    }
+
+    fn shows(session: &Session, text: &str) -> bool {
+        screen(session).iter().any(|l| l == text)
+    }
+
+    /// A place for the test's files, short enough for socket paths.
+    #[cfg(unix)]
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(format!("/tmp/wtpp-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A shell as wt++ starts it, with the ssh function, and `ssh` to run.
+    #[cfg(unix)]
+    fn shell(program: &str, args: &[&str], dir: &std::path::Path, zsh_dir: Option<&str>, ssh: Option<&[String]>) -> Profile {
+        let mut p = Profile::new("t", program, args);
+        let token = wtpp_config::ssh::new_token();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        // A zsh unpacked somewhere (see `zsh`) finds its modules by this.
+        if let Ok(modules) = std::env::var("WTPP_TEST_ZSH_MODULES") {
+            std::fs::write(home.join(".zshenv"), format!("module_path=({modules})\n")).unwrap();
+        }
+        p.env.insert("HOME".into(), home.to_string_lossy().into_owned());
+        p.env.insert("XDG_RUNTIME_DIR".into(), dir.join("run").to_string_lossy().into_owned());
+        p.env.remove("ZDOTDIR");
+        let home_text = home.to_string_lossy().into_owned();
+        let var = |n: &str| (n == "HOME").then(|| home_text.clone());
+        let file = program.rsplit('/').next().unwrap();
+        p.env.extend(wtpp_config::cwd::unix_prompt_env(file, zsh_dir, var, true, &wtpp_config::ssh::shell_env(&token, ssh)));
+        p.ssh_token = Some(token);
+        p.cwd = Some(dir.to_path_buf());
+        p
+    }
+
+    #[cfg(unix)]
+    fn check_shell(program: &str, shell_args: &[&str], zsh_dir: Option<&str>) {
+        let dir = scratch(&format!("ssht-{}", program.rsplit('/').next().unwrap()));
+        let config = dir.join("config");
+        std::fs::write(&config, "Host *\n  ConnectTimeout 30\n  BatchMode yes\n  UserKnownHostsFile /dev/null\n").unwrap();
+        let theirs = dir.join("theirs");
+        std::fs::write(&theirs, format!("Host *\n  ControlMaster auto\n  ControlPath {}/their-%C\n", dir.display())).unwrap();
+        let parent = Session::spawn(&shell(program, shell_args, &dir, zsh_dir, None), SIZE, |_| {}).unwrap();
+        assert!(wait(20, || parent.reported_cwd().is_some()), "{:?}", screen(&parent));
+
+        // The token is the shell's alone.
+        type_line(&parent, "echo \"t=${WTPP_TOKEN-unset} n=$(env | grep -c ^WTPP_TOKEN=) f=$(type ssh | head -1)\"");
+        assert!(wait(10, || screen(&parent).iter().any(|l| l.starts_with("t=unset n=0 f=ssh is"))), "{:?}", screen(&parent));
+
+        // A forged report, with no token or a wrong one: nothing.
+        type_line(&parent, "printf '\\033]6973;ssh;%s;-oProxyCommand=x;h\\033\\\\' \"${WTPP_TOKEN-}\" 0123456789abcdef0123456789abcdef; echo forged");
+        assert!(wait(10, || shows(&parent, "forged")));
+        assert_eq!(parent.reported_ssh(), None);
+
+        // ssh, with a forward and a command that aren't carried over.
+        let typed = ["-F", &config.to_string_lossy(), "-p", "2222", "-L", "8022:localhost:22", "me@192.0.2.1", "uptime"].map(String::from);
+        type_line(&parent, &format!("ssh {}", typed.join(" ")));
+        assert!(wait(10, || parent.reported_ssh().is_some()), "{:?}", screen(&parent));
+        assert_eq!(parent.reported_ssh().unwrap(), typed);
+        let socket_dir = dir.join("run/wtpp-ssh");
+        let control_path = format!("ControlPath={}/%C", socket_dir.display());
+        // Found among the shell's processes too: with the connection shared.
+        let found = parent.foreground_ssh().unwrap();
+        assert!(found.program.ends_with("ssh"), "{found:?}");
+        let mut shared = ["-o", "ControlMaster=auto", "-o", &control_path, "-o", "ControlPersist=10m"].map(String::from).to_vec();
+        shared.extend(typed.iter().cloned());
+        assert_eq!(found.args, shared);
+        assert_eq!(std::fs::metadata(&socket_dir).unwrap().permissions().mode() & 0o777, 0o700);
+
+        // The new pane runs it, through its own function.
+        let args = wtpp_config::ssh::session_args(&parent.reported_ssh().unwrap()).unwrap();
+        assert_eq!(args, ["-F", &config.to_string_lossy(), "-p", "2222", "me@192.0.2.1"]);
+        let child = Session::spawn(&shell(program, shell_args, &dir, zsh_dir, Some(&args)), SIZE, |_| {}).unwrap();
+        assert!(wait(20, || child.reported_ssh().is_some()), "{:?}", screen(&child));
+        assert_eq!(child.reported_ssh().unwrap(), args);
+        let found = child.foreground_ssh().unwrap();
+        assert!(found.args.contains(&control_path), "{found:?}");
+        assert!(child.reported_cwd().is_some());
+
+        // Done (Ctrl+C): it says so, and it's in the history.
+        parent.write(&b"\x03"[..]);
+        assert!(wait(10, || parent.reported_ssh().is_none()));
+        child.write(&b"\x03"[..]);
+        assert!(wait(10, || child.reported_ssh().is_none()));
+        assert!(wait(5, || child.foreground_ssh().is_none()));
+        child.write(&b"\x1b[A"[..]);
+        let recalled = format!("ssh {}", args.join(" "));
+        assert!(wait(10, || screen(&child).iter().any(|l| l.ends_with(&recalled))), "{:?}", screen(&child));
+        child.write(&b"\x15"[..]);
+
+        // The user's own ControlMaster wins, and -V isn't a session.
+        type_line(&parent, &format!("ssh -F {} me@192.0.2.1", theirs.display()));
+        assert!(wait(10, || parent.reported_ssh().is_some()));
+        let found = parent.foreground_ssh().unwrap();
+        assert_eq!(found.args, ["-F", &theirs.to_string_lossy(), "me@192.0.2.1"]);
+        parent.write(&b"\x03"[..]);
+        assert!(wait(10, || parent.reported_ssh().is_none()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    #[test]
+    fn bash() {
+        if std::process::Command::new("ssh").arg("-V").output().is_err() {
+            return;
+        }
+        check_shell("bash", &["--norc", "--noprofile", "-i"], None);
+    }
+
+    /// Set WTPP_TEST_ZSH to a zsh to run it (and WTPP_TEST_ZSH_MODULES to
+    /// its modules' directory, if it's not where it was built for).
+    #[cfg(unix)]
+    #[test]
+    fn zsh() {
+        let Ok(zsh) = std::env::var("WTPP_TEST_ZSH") else { return };
+        let dir = scratch("sshz-files");
+        wtpp_config::cwd::write_zsh_integration(&dir).unwrap();
+        check_shell(&zsh, &["-i"], Some(&dir.to_string_lossy()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A real server (an sshd of the test's own, on a high port, with keys
+    /// made for it): the new pane gets in without logging in again, the
+    /// first one can go, and the connection stays a while after the last.
+    /// Set WTPP_TEST_SSHD to an sshd to run it.
+    #[cfg(unix)]
+    #[test]
+    fn real_sharing() {
+        let Ok(sshd) = std::env::var("WTPP_TEST_SSHD") else { return };
+        use std::process::Command;
+        let dir = scratch("sshd");
+        let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        for key in ["host", "id"] {
+            let made = Command::new("ssh-keygen").args(["-q", "-t", "ed25519", "-N", "", "-f", &path(key)]).status().unwrap();
+            assert!(made.success());
+        }
+        std::fs::copy(path("id.pub"), path("authorized_keys")).unwrap();
+        let port = 20000 + std::process::id() % 20000;
+        let user = std::env::var("USER").unwrap();
+        std::fs::write(
+            path("sshd_config"),
+            format!(
+                "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nAuthorizedKeysFile {}\nPidFile none\nUsePAM no\nStrictModes no\n\
+                 PasswordAuthentication no\nKbdInteractiveAuthentication no\nLogLevel VERBOSE\n",
+                path("host"),
+                path("authorized_keys")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            path("config"),
+            format!(
+                "Host wtpptest\n  HostName 127.0.0.1\n  Port {port}\n  User {user}\n  IdentityFile {}\n  IdentitiesOnly yes\n  IdentityAgent none\n\
+                 UserKnownHostsFile {}\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking accept-new\n  BatchMode yes\n",
+                path("id"),
+                path("known_hosts")
+            ),
+        )
+        .unwrap();
+        let mut server = Command::new(&sshd).args(["-D", "-f", &path("sshd_config"), "-E", &path("sshd.log")]).spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let logins = || std::fs::read_to_string(path("sshd.log")).unwrap_or_default().matches("Accepted publickey").count();
+
+        let first = Session::spawn(&shell("bash", &["--norc", "--noprofile", "-i"], &dir, None, None), SIZE, |_| {}).unwrap();
+        assert!(wait(20, || first.reported_cwd().is_some()));
+        type_line(&first, &format!("ssh -F {} wtpptest", path("config")));
+        assert!(wait(10, || first.reported_ssh().is_some()));
+        type_line(&first, "echo remote-$((40+2))");
+        assert!(wait(20, || shows(&first, "remote-42")), "{:?} {}", screen(&first), std::fs::read_to_string(path("sshd.log")).unwrap_or_default());
+        assert_eq!(logins(), 1);
+
+        let args = wtpp_config::ssh::session_args(&first.reported_ssh().unwrap()).unwrap();
+        let second = Session::spawn(&shell("bash", &["--norc", "--noprofile", "-i"], &dir, None, Some(&args)), SIZE, |_| {}).unwrap();
+        assert!(wait(20, || second.reported_ssh().is_some()));
+        type_line(&second, "echo second-$((1+1))");
+        assert!(wait(20, || shows(&second, "second-2")), "{:?}", screen(&second));
+        // Over the first one's connection: no new login.
+        assert_eq!(logins(), 1);
+        let control = format!("ControlPath={}/run/wtpp-ssh/%C", dir.display());
+        let check = |command: &str| {
+            let out = Command::new("ssh").args(["-F", &path("config"), "-o", &control, "-O", command, "wtpptest"]).output().unwrap();
+            String::from_utf8_lossy(&out.stderr).into_owned()
+        };
+        assert!(check("check").starts_with("Master running"), "{}", check("check"));
+
+        // The first pane closes: the second stays connected.
+        drop(first);
+        std::thread::sleep(Duration::from_millis(500));
+        type_line(&second, "echo still-$((2+1))");
+        assert!(wait(20, || shows(&second, "still-3")), "{:?}", screen(&second));
+        // Its ssh ends as ever, and the connection stays for the next one.
+        type_line(&second, "exit");
+        assert!(wait(20, || second.reported_ssh().is_none()));
+        std::thread::sleep(Duration::from_millis(300));
+        println!("after exit: {:?}", screen(&second).iter().filter(|l| !l.is_empty()).collect::<Vec<_>>());
+        assert!(check("check").starts_with("Master running"));
+        let third = Session::spawn(&shell("bash", &["--norc", "--noprofile", "-i"], &dir, None, Some(&args)), SIZE, |_| {}).unwrap();
+        type_line(&third, "echo third-$((3+1))");
+        assert!(wait(20, || shows(&third, "third-4")), "{:?}", screen(&third));
+        assert_eq!(logins(), 1);
+        drop(third);
+        drop(second);
+        check("exit");
+        server.kill().ok();
+        server.wait().ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// bash in WSL: Windows doesn't see its ssh, the report says. The new
+    /// pane (the same distro) runs it. Set WTPP_TEST_WSL_DISTRO to run it.
+    #[cfg(windows)]
+    #[test]
+    fn wsl() {
+        let Ok(distro) = std::env::var("WTPP_TEST_WSL_DISTRO") else { return };
+        let pane = |ssh: Option<&[String]>| {
+            let mut p = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
+            let token = wtpp_config::ssh::new_token();
+            p.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, &wtpp_config::ssh::shell_env(&token, ssh)));
+            p.ssh_token = Some(token);
+            Session::spawn(&p, SIZE, |_| {}).unwrap()
+        };
+        let parent = pane(None);
+        assert!(wait(30, || parent.reported_cwd().is_some()), "{:?}", screen(&parent));
+        type_line(&parent, "echo \"t=${WTPP_TOKEN-unset} f=$(type -t ssh)\"");
+        assert!(wait(10, || shows(&parent, "t=unset f=function")), "{:?}", screen(&parent));
+        let typed = ["-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-p", "2222", "-L", "1:x:1", "me@192.0.2.1", "uptime"].map(String::from);
+        type_line(&parent, &format!("ssh {}", typed.join(" ")));
+        assert!(wait(10, || parent.reported_ssh().is_some()), "{:?}", screen(&parent));
+        assert_eq!(parent.reported_ssh().unwrap(), typed);
+        assert_eq!(parent.foreground_ssh(), None);
+        let args = wtpp_config::ssh::session_args(&typed).unwrap();
+        assert_eq!(args, ["-F", "/dev/null", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-p", "2222", "me@192.0.2.1"]);
+        let child = pane(Some(&args));
+        assert!(wait(30, || child.reported_ssh().is_some()), "{:?}", screen(&child));
+        assert_eq!(child.reported_ssh().unwrap(), args);
+        assert!(child.reported_cwd().is_some());
+        for session in [&parent, &child] {
+            session.write(&b"\x03"[..]);
+            assert!(wait(10, || session.reported_ssh().is_none()));
+        }
+        // Back at the shell, where it was.
+        type_line(&child, "echo back-$((1+1)) ${WTPP_SSH-gone}");
+        assert!(wait(10, || shows(&child, "back-2 gone")), "{:?}", screen(&child));
+    }
+
+    /// Windows' own ssh.exe, which shares nothing: found among the shell's
+    /// processes, and run again by PowerShell and cmd.
+    #[cfg(windows)]
+    #[test]
+    fn windows_ssh() {
+        let Some(ssh) = std::env::var("SystemRoot").ok().map(|r| format!(r"{r}\System32\OpenSSH\ssh.exe")).filter(|p| std::path::Path::new(p).exists()) else {
+            return;
+        };
+        let typed = ["-F", "NUL", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-p", "2222", "me@192.0.2.1"].map(String::from);
+        let ps = |run: Option<&[String]>| {
+            let mut p = Profile::new("ps", "powershell.exe", &["-NoLogo", "-NoProfile"]);
+            let mut command = wtpp_config::cwd::POWERSHELL_PROMPT_HOOK.to_string();
+            if let Some(args) = run {
+                command = format!("{command}; {}", wtpp_config::ssh::POWERSHELL_SSH_RUN);
+                p.env.insert("WTPP_SSH".into(), wtpp_config::ssh::env_value(args));
+                p.env.insert("WTPP_SSH_PROGRAM".into(), ssh.clone());
+            }
+            p.args = wtpp_config::cwd::powershell_args_with_command("powershell.exe", &p.args, &command).unwrap();
+            p.cwd = std::env::var("SystemRoot").ok().map(Into::into);
+            Session::spawn(&p, SIZE, |_| {}).unwrap()
+        };
+        let parent = ps(None);
+        assert!(wait(30, || parent.reported_cwd().is_some()));
+        type_line(&parent, &format!("ssh {}", typed.join(" ")));
+        assert!(wait(10, || parent.foreground_ssh().is_some()), "{:?}", screen(&parent));
+        let found = parent.foreground_ssh().unwrap();
+        assert!(found.program.to_string_lossy().eq_ignore_ascii_case(&ssh), "{found:?}");
+        assert_eq!(found.args, typed);
+        let args = wtpp_config::ssh::session_args(&found.args).unwrap();
+
+        let child = ps(Some(&args));
+        assert!(wait(30, || child.foreground_ssh().is_some()), "{:?}", screen(&child));
+        assert_eq!(child.foreground_ssh().unwrap().args, typed);
+        let mut cmd = Profile::new("cmd", "cmd.exe", &[]);
+        cmd.args = wtpp_config::ssh::cmd_args(&ssh, &args).unwrap();
+        let cmd = Session::spawn(&cmd, SIZE, |_| {}).unwrap();
+        assert!(wait(30, || cmd.foreground_ssh().is_some()), "{:?}", screen(&cmd));
+        assert_eq!(cmd.foreground_ssh().unwrap().args, typed);
+        for session in [&parent, &child, &cmd] {
+            session.write(&b"\x03"[..]);
+            assert!(wait(10, || session.foreground_ssh().is_none()), "{:?}", screen(session));
+        }
+        // Back at their shells.
+        type_line(&child, "echo back-$(1+1)");
+        assert!(wait(10, || shows(&child, "back-2")), "{:?}", screen(&child));
+    }
+
+    /// An `ssh` alias or function of the user's stays theirs.
+    #[cfg(unix)]
+    #[test]
+    fn users_own_ssh() {
+        let dir = scratch("sshown");
+        let rc = dir.join("rc");
+        std::fs::write(&rc, "alias ssh='echo mine'\n").unwrap();
+        let rc_text = rc.to_string_lossy().into_owned();
+        let session = Session::spawn(&shell("bash", &["--noprofile", "--rcfile", &rc_text, "-i"], &dir, None, None), SIZE, |_| {}).unwrap();
+        assert!(wait(20, || session.reported_cwd().is_some()));
+        type_line(&session, "echo \"k=$(type -t ssh)\"");
+        assert!(wait(10, || shows(&session, "k=alias")), "{:?}", screen(&session));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

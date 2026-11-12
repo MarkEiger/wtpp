@@ -31,6 +31,14 @@
 - Linux and macOS: a pane whose shell exited shows its exit code without the
   Windows-style hex form.
 
+- Splitting a pane or duplicating a tab that's in ssh opens the new one in
+  ssh to the same place. In bash and zsh (WSL, Linux, macOS) it shares the
+  first one's connection: no new login or password. For that, wt++ gives
+  them an `ssh` function that turns on OpenSSH's connection sharing where
+  your ssh configuration has none. Windows' own ssh.exe can't share, so
+  there you log in again. Settings → Interaction → New panes from an ssh
+  session connect to the same place turns it off. See the README.
+
 ## 1.3.2 — 2026-11-12
 
 - Linux and macOS: a pane whose starting directory doesn't exist (any more)
