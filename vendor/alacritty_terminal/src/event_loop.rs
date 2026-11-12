@@ -172,6 +172,29 @@ where
         Ok(processed)
     }
 
+    /// wtpp patch: read the output of a program that has exited until it
+    /// ends (Unix: EIO), or has been quiet for `QUIET`, for `MAX` at most.
+    fn drain<X>(&mut self, state: &mut State, buf: &mut [u8], mut writer: Option<&mut X>)
+    where
+        X: Write,
+    {
+        const QUIET: Duration = Duration::from_millis(100);
+        const MAX: Duration = Duration::from_secs(2);
+        let start = Instant::now();
+        let mut last = start;
+        loop {
+            match self.pty_read(state, buf, writer.as_deref_mut()) {
+                Ok(0) => {},
+                Ok(_) => last = Instant::now(),
+                Err(_) => break,
+            }
+            if last.elapsed() >= QUIET || start.elapsed() >= MAX {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[inline]
     fn pty_write(&mut self, state: &mut State) -> io::Result<()> {
         state.ensure_next();
@@ -284,11 +307,16 @@ where
                             if let Some(tty::ChildEvent::Exited(status)) =
                                 self.pty.next_child_event()
                             {
+                                // wtpp patch: what the program printed last can
+                                // still be on its way (ConPTY paints it on its
+                                // own schedule): read until the output has been
+                                // quiet for a moment, and only then report the
+                                // exit, so the exit note comes after it.
+                                if self.drain_on_exit {
+                                    self.drain(&mut state, &mut buf, pipe.as_mut());
+                                }
                                 if let Some(status) = status {
                                     self.event_proxy.send_event(Event::ChildExit(status));
-                                }
-                                if self.drain_on_exit {
-                                    let _ = self.pty_read(&mut state, &mut buf, pipe.as_mut());
                                 }
                                 self.terminal.lock().exit();
                                 self.event_proxy.send_event(Event::Wakeup);

@@ -12,6 +12,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -153,6 +154,8 @@ pub struct Listener {
     recent_output: Arc<Mutex<Vec<u8>>>,
     /// The directory the shell last reported (see [`cwd::parse_cwd_osc`]).
     reported_cwd: Arc<Mutex<cwd::Reported>>,
+    /// When output last arrived.
+    last_output: Arc<Mutex<Option<Instant>>>,
 }
 
 impl Listener {
@@ -163,6 +166,9 @@ impl Listener {
     }
 
     fn scan_output(&self, bytes: &[u8]) {
+        if let Ok(mut last) = self.last_output.lock() {
+            *last = Some(Instant::now());
+        }
         const KEPT: usize = 160;
         if let Ok(mut recent) = self.recent_output.lock() {
             recent.extend_from_slice(&bytes[bytes.len().saturating_sub(KEPT)..]);
@@ -224,6 +230,8 @@ pub struct Session {
     pid: Option<u32>,
     /// See [`Listener::reported_cwd`].
     reported_cwd: Arc<Mutex<cwd::Reported>>,
+    /// See [`Listener::last_output`].
+    last_output: Arc<Mutex<Option<Instant>>>,
     /// For a handed-over console (see [`Pipes::keep_alive`]).
     _keep_alive: Vec<File>,
 }
@@ -242,6 +250,7 @@ impl Session {
             cwd_scanner: Default::default(),
             recent_output: Default::default(),
             reported_cwd: Default::default(),
+            last_output: Default::default(),
         };
 
         let config = Config {
@@ -313,7 +322,7 @@ impl Session {
         event_loop.spawn();
 
         let reported_cwd = listener.reported_cwd.clone();
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, _keep_alive: Vec::new() })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), _keep_alive: Vec::new() })
     }
 
     /// A session on a console Windows handed over (see [`Pipes`]): a thread
@@ -351,11 +360,21 @@ impl Session {
         })?;
 
         // The program ending is the session ending (the console host may
-        // outlive it); its last output gets a moment to arrive.
+        // outlive it); its last output gets time to arrive: until it has been
+        // quiet for a moment (see the PTY's `drain`).
         let callback = listener.callback.clone();
+        let last_output = listener.last_output.clone();
         std::thread::Builder::new().name("handoff-exit".into()).spawn(move || {
             let code = wait_exit();
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            let exited = Instant::now();
+            let quiet = Duration::from_millis(150);
+            loop {
+                std::thread::sleep(Duration::from_millis(10));
+                let last = last_output.lock().ok().and_then(|l| *l).map_or(exited, |l| l.max(exited));
+                if last.elapsed() >= quiet || exited.elapsed() >= Duration::from_secs(2) {
+                    break;
+                }
+            }
             callback(SessionEvent::Exited(code));
         })?;
 
@@ -364,7 +383,7 @@ impl Session {
         // The console host starts at its own default size.
         io.resize(size);
         let reported_cwd = listener.reported_cwd.clone();
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, _keep_alive: keep_alive })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), _keep_alive: keep_alive })
     }
 
     /// A session for a program that couldn't be started: a terminal to say
@@ -372,7 +391,13 @@ impl Session {
     pub fn failed(profile: &Profile, size: GridSize, on_event: impl Fn(SessionEvent) + Send + Sync + 'static) -> Session {
         let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
         let reported_cwd = listener.reported_cwd.clone();
-        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, _keep_alive: Vec::new() }
+        let last_output = listener.last_output.clone();
+        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, last_output, _keep_alive: Vec::new() }
+    }
+
+    /// When the program's output last arrived, if it has printed anything.
+    pub fn last_output(&self) -> Option<Instant> {
+        self.last_output.lock().ok().and_then(|l| *l)
     }
 
     pub fn term(&self) -> &Arc<FairMutex<Term<Listener>>> {
@@ -793,6 +818,44 @@ mod shown_name_tests {
 
     fn type_line(session: &Session, line: &str) {
         session.write(format!("{line}\r").into_bytes());
+    }
+
+    /// A program that prints and exits at once: all it printed is on the
+    /// screen by the time the session says it exited (that's when wt++
+    /// writes "[process exited]" under it), and stays there.
+    #[test]
+    fn output_before_exit_is_kept() {
+        let text = "wtpp-last-words: the quick brown fox jumps over the lazy dog";
+        #[cfg(windows)]
+        let profiles = vec![
+            Profile::new("cmd", "cmd.exe", &["/d", "/c", &format!("echo {text}& exit 3")]),
+            Profile::new("cmd", "cmd.exe", &["/d", "/c", &format!("echo {text}& echo {text}2& exit 3")]),
+        ];
+        #[cfg(unix)]
+        let profiles = vec![
+            Profile::new("sh", "sh", &["-c", &format!("echo '{text}'; exit 3")]),
+            Profile::new("sh", "sh", &["-c", &format!("echo '{text}'; echo '{text}2'; exit 3")]),
+        ];
+        for (n, mut profile) in profiles.into_iter().enumerate() {
+            profile.cwd = Some(if cfg!(windows) { std::env::var("SystemRoot").unwrap().into() } else { "/".into() });
+            for round in 0..5 {
+                let (tx, rx) = mpsc::channel();
+                let tx = Mutex::new(tx);
+                let session = Session::spawn(&profile, SIZE, move |e| {
+                    if let SessionEvent::Exited(code) = e {
+                        let _ = tx.lock().unwrap().send(code);
+                    }
+                })
+                .unwrap();
+                let code = rx.recv_timeout(Duration::from_secs(20)).expect("exit");
+                assert_eq!(code, Some(3));
+                let at_exit = lines(&session);
+                let shown = |lines: &[String]| lines.iter().filter(|l| l.starts_with(text)).count();
+                assert_eq!(shown(&at_exit), n + 1, "round {round}: {at_exit:?}");
+                std::thread::sleep(Duration::from_millis(300));
+                assert_eq!(shown(&lines(&session)), n + 1, "round {round}");
+            }
+        }
     }
 
     /// A directory and a symbolic link to it, with awkward names.
