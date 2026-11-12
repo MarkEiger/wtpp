@@ -43,6 +43,7 @@ export global SettingsData {
     in-out property <bool> multi-line-paste-warning;
     in-out property <bool> focus-follow-mouse;
     in-out property <bool> inherit-cwd;
+    in-out property <bool> split-ssh;
     in-out property <bool> allow-osc52;
     in-out property <bool> reload-env;
     in-out property <bool> remember-bounds;
@@ -357,6 +358,17 @@ component InteractionPage inherits VerticalLayout {
             checked <=> SettingsData.inherit-cwd;
             toggled => {
                 SettingsData.set-value("inheritWorkingDirectory", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "New panes from an ssh session connect to the same place";
+        description: "Splitting a pane or duplicating a tab that's in ssh opens ssh to the same host. In bash and zsh, ssh shares one connection, so there's no new login.";
+        Switch {
+            checked <=> SettingsData.split-ssh;
+            toggled => {
+                SettingsData.set-value("splitDuplicatesSsh", self.checked ? "true" : "false");
             }
         }
     }

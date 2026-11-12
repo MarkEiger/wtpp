@@ -514,6 +514,11 @@ pub struct Settings {
     /// PowerShell and WSL's bash are set up to report it (wt++ addition).
     #[serde(rename = "wtpp.inheritWorkingDirectory")]
     pub inherit_working_directory: bool,
+    /// Split panes and duplicated tabs of a pane that's in ssh open an ssh to
+    /// the same place, and bash and zsh get an `ssh` function that shares
+    /// the connection (wt++ addition, see `ssh`).
+    #[serde(rename = "wtpp.splitDuplicatesSsh")]
+    pub split_duplicates_ssh: bool,
     pub multi_line_paste_warning: bool,
     pub large_paste_warning: bool,
     pub show_tabs_in_titlebar: bool,
@@ -554,6 +559,7 @@ impl Default for Settings {
             remember_window_bounds: true,
             profiles_discovered: false,
             inherit_working_directory: true,
+            split_duplicates_ssh: true,
             multi_line_paste_warning: true,
             large_paste_warning: true,
             show_tabs_in_titlebar: true,
@@ -1611,6 +1617,10 @@ mod tests {
         let off = Settings::parse(r#"{ "wtpp.inheritWorkingDirectory": false }"#).unwrap();
         assert!(!off.inherit_working_directory);
         assert!(off.to_json().contains("\"wtpp.inheritWorkingDirectory\": false"));
+        assert!(off.split_duplicates_ssh);
+        let off = Settings::parse(r#"{ "wtpp.splitDuplicatesSsh": false }"#).unwrap();
+        assert!(!off.split_duplicates_ssh && off.inherit_working_directory);
+        assert!(off.to_json().contains("\"wtpp.splitDuplicatesSsh\": false"));
         assert_eq!(Settings::parse(&off.to_json()).unwrap(), off);
     }
 

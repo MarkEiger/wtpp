@@ -31,6 +31,9 @@ pub struct Profile {
     pub word_delimiters: String,
     /// Icon for discovered shells whose program has none embedded.
     pub icon: Option<String>,
+    /// The token the shell's ssh reports carry (see `wtpp_config::ssh`); the
+    /// shell gets it in `env`. None: reports aren't taken.
+    pub ssh_token: Option<String>,
 }
 
 impl Profile {
@@ -49,6 +52,7 @@ impl Profile {
             cursor_shape: CursorShape::Beam,
             word_delimiters: ",│`|:\"' ()[]{}<>\t".into(),
             icon: None,
+            ssh_token: None,
         }
     }
 }

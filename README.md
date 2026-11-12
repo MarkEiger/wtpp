@@ -67,6 +67,46 @@ precmd() { printf '\e]7;file://%s\e\\' "${PWD//\%/%25}" }
 Settings → Interaction → **New panes start in the current directory** turns
 all of this off.
 
+## New panes in the same ssh session
+
+Splitting a pane (with its own profile: Ctrl+Shift+Plus/Minus, ⌘D) or
+duplicating a tab while the pane is in ssh opens the new one in ssh to the
+same place, with the same options (but no port forwards, `-f`/`-N`, or
+remote command). Exit that ssh and you're in a local shell in the same
+directory; ↑ brings the ssh command back.
+
+In bash and zsh it shares the first pane's connection, so there's no new
+login or password: wt++ gives them an `ssh` function (unless you have an
+`ssh` alias or function of your own) that turns on OpenSSH's connection
+sharing for hosts your ssh configuration doesn't set up sharing for
+(`ControlMaster`/`ControlPath`, in the config or on the command line). The
+connection's socket is in `$XDG_RUNTIME_DIR/wtpp-ssh` (or
+`~/.cache/wtpp-ssh`), and the connection stays up 10 minutes after its last
+session ends (`ControlPersist`), so closing the pane that opened it leaves the
+others connected. As with any shared connection, if the network goes away,
+new sessions to that host wait for it until it times out; `ssh -O exit host`
+closes it. This works in WSL (bash) and with bash and zsh on Linux and macOS.
+
+Windows' own ssh.exe (in PowerShell or Command Prompt) can't share a
+connection, so the new pane asks you to log in again. Shells without wt++'s
+integration (fish, or a `.bashrc` that sets its own `PROMPT_COMMAND`) get no
+`ssh` function either: on Linux and macOS wt++ still finds the ssh among the
+pane's processes, but in WSL it can't see it.
+
+Ctrl+Alt+Plus/Minus (split with the default profile) opens a plain shell.
+Settings → Interaction → **New panes from an ssh session connect to the same
+place** (`"wtpp.splitDuplicatesSsh"`) turns all of this off, the `ssh`
+function included; it's independent of **New panes start in the current
+directory**.
+
+The shell tells wt++ about the ssh by a private escape sequence carrying a
+random token only the pane's shell knows (not exported, so nothing it runs,
+and nothing on the other side of the ssh, has it); output from a remote host
+can't pretend to be one. And a new pane only ever runs `ssh`, with the
+arguments as they were, never a command line, and only options about where
+and how to connect: one with an option that runs something locally (such as
+`ProxyCommand`) opens a plain shell.
+
 ## Environment variables (Windows)
 
 New tabs and panes get the environment Windows has now, as Windows Terminal

@@ -5,6 +5,7 @@ pub mod actions;
 pub mod cwd;
 pub mod keymap;
 pub mod schemes;
+pub mod ssh;
 pub mod settings;
 
 pub use actions::{Action, Axis, Chord, Direction};

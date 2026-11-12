@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Splitting a pane or duplicating a tab that's in ssh opens the new one in
+  ssh to the same place. In bash and zsh (WSL, Linux, macOS) it shares the
+  first one's connection: no new login or password. For that, wt++ gives
+  them an `ssh` function that turns on OpenSSH's connection sharing where
+  your ssh configuration has none. Windows' own ssh.exe can't share, so
+  there you log in again. Settings → Interaction → New panes from an ssh
+  session connect to the same place turns it off. See the README.
 - Linux and macOS: a pane whose starting directory doesn't exist (any more)
   opens in your home folder, as on Windows, not in the directory wt++ itself
   was started from.

@@ -462,7 +462,7 @@ impl App {
     /// Start a pane running `profile`, in `start_in` if given (see
     /// `Pane::started_in`), else where the profile says.
     fn spawn_pane(&mut self, id: PaneId, profile: ResolvedProfile, rect: Rect, start_in: Option<StartIn>) -> bool {
-        self.spawn_pane_on(id, profile, rect, start_in, None)
+        self.spawn_pane_on(id, profile, rect, start_in, None, None)
     }
 
     /// Start a pane: the profile's shell, or with `pipes`, a console Windows
@@ -474,9 +474,10 @@ impl App {
         rect: Rect,
         start_in: Option<StartIn>,
         pipes: Option<wtpp_session::Pipes>,
+        ssh: Option<SshStart>,
     ) -> bool {
         let Some(size) = self.grid_size(&profile, rect) else { return false };
-        let session_profile = self.session_profile(&profile, start_in.as_ref());
+        let session_profile = self.session_profile(&profile, start_in.as_ref(), ssh.as_ref());
         let pending = self.redraw_pending.clone();
         let on_event = move |event| match event {
             SessionEvent::Wakeup => {
@@ -531,7 +532,7 @@ impl App {
                 log::warn!("{}: can't start in {}, using the home folder: {e:#}", profile.name, dir.display());
                 let mut at_home = profile.clone();
                 at_home.starting_directory = None;
-                Session::spawn(&self.session_profile(&at_home, None), size, on_event)
+                Session::spawn(&self.session_profile(&at_home, None, ssh.as_ref()), size, on_event)
             }),
         };
         match session {
@@ -610,8 +611,34 @@ impl App {
         start
     }
 
+    /// The ssh a new pane opened from `source` (with the same profile) runs:
+    /// the one `source`'s shell reported running, or else the one found
+    /// running in its foreground, with the arguments that carry over (see
+    /// `wtpp_config::ssh::session_args`). `None` if there's none, or if
+    /// that's turned off.
+    fn ssh_to_duplicate(&self, source: &Pane) -> Option<SshStart> {
+        if !self.settings.split_duplicates_ssh {
+            return None;
+        }
+        let session = &source.session;
+        let (program, args) = match session.reported_ssh() {
+            Some(args) => (None, args),
+            None => {
+                let found = session.foreground_ssh()?;
+                (Some(found.program.to_string_lossy().into_owned()), found.args)
+            }
+        };
+        match wtpp_config::ssh::session_args(&args) {
+            Ok(args) => Some(SshStart { program, args }),
+            Err(why) => {
+                log::info!("the new pane doesn't run the ssh of the one it's from: {why}");
+                None
+            }
+        }
+    }
+
     /// Everything the session needs to start a profile's shell.
-    fn session_profile(&self, p: &ResolvedProfile, start_in: Option<&StartIn>) -> wtpp_session::Profile {
+    fn session_profile(&self, p: &ResolvedProfile, start_in: Option<&StartIn>, ssh: Option<&SshStart>) -> wtpp_session::Profile {
         // Windows: the environment as it's set now, not as wt++ got it.
         let base_env = (cfg!(windows) && self.settings.reload_environment_variables)
             .then(wtpp_session::env::pane_environment)
@@ -648,21 +675,60 @@ impl App {
         };
         profile.word_delimiters = self.settings.word_delimiters.clone();
         profile.env = p.environment.iter().map(|(k, v)| (k.clone(), expand_env(v))).collect();
-        // Shells whose directory can't be read from outside report it.
-        if self.settings.inherit_working_directory {
-            if let Some(args) = wtpp_config::cwd::powershell_args_with_hook(&program, &profile.args) {
+        // Shells whose directory can't be read from outside report it, and
+        // bash and zsh get the ssh function (see `wtpp_config::ssh`), each as
+        // its setting says.
+        let cwd = self.settings.inherit_working_directory;
+        let token = self.settings.split_duplicates_ssh.then(wtpp_config::ssh::new_token);
+        let ssh = ssh.filter(|_| self.settings.split_duplicates_ssh);
+        let ssh_env = token.as_deref().map(|t| wtpp_config::ssh::shell_env(t, ssh.map(|s| &s.args[..]))).unwrap_or_default();
+        let mut ssh_runs = false;
+        if is_powershell(&program) {
+            use wtpp_config::cwd::{POWERSHELL_PROMPT_HOOK, powershell_args_with_command};
+            // Windows' ssh.exe: run after the profile (and the hook).
+            let run = ssh.and_then(|s| Some((s.program.clone()?, &s.args))).filter(|(_, args)| wtpp_config::ssh::fits_powershell(args));
+            let command = [cwd.then_some(POWERSHELL_PROMPT_HOOK), run.as_ref().map(|_| wtpp_config::ssh::POWERSHELL_SSH_RUN)];
+            let command = command.into_iter().flatten().collect::<Vec<_>>().join("; ");
+            if !command.is_empty()
+                && let Some(args) = powershell_args_with_command(&program, &profile.args, &command)
+            {
                 profile.args = args;
-            } else if wtpp_config::settings::is_wsl_program(&program) {
-                let get = |name: &str| profile.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
-                let wslenv = get("WSLENV").or_else(|| var("WSLENV"));
-                let shown = start_in.and_then(|s| s.shown.as_deref());
-                let env = wtpp_config::cwd::wsl_prompt_env(get("PROMPT_COMMAND").is_some(), wslenv.as_deref(), shown);
+                if let Some((ssh_program, args)) = run {
+                    profile.env.insert("WTPP_SSH".into(), wtpp_config::ssh::env_value(args));
+                    profile.env.insert("WTPP_SSH_PROGRAM".into(), ssh_program);
+                    ssh_runs = true;
+                }
+            }
+        } else if is_cmd(&program) {
+            if let Some(args) = ssh.filter(|_| profile.args.is_empty()).and_then(|s| wtpp_config::ssh::cmd_args(s.program.as_deref()?, &s.args)) {
+                profile.args = args;
+                ssh_runs = true;
+            }
+        } else if wtpp_config::settings::is_wsl_program(&program) {
+            let get = |name: &str| profile.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
+            let wslenv = get("WSLENV").or_else(|| var("WSLENV"));
+            let shown = start_in.and_then(|s| s.shown.as_deref());
+            let env = wtpp_config::cwd::wsl_prompt_env(get("PROMPT_COMMAND").is_some(), wslenv.as_deref(), shown, cwd, &ssh_env);
+            if !env.is_empty() {
                 profile.env.retain(|k, _| !k.eq_ignore_ascii_case("WSLENV"));
-                profile.env.extend(env);
-            } else if cfg!(unix) {
-                let get = |name: &str| profile.env.get(name).cloned().or_else(|| var(name));
-                let env = wtpp_config::cwd::unix_prompt_env(&program, zsh_integration().as_deref(), get);
-                profile.env.extend(env);
+            }
+            profile.env.extend(env);
+        } else if cfg!(unix) {
+            let get = |name: &str| profile.env.get(name).cloned().or_else(|| var(name));
+            let env = wtpp_config::cwd::unix_prompt_env(&program, zsh_integration().as_deref(), get, cwd, &ssh_env);
+            profile.env.extend(env);
+        }
+        // The shell has the token, and the ssh to run if it was given it.
+        let has = |name: &str| profile.env.contains_key(name);
+        if has("WTPP_TOKEN") {
+            profile.ssh_token = token;
+            ssh_runs |= has("WTPP_SSH");
+        }
+        if let Some(ssh) = ssh {
+            if ssh_runs {
+                log::info!("{} runs ssh {:?}", p.name, ssh.args);
+            } else {
+                log::info!("{}: can't run ssh in {program} (no shell integration, or arguments it can't take)", p.name);
             }
         }
         // Unix: started in a symbolic link's name, the shell keeps that name
@@ -712,7 +778,7 @@ impl App {
         profile.commandline = format!("\"{program}\"");
         profile.key_encoding = KeyEncoding::Windows;
         let id = self.alloc_id();
-        if !self.spawn_pane_on(id, profile, self.content_area(), None, Some(handoff.into_pipes())) {
+        if !self.spawn_pane_on(id, profile, self.content_area(), None, Some(handoff.into_pipes()), None) {
             return;
         }
         self.tabs.push(Tab::new(TabKind::Terminal { root: Node::Leaf(id), focused: id, zoomed: false }));
@@ -725,8 +791,12 @@ impl App {
     }
 
     fn new_tab_in(&mut self, profile: ResolvedProfile, start_in: Option<StartIn>) {
+        self.new_tab_ssh(profile, start_in, None);
+    }
+
+    fn new_tab_ssh(&mut self, profile: ResolvedProfile, start_in: Option<StartIn>, ssh: Option<SshStart>) {
         let id = self.alloc_id();
-        if !self.spawn_pane(id, profile, self.content_area(), start_in) {
+        if !self.spawn_pane_on(id, profile, self.content_area(), start_in, None, ssh) {
             return;
         }
         self.tabs.push(Tab::new(TabKind::Terminal { root: Node::Leaf(id), focused: id, zoomed: false }));
@@ -748,6 +818,8 @@ impl App {
             }
         };
         let start_in = self.inherited_cwd(pane, &profile);
+        // Only into a pane like it: the same profile's shell can run it.
+        let ssh = duplicate.then(|| self.ssh_to_duplicate(pane)).flatten();
 
         let id = self.alloc_id();
         let area = self.content_area();
@@ -755,7 +827,7 @@ impl App {
         *zoomed = false;
         root.split(target, id, side.axis(), new_first);
         let rect = root.layout(area, PANE_GAP).into_iter().find(|(p, _)| *p == id).unwrap().1;
-        let spawned = self.spawn_pane(id, profile, rect, start_in);
+        let spawned = self.spawn_pane_on(id, profile, rect, start_in, None, ssh);
         if let TabKind::Terminal { root, focused, .. } = &mut self.tabs[self.active].kind {
             if spawned {
                 *focused = id;
@@ -1462,7 +1534,8 @@ impl App {
                 Some(pane) => {
                     let profile = pane.profile.clone();
                     let start_in = self.inherited_cwd(pane, &profile);
-                    self.new_tab_in(profile, start_in)
+                    let ssh = self.ssh_to_duplicate(pane);
+                    self.new_tab_ssh(profile, start_in, ssh)
                 }
                 None => return false,
             },
@@ -2242,6 +2315,15 @@ pub(crate) struct StartIn {
     /// The name the shell should show for it, symbolic links and all, where
     /// that's another name than `dir`'s (WSL), or `dir` itself (Unix).
     shown: Option<String>,
+}
+
+/// The ssh a new pane runs (see `App::ssh_to_duplicate`).
+#[derive(Clone, Debug)]
+pub(crate) struct SshStart {
+    /// The ssh program, where it was found running (Windows' panes run that).
+    program: Option<String>,
+    /// Its arguments.
+    args: Vec<String>,
 }
 
 /// A directory a pane is to start in.
