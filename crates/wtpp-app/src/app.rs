@@ -71,7 +71,54 @@ pub(crate) struct MovedTab {
 /// What the open confirmation dialog is about.
 pub(crate) enum Dialog {
     CloseWindow,
-    Paste(String),
+    /// Text to paste into a pane once confirmed.
+    Paste { pane: PaneId, text: String },
+}
+
+/// What a key does while a confirmation dialog is open: the dialog is modal,
+/// so nothing else (shell, shortcuts) gets any key until it's answered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DialogKey {
+    Confirm,
+    Cancel,
+    /// Move the keyboard focus to the other button.
+    SwitchButton,
+    Ignore,
+}
+
+/// Esc cancels; Enter and Space press the focused button (the confirm
+/// button unless Tab moved to Cancel), like a Windows message box; Tab,
+/// Shift+Tab and the arrows switch between the two buttons. Everything else,
+/// shortcuts included, does nothing.
+pub(crate) fn dialog_key(key: Option<(Key, Mods)>, confirm_focused: bool) -> DialogKey {
+    let Some((key, mods)) = key else { return DialogKey::Ignore };
+    if mods.ctrl || mods.alt || mods.meta {
+        return DialogKey::Ignore;
+    }
+    let press = if confirm_focused { DialogKey::Confirm } else { DialogKey::Cancel };
+    match key {
+        Key::Escape => DialogKey::Cancel,
+        Key::Enter => press,
+        Key::Char(' ') if !mods.shift => press,
+        Key::Tab => DialogKey::SwitchButton,
+        Key::Left | Key::Right if !mods.shift => DialogKey::SwitchButton,
+        _ => DialogKey::Ignore,
+    }
+}
+
+/// The warning to show before pasting `text`, if any. Like WT, a multi-line
+/// paste is only a risk without bracketed paste (the shell would run each
+/// line); off in settings means paste right away.
+pub(crate) fn paste_warning(text: &str, bracketed: bool, settings: &Settings) -> Option<&'static str> {
+    let multi_line = !bracketed && text.trim_end_matches(['\r', '\n']).contains(['\r', '\n']);
+    let large = text.len() > 5 * 1024;
+    if multi_line && settings.multi_line_paste_warning {
+        Some("You are about to paste text that contains multiple lines. Each line may run as a command.")
+    } else if large && settings.large_paste_warning {
+        Some("You are about to paste more than 5 KiB of text.")
+    } else {
+        None
+    }
 }
 
 pub(crate) enum TabKind {
@@ -1151,6 +1198,9 @@ impl App {
 
     /// A divider is dragged to `(x, y)` in content coordinates.
     pub fn on_divider_drag(&mut self, index: usize, x: f32, y: f32) {
+        if self.dialog.is_some() {
+            return;
+        }
         let Some(d) = self.dividers.get(index).cloned() else { return };
         let ratio = match d.axis {
             crate::pane_tree::Axis::Horizontal => (x - d.area.x) / d.area.w.max(1.0),
@@ -1314,6 +1364,9 @@ impl App {
 
     /// Text an input method composed (e.g. a macOS dead key: ⌥E E → é).
     pub fn on_text_input(&mut self, text: &str) {
+        if self.dialog.is_some() {
+            return;
+        }
         let Some(pane) = self.focused_pane() else { return };
         if pane.exited || text.is_empty() {
             return;
@@ -1324,6 +1377,9 @@ impl App {
 
     /// A key that bubbled up from a control in Settings: only shortcuts.
     pub fn on_shortcut_key(&mut self, text: &str, mods: Mods) -> bool {
+        if self.dialog.is_some() {
+            return true;
+        }
         let Some((key, mods)) = keys::from_slint(text, mods) else { return false };
         match self.keymap.lookup(key, mods).cloned() {
             Some(action) => self.run_action(action),
@@ -1334,6 +1390,12 @@ impl App {
     pub fn on_key(&mut self, text: &str, mods: Mods) -> bool {
         #[cfg(windows)]
         crate::platform::ensure_focus(self.ui().window());
+        // The dialog has the keyboard; should a key get here anyway, it's
+        // still the dialog's.
+        if self.dialog.is_some() {
+            self.on_dialog_key(text, mods);
+            return true;
+        }
         let key = keys::from_slint(text, mods);
         // A non-Latin layout (Hebrew, Russian, ...) turns Ctrl+Shift+W into
         // Ctrl+Shift+ц. Like WT, shortcuts and Ctrl+letter control codes go
@@ -1456,6 +1518,10 @@ impl App {
     /// Returns false when the action doesn't apply (e.g. copy without a
     /// selection), so the key goes to the shell instead.
     fn run_action(&mut self, action: Action) -> bool {
+        // Nothing happens behind an open dialog.
+        if self.dialog.is_some() {
+            return true;
+        }
         match action {
             Action::NewTab(index) => self.new_tab(index.unwrap_or_else(|| self.settings.default_profile_index())),
             Action::DuplicateTab => match self.focused_pane() {
@@ -1598,21 +1664,11 @@ impl App {
 
     fn paste(&mut self) {
         let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else { return };
-        let Some(pane) = self.focused_pane() else { return };
+        let Some(id) = self.active_terminal().map(|(_, id)| id) else { return };
+        let Some(pane) = self.panes.get(&id) else { return };
         let bracketed = pane.session.term().lock().mode().contains(TermMode::BRACKETED_PASTE);
-        // With bracketed paste the shell won't run pasted lines by itself,
-        // so (like WT) the multi-line warning only applies without it.
-        let multi_line = !bracketed && text.trim_end_matches(['\r', '\n']).contains(['\r', '\n']);
-        let large = text.len() > 5 * 1024;
-        let warning = if multi_line && self.settings.multi_line_paste_warning {
-            Some("You are about to paste text that contains multiple lines. Each line may run as a command.")
-        } else if large && self.settings.large_paste_warning {
-            Some("You are about to paste more than 5 KiB of text.")
-        } else {
-            None
-        };
-        match warning {
-            Some(body) => self.show_dialog(Dialog::Paste(text), "Paste anyway?", body, "Paste"),
+        match paste_warning(&text, bracketed, &self.settings) {
+            Some(body) => self.show_dialog(Dialog::Paste { pane: id, text }, "Paste anyway?", body, "Paste"),
             None => pane.session.write(paste_bytes(&text, bracketed)),
         }
     }
@@ -1642,13 +1698,34 @@ impl App {
         pane.session.write(paste_bytes(&text, bracketed));
     }
 
+    /// Open the confirmation dialog, modal: it takes the keyboard (its
+    /// confirm button has the focus) until it's answered. One at a time.
     fn show_dialog(&mut self, dialog: Dialog, title: &str, body: &str, confirm: &str) {
+        if self.dialog.is_some() {
+            return;
+        }
         let ui = self.ui();
         ui.set_dialog_title(title.into());
         ui.set_dialog_body(body.into());
         ui.set_dialog_confirm(confirm.into());
         ui.set_dialog_visible(true);
+        ui.invoke_focus_dialog(true);
+        // No selection being dragged out behind it.
+        for pane in self.panes.values_mut() {
+            pane.selecting = false;
+        }
         self.dialog = Some(dialog);
+    }
+
+    /// A key pressed while the dialog is open (see `dialog_key`).
+    pub fn on_dialog_key(&mut self, text: &str, mods: Mods) {
+        let ui = self.ui();
+        match dialog_key(keys::from_slint(text, mods), ui.get_dialog_confirm_focused()) {
+            DialogKey::Confirm => self.on_dialog_result(true),
+            DialogKey::Cancel => self.on_dialog_result(false),
+            DialogKey::SwitchButton => ui.invoke_focus_dialog(!ui.get_dialog_confirm_focused()),
+            DialogKey::Ignore => {}
+        }
     }
 
     pub fn on_dialog_result(&mut self, ok: bool) {
@@ -1660,20 +1737,30 @@ impl App {
                 self.close_confirmed = true;
                 crate::close_window(self.id);
             }
-            (Some(Dialog::Paste(text)), true) => {
-                if let Some(pane) = self.focused_pane() {
-                    let bracketed = pane.session.term().lock().mode().contains(TermMode::BRACKETED_PASTE);
+            // Into the pane it was for, wherever that is now.
+            (Some(Dialog::Paste { pane, text }), true) => {
+                if let Some(pane) = self.panes.get(&pane).filter(|p| !p.exited) {
+                    let bracketed = {
+                        let mut term = pane.session.term().lock();
+                        term.selection = None;
+                        term.mode().contains(TermMode::BRACKETED_PASTE)
+                    };
                     pane.session.write(paste_bytes(&text, bracketed));
                 }
             }
             _ => {}
         }
+        self.render();
     }
 
     // ---- window close ---------------------------------------------------------------
 
     /// The window's close button: ask first when several tabs are open.
     pub fn on_close_requested(&mut self) -> slint::CloseRequestResponse {
+        // Alt+F4 or the close button with a dialog open: answer it first.
+        if self.dialog.is_some() && !self.close_confirmed {
+            return slint::CloseRequestResponse::KeepWindowShown;
+        }
         let terminals = self.tabs.iter().filter(|t| matches!(t.kind, TabKind::Terminal { .. })).count();
         if self.close_confirmed || !self.settings.confirm_close_all_tabs || terminals <= 1 {
             return slint::CloseRequestResponse::HideWindow;
@@ -1711,6 +1798,9 @@ impl App {
     }
 
     pub fn on_pointer(&mut self, index: usize, down: bool, button: u8, x: f32, y: f32, mods: Mods) {
+        if self.dialog.is_some() {
+            return;
+        }
         let Some(&id) = self.visible.get(index) else { return };
         if down {
             self.focus_pane(id);
@@ -1793,6 +1883,9 @@ impl App {
 
     /// An entry of a pane's right-click menu.
     pub fn pane_menu(&mut self, index: usize, action: &str) {
+        if self.dialog.is_some() {
+            return;
+        }
         if let Some(&id) = self.visible.get(index) {
             self.focus_pane(id);
         }
@@ -1815,6 +1908,9 @@ impl App {
 
     /// The pointer moved over a pane without a button held.
     pub fn on_pointer_hover(&mut self, index: usize, x: f32, y: f32, ctrl: bool) {
+        if self.dialog.is_some() {
+            return;
+        }
         let Some(&id) = self.visible.get(index) else { return };
         if self.settings.focus_follow_mouse {
             self.focus_pane(id);
@@ -1833,6 +1929,9 @@ impl App {
     }
 
     pub fn on_pointer_moved(&mut self, index: usize, x: f32, y: f32) {
+        if self.dialog.is_some() {
+            return;
+        }
         let Some(&id) = self.visible.get(index) else { return };
         let Some(pane) = self.panes.get(&id) else { return };
         let mode = *pane.session.term().lock().mode();
@@ -1858,6 +1957,9 @@ impl App {
     /// The scrollbar thumb was dragged: `top` is its position as a fraction
     /// of the track (0 = oldest history, 1 = live output).
     pub fn on_scrollbar(&mut self, index: usize, top: f32) {
+        if self.dialog.is_some() {
+            return;
+        }
         let Some(pane) = self.visible.get(index).and_then(|id| self.panes.get(id)) else { return };
         {
             let mut term = pane.session.term().lock();
@@ -1886,6 +1988,9 @@ impl App {
     }
 
     pub fn on_scroll(&mut self, index: usize, x: f32, y: f32, delta_y: f32, ctrl: bool) -> bool {
+        if self.dialog.is_some() {
+            return true;
+        }
         if ctrl {
             // Ctrl+wheel zooms, like WT.
             self.set_font_zoom(self.font_zoom + delta_y.signum());
@@ -2393,6 +2498,78 @@ mod tests {
         assert_eq!(url_at(&line, 10), Some(("https://example.com/a?b=1".into(), 4, 29)));
         assert_eq!(url_at(&line, 40).map(|u| u.0).as_deref(), Some("http://x.org"));
         assert_eq!(url_at(&line, 2), None);
+    }
+
+    /// While the dialog is open, only its own keys do anything.
+    #[test]
+    fn dialog_keys() {
+        use slint::platform::Key as SlintKey;
+        let k = |text: &str, mods: Mods, confirm_focused: bool| dialog_key(keys::from_slint(text, mods), confirm_focused);
+        let special = |key: SlintKey| char::from(key).to_string();
+        let (esc, enter, tab, backtab) =
+            (special(SlintKey::Escape), special(SlintKey::Return), special(SlintKey::Tab), special(SlintKey::Backtab));
+        let ctrl_shift = Mods { ctrl: true, shift: true, ..Mods::NONE };
+        for focus in [true, false] {
+            assert_eq!(k(&esc, Mods::NONE, focus), DialogKey::Cancel);
+            // Typing, and every shortcut: nothing.
+            for text in ["a", "x", "1", "\u{1}", ""] {
+                assert_eq!(k(text, Mods::NONE, focus), DialogKey::Ignore, "{text:?}");
+                assert_eq!(k(text, Mods::SHIFT, focus), DialogKey::Ignore, "{text:?}");
+            }
+            assert_eq!(k("v", Mods::CTRL, focus), DialogKey::Ignore); // Ctrl+V
+            assert_eq!(k("v", ctrl_shift, focus), DialogKey::Ignore); // Ctrl+Shift+V
+            assert_eq!(k("t", ctrl_shift, focus), DialogKey::Ignore); // Ctrl+Shift+T
+            assert_eq!(k("w", ctrl_shift, focus), DialogKey::Ignore);
+            assert_eq!(k(&special(SlintKey::F4), Mods::ALT, focus), DialogKey::Ignore);
+            assert_eq!(k(&enter, Mods::ALT, focus), DialogKey::Ignore); // Alt+Enter: full screen
+            assert_eq!(k(&special(SlintKey::F11), Mods::NONE, focus), DialogKey::Ignore);
+            assert_eq!(k(&tab, Mods::CTRL, focus), DialogKey::Ignore); // Ctrl+Tab: next tab
+            assert_eq!(k(&special(SlintKey::UpArrow), Mods::NONE, focus), DialogKey::Ignore);
+            assert_eq!(k(&special(SlintKey::Backspace), Mods::NONE, focus), DialogKey::Ignore);
+            assert_eq!(k(&special(SlintKey::Control), Mods::CTRL, focus), DialogKey::Ignore);
+            // Tab, Shift+Tab and the arrows go to the other button.
+            assert_eq!(k(&tab, Mods::NONE, focus), DialogKey::SwitchButton);
+            assert_eq!(k(&tab, Mods::SHIFT, focus), DialogKey::SwitchButton);
+            assert_eq!(k(&backtab, Mods::SHIFT, focus), DialogKey::SwitchButton);
+            assert_eq!(k(&special(SlintKey::LeftArrow), Mods::NONE, focus), DialogKey::SwitchButton);
+            assert_eq!(k(&special(SlintKey::RightArrow), Mods::NONE, focus), DialogKey::SwitchButton);
+        }
+        // Enter and Space press the focused button: Paste, unless Tab moved
+        // to Cancel.
+        assert_eq!(k(&enter, Mods::NONE, true), DialogKey::Confirm);
+        assert_eq!(k(&enter, Mods::SHIFT, true), DialogKey::Confirm);
+        assert_eq!(k(" ", Mods::NONE, true), DialogKey::Confirm);
+        assert_eq!(k(&enter, Mods::NONE, false), DialogKey::Cancel);
+        assert_eq!(k(" ", Mods::NONE, false), DialogKey::Cancel);
+    }
+
+    #[test]
+    fn paste_warnings() {
+        let on = Settings::default();
+        assert!(on.multi_line_paste_warning && on.large_paste_warning);
+        let multi = "echo one\r\necho two\r\n";
+        let large = "x".repeat(6 * 1024);
+        assert!(paste_warning(multi, false, &on).is_some_and(|w| w.contains("multiple lines")));
+        assert!(paste_warning("echo one\n", false, &on).is_none()); // one line and its Enter
+        assert!(paste_warning("echo one", false, &on).is_none());
+        // A shell with bracketed paste doesn't run pasted lines.
+        assert!(paste_warning(multi, true, &on).is_none());
+        assert!(paste_warning(&large, false, &on).is_some_and(|w| w.contains("5 KiB")));
+        assert!(paste_warning(&large, true, &on).is_some());
+        // Off in settings.json (WT's names): straight in.
+        let off: Settings = serde_json::from_str(r#"{ "multiLinePasteWarning": false, "largePasteWarning": false }"#).unwrap();
+        assert!(!off.multi_line_paste_warning && !off.large_paste_warning);
+        assert!(paste_warning(multi, false, &off).is_none());
+        assert!(paste_warning(&large, false, &off).is_none());
+        let large_lines = format!("{large}\n{large}");
+        assert!(paste_warning(&large_lines, false, &off).is_none());
+        // Each on its own.
+        let only_large = Settings { multi_line_paste_warning: false, ..Settings::default() };
+        assert!(paste_warning(multi, false, &only_large).is_none());
+        assert!(paste_warning(&large_lines, false, &only_large).is_some_and(|w| w.contains("5 KiB")));
+        let only_multi = Settings { large_paste_warning: false, ..Settings::default() };
+        assert!(paste_warning(&large, false, &only_multi).is_none());
+        assert!(paste_warning(multi, false, &only_multi).is_some());
     }
 
     #[test]

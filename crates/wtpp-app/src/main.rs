@@ -1032,6 +1032,10 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
     ui.on_dialog_result(move |ok| {
         with_window(id, |app| app.on_dialog_result(ok));
     });
+    ui.on_dialog_key(move |text, ctrl, alt, shift, meta| {
+        let (ctrl, meta) = if cfg!(target_os = "macos") { (meta, ctrl) } else { (ctrl, meta) };
+        with_window(id, |app| app.on_dialog_key(&text, Mods { shift, alt, ctrl, meta }));
+    });
     ui.on_minimize_window(move || {
         with_window(id, |app| app.ui().window().set_minimized(true));
     });

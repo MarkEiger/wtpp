@@ -328,6 +328,28 @@ component InteractionPage inherits VerticalLayout {
     }
 
     Card {
+        title: "Warn when pasting more than one line";
+        description: "Each line could run as a command. Not asked when the shell takes a paste as one piece (bracketed paste).";
+        Switch {
+            checked <=> SettingsData.multi-line-paste-warning;
+            toggled => {
+                SettingsData.set-value("multiLinePasteWarning", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Warn when pasting a lot of text";
+        description: "More than 5 KiB.";
+        Switch {
+            checked <=> SettingsData.large-paste-warning;
+            toggled => {
+                SettingsData.set-value("largePasteWarning", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
         title: "Word delimiters";
         description: "Characters that end a word when you double-click to select.";
         LineEdit {
@@ -379,28 +401,6 @@ component InteractionPage inherits VerticalLayout {
             checked <=> SettingsData.reload-env;
             toggled => {
                 SettingsData.set-value("reloadEnvironmentVariables", self.checked ? "true" : "false");
-            }
-        }
-    }
-
-    Card {
-        title: "Warn when pasting more than one line";
-        description: "Each line would otherwise run as a command.";
-        Switch {
-            checked <=> SettingsData.multi-line-paste-warning;
-            toggled => {
-                SettingsData.set-value("multiLinePasteWarning", self.checked ? "true" : "false");
-            }
-        }
-    }
-
-    Card {
-        title: "Warn when pasting a lot of text";
-        description: "More than 5 KiB.";
-        Switch {
-            checked <=> SettingsData.large-paste-warning;
-            toggled => {
-                SettingsData.set-value("largePasteWarning", self.checked ? "true" : "false");
             }
         }
     }

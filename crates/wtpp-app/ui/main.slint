@@ -588,6 +588,8 @@ export component MainWindow inherits Window {
     in property <string> dialog-title;
     in property <string> dialog-body;
     in property <string> dialog-confirm;
+    // Its confirm button has the keyboard focus (else Cancel has).
+    out property <bool> dialog-confirm-focused: dialog-confirm-button.has-focus;
     out property <length> content-width: content.width;
     out property <length> content-height: content.height;
     // Window position of the content area (for file drops).
@@ -610,6 +612,8 @@ export component MainWindow inherits Window {
     // Pane index, pointer x and y, wheel delta, Ctrl held.
     callback pane-scroll(int, length, length, length, bool) -> bool;
     callback dialog-result(bool);
+    // A key pressed while the dialog is open: text, ctrl, alt, shift, meta.
+    callback dialog-key(string, bool, bool, bool, bool);
     callback tab-menu(int, string);
     // An entry of a pane's right-click menu.
     callback pane-menu(int, string);
@@ -651,6 +655,15 @@ export component MainWindow inherits Window {
     // settings text field had it, or to record a key binding).
     public function focus-keys() {
         keys.focus();
+    }
+
+    // Give the open dialog the keyboard: its confirm button, or Cancel.
+    public function focus-dialog(confirm: bool) {
+        if confirm {
+            dialog-confirm-button.focus();
+        } else {
+            dialog-cancel-button.focus();
+        }
     }
 
     public function focus-palette() {
@@ -1313,50 +1326,70 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.dialog-visible: Rectangle {
+    // Modal: it has the keyboard while it's open (see `dialog-key`), and
+    // the pointer doesn't reach anything behind it.
+    Rectangle {
+        visible: root.dialog-visible;
         background: #00000099;
-        TouchArea { }
-        Rectangle {
-            width: 440px;
-            height: dialog-layout.preferred-height;
-            background: Colors.menu;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: Colors.menu-border;
-            drop-shadow-blur: 24px;
-            drop-shadow-color: #00000099;
-            dialog-layout := VerticalLayout {
-                padding: 24px;
-                spacing: 12px;
-                Text {
-                    text: root.dialog-title;
-                    color: Colors.text;
-                    font-size: 20px;
-                    font-weight: 600;
-                }
+        TouchArea {
+            scroll-event(e) => {
+                accept
+            }
+        }
 
-                Text {
-                    text: root.dialog-body;
-                    color: Colors.text-dim;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: end;
-                    Button {
-                        text: root.dialog-confirm;
-                        primary: true;
-                        clicked => {
-                            root.dialog-result(true);
-                        }
+        // Capture: every key is the dialog's, before the buttons see it.
+        FocusScope {
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            capture-key-pressed(e) => {
+                root.dialog-key(e.text, e.modifiers.control, e.modifiers.alt, e.modifiers.shift, e.modifiers.meta);
+                accept
+            }
+            capture-key-released(e) => {
+                accept
+            }
+            Rectangle {
+                width: 440px;
+                height: dialog-layout.preferred-height;
+                background: Colors.menu;
+                border-radius: 8px;
+                border-width: 1px;
+                border-color: Colors.menu-border;
+                drop-shadow-blur: 24px;
+                drop-shadow-color: #00000099;
+                dialog-layout := VerticalLayout {
+                    padding: 24px;
+                    spacing: 12px;
+                    Text {
+                        text: root.dialog-title;
+                        color: Colors.text;
+                        font-size: 20px;
+                        font-weight: 600;
                     }
 
-                    Button {
-                        text: "Cancel";
-                        clicked => {
-                            root.dialog-result(false);
+                    Text {
+                        text: root.dialog-body;
+                        color: Colors.text-dim;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        dialog-confirm-button := Button {
+                            text: root.dialog-confirm;
+                            primary: true;
+                            clicked => {
+                                root.dialog-result(true);
+                            }
+                        }
+
+                        dialog-cancel-button := Button {
+                            text: "Cancel";
+                            clicked => {
+                                root.dialog-result(false);
+                            }
                         }
                     }
                 }
