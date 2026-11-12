@@ -60,6 +60,54 @@ pub(crate) struct Pane {
     scroll_remainder: f32,
     /// Lines scrolled in a mouse-mode app not yet reported (see on_scroll).
     wheel_lines: i32,
+    /// When keys were last sent to it.
+    last_key: Option<Instant>,
+    /// Keys waiting for a word edit to be sent first (see `word_edit`).
+    waiting: std::collections::VecDeque<Waiting>,
+}
+
+/// Input for a pane waiting its turn (see `App::word_edit`).
+enum Waiting {
+    Edit(WordEdit),
+    Keys(Vec<u8>),
+}
+
+/// Word deletion emulated from what's on screen.
+#[derive(Clone, Copy, Debug)]
+enum WordEdit {
+    /// Ctrl+Backspace (see `backward_kill_word`).
+    DeletePrevious,
+    /// Ctrl+Delete in cmd.
+    DeleteNext,
+}
+
+/// After keys were sent at `last_key`, is what they echo on screen yet? Yes
+/// once output has come after them and then been quiet for a moment, or, if
+/// none comes (nothing to echo), a while after them.
+fn echo_settled(now: Instant, last_key: Option<Instant>, last_output: Option<Instant>) -> bool {
+    const QUIET: Duration = Duration::from_millis(30);
+    const AT_MOST: Duration = Duration::from_millis(100);
+    let Some(key) = last_key else { return true };
+    if now.saturating_duration_since(key) >= AT_MOST {
+        return true;
+    }
+    last_output.is_some_and(|out| out > key && now.saturating_duration_since(out) >= QUIET)
+}
+
+/// The keys that carry out a word edit, by what the screen shows now.
+fn word_edit_bytes(session: &Session, edit: WordEdit) -> Vec<u8> {
+    let opts = session.encode_options();
+    match edit {
+        WordEdit::DeleteNext => {
+            let n = chars_to_next_word(&cursor_line(session));
+            wtpp_input::encode(Key::Delete, Mods::NONE, &opts).unwrap_or_default().repeat(n)
+        }
+        // A program running under the shell gets the plain key.
+        WordEdit::DeletePrevious => (!session.pid().is_some_and(crate::platform::has_children))
+            .then(|| backward_kill_word(session))
+            .flatten()
+            .unwrap_or_else(|| wtpp_input::encode(Key::Backspace, Mods::CTRL, &opts).unwrap_or_default()),
+    }
 }
 
 /// A tab on its way to another window, with its live panes.
@@ -607,6 +655,8 @@ impl App {
                         last_click: None,
                         scroll_remainder: 0.0,
                         wheel_lines: 0,
+                        last_key: None,
+                        waiting: Default::default(),
                     },
                 );
                 true
@@ -638,6 +688,8 @@ impl App {
                         last_click: None,
                         scroll_remainder: 0.0,
                         wheel_lines: 0,
+                        last_key: None,
+                        waiting: Default::default(),
                     },
                 );
                 true
@@ -1484,9 +1536,9 @@ impl App {
             }
             return false;
         }
-        let Some(pane) = self.focused_pane() else { return false };
+        let Some(id) = self.active_terminal().map(|(_, f)| f) else { return false };
+        let Some(pane) = self.panes.get(&id) else { return false };
         if pane.exited {
-            let id = self.active_terminal().map(|(_, f)| f).unwrap_or_default();
             match key {
                 Some((Key::Enter, m)) if m == Mods::NONE => self.restart_pane(id),
                 Some((Key::Char('d'), m)) if m == Mods::CTRL => self.close_pane(id),
@@ -1497,23 +1549,17 @@ impl App {
         // cmd's line editor has no "delete word forward": emulate Ctrl+Delete
         // by deleting up to the next word on the line we can see.
         if key == Some((Key::Delete, Mods::CTRL)) && pane.emulate_kill_word {
-            let n = chars_to_next_word(&cursor_line(&pane.session));
-            let delete = wtpp_input::encode(Key::Delete, Mods::NONE, &pane.session.encode_options()).unwrap_or_default();
-            pane.session.write(delete.repeat(n));
+            self.word_edit(id, WordEdit::DeleteNext);
             return true;
         }
         // Without key events (inbox conhost) Ctrl+Backspace is only a plain
         // Backspace. At the shell's own prompt, get the same result some other
-        // way; a program running under it gets the plain key (no emulation).
+        // way (see `backward_kill_word`).
         if key == Some((Key::Backspace, Mods::CTRL)) {
             let opts = pane.session.encode_options();
-            if opts.style == KeyStyle::Windows
-                && !opts.win32_input
-                && !pane.session.pid().is_some_and(crate::platform::has_children)
-                && let Some(bytes) = backward_kill_word(&pane.session)
-            {
-                pane.session.term().lock().selection = None;
-                pane.session.write(bytes);
+            let program = &pane.session.profile().program;
+            if opts.style == KeyStyle::Windows && !opts.win32_input && (is_cmd(program) || is_powershell(program)) {
+                self.word_edit(id, WordEdit::DeletePrevious);
                 return true;
             }
         }
@@ -1525,8 +1571,7 @@ impl App {
             && pane.session.pid().is_some_and(|pid| crate::platform::runs_under(pid, "claude.exe"))
         {
             let alt_enter = wtpp_input::encode(Key::Enter, Mods::ALT, &pane.session.encode_options()).unwrap_or_default();
-            pane.session.term().lock().selection = None;
-            pane.session.write(alt_enter);
+            self.send_keys(id, alt_enter);
             return true;
         }
         let bytes = match key {
@@ -1541,10 +1586,60 @@ impl App {
             None => None,
         };
         let Some(bytes) = bytes else { return false };
-        pane.session.term().lock().selection = None;
-        pane.session.write(bytes);
+        self.send_keys(id, bytes);
         self.wake_cursor();
         true
+    }
+
+    /// Write typed keys to a pane, after any word edits still waiting for
+    /// the screen to catch up (see `word_edit`), so they keep their order.
+    fn send_keys(&mut self, id: PaneId, bytes: Vec<u8>) {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        if !pane.waiting.is_empty() {
+            pane.waiting.push_back(Waiting::Keys(bytes));
+            return;
+        }
+        pane.session.term().lock().selection = None;
+        pane.last_key = Some(Instant::now());
+        pane.session.write(bytes);
+    }
+
+    /// Ctrl+Backspace or Ctrl+Delete where they're emulated, which goes by the
+    /// text on screen. Typed fast, the keys before it may not be echoed yet
+    /// (Windows 10's console paints on its own schedule): then it waits, on
+    /// a timer, for the screen to settle (see `echo_settled`).
+    fn word_edit(&mut self, id: PaneId, edit: WordEdit) {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        let first = pane.waiting.is_empty();
+        pane.waiting.push_back(Waiting::Edit(edit));
+        if first {
+            self.run_waiting(id);
+        }
+    }
+
+    /// Send what's waiting for a pane, as far as the screen allows; come back
+    /// for the rest.
+    fn run_waiting(&mut self, id: PaneId) {
+        loop {
+            let Some(pane) = self.panes.get_mut(&id) else { return };
+            let Some(next) = pane.waiting.front() else { return };
+            let bytes = match next {
+                Waiting::Keys(bytes) => bytes.clone(),
+                Waiting::Edit(edit) => {
+                    if !echo_settled(Instant::now(), pane.last_key, pane.session.last_output()) {
+                        slint::Timer::single_shot(Duration::from_millis(5), move || {
+                            crate::with_pane(id, |app| app.run_waiting(id));
+                        });
+                        return;
+                    }
+                    word_edit_bytes(&pane.session, *edit)
+                }
+            };
+            pane.waiting.pop_front();
+            pane.session.term().lock().selection = None;
+            pane.last_key = Some(Instant::now());
+            pane.session.write(bytes);
+        }
     }
 
     /// Returns false when the action doesn't apply (e.g. copy without a
@@ -2617,6 +2712,68 @@ mod tests {
         let only_multi = Settings { large_paste_warning: false, ..Settings::default() };
         assert!(paste_warning(&large, false, &only_multi).is_none());
         assert!(paste_warning(multi, false, &only_multi).is_some());
+    }
+
+    #[test]
+    fn waiting_for_the_echo() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        // Nothing typed: nothing to wait for.
+        assert!(echo_settled(ms(0), None, None));
+        assert!(echo_settled(ms(0), None, Some(ms(0))));
+        // Typed at 0, no output since: wait, up to 100 ms.
+        assert!(!echo_settled(ms(1), Some(ms(0)), None));
+        assert!(!echo_settled(ms(99), Some(ms(0)), None));
+        assert!(echo_settled(ms(100), Some(ms(0)), None));
+        // Output from before the key doesn't count.
+        assert!(!echo_settled(ms(50), Some(ms(10)), Some(ms(5))));
+        // The echo came at 20: once it's quiet for 30 ms.
+        assert!(!echo_settled(ms(21), Some(ms(0)), Some(ms(20))));
+        assert!(!echo_settled(ms(49), Some(ms(0)), Some(ms(20))));
+        assert!(echo_settled(ms(50), Some(ms(0)), Some(ms(20))));
+        // Output that keeps coming: 100 ms at most.
+        assert!(!echo_settled(ms(95), Some(ms(0)), Some(ms(90))));
+        assert!(echo_settled(ms(100), Some(ms(0)), Some(ms(99))));
+    }
+
+    /// cmd through the real ConPTY: text typed all at once, then
+    /// Ctrl+Backspace's count once the echo has settled is the whole last
+    /// word, twice in a row.
+    #[cfg(windows)]
+    #[test]
+    fn word_edit_after_fast_typing() {
+        let size = GridSize { cols: 100, rows: 24, cell_width: 8, cell_height: 16 };
+        let mut profile = wtpp_session::Profile::new("cmd", "cmd.exe", &["/d", "/k", "prompt $G"]);
+        profile.cwd = std::env::var("SystemRoot").ok().map(Into::into);
+        for round in 0..5 {
+            let session = Session::spawn(&profile, size, |_| {}).unwrap();
+            let start = Instant::now();
+            while !text_before_cursor(&session).starts_with(&['>']) && start.elapsed() < Duration::from_secs(20) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            let mut last_key = Some(Instant::now());
+            session.write(&b"one two three"[..]);
+            let settle = |last_key: Option<Instant>| {
+                while !echo_settled(Instant::now(), last_key, session.last_output()) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            };
+            settle(last_key);
+            let first = word_edit_bytes(&session, WordEdit::DeletePrevious);
+            assert_eq!(first, vec![0x7f; 5], "round {round}: {:?}", text_before_cursor(&session));
+            last_key = Some(Instant::now());
+            session.write(first);
+            settle(last_key);
+            let second = word_edit_bytes(&session, WordEdit::DeletePrevious);
+            assert_eq!(second, vec![0x7f; 4], "round {round}: {:?}", text_before_cursor(&session));
+            session.write(second);
+            let start = Instant::now();
+            while text_before_cursor(&session).iter().collect::<String>() != ">one " && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(text_before_cursor(&session).iter().collect::<String>(), ">one ");
+        }
     }
 
     #[test]
