@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+- The "Paste anyway?" warning for multi-line or large pastes (and "Close all
+  tabs?") now has the keyboard while it's open: Enter pastes, Esc cancels,
+  Tab moves between its buttons (Enter then presses the one with the focus),
+  and every other key, shortcuts included, does nothing until you answer it.
+  Typing no longer goes to the shell behind it, and clicks there do nothing.
+  Both paste warnings can be turned off in Settings → Interaction
+  (`multiLinePasteWarning`, `largePasteWarning`): then pasting is immediate.
+- A profile whose program can't be started (from the new-tab menu, a
+  shortcut, a split) opens its tab anyway and says why, e.g.
+  `[couldn't start "no-such.exe": The system cannot find the file
+  specified.]`; Enter tries again, Ctrl+D closes it. Before, nothing
+  happened.
+- With no GPU that works (a VM, a remote session, a broken driver), wt++ uses
+  its software renderer instead of exiting without a window. If it can't draw
+  at all, Windows shows a message saying so and what to set.
+- A program that prints and exits at once no longer loses the end of what it
+  printed (`wsl.exe -d Nope` showed only "T", `exit 3` in cmd only "e").
+- Windows 10: Ctrl+Backspace in Command Prompt right after very fast typing
+  deletes the whole word; it waits a moment for the typing to show.
+- Windows 10 1809: Shift+Enter adds a line in Claude Code; it submitted the
+  prompt and left Alt stuck for the next key.
+- Import from Windows Terminal adds its key bindings to yours instead of
+  replacing them: your own bindings stay, also when WT has none.
+- Settings: after an edit, the note at the bottom from before ("No
+  changes.", "Saved …") goes away. The settings.json error note is shorter
+  and the bar grows to fit it.
+- Linux and macOS: a pane whose shell exited shows its exit code without the
+  Windows-style hex form.
+
 ## 1.3.2 — 2026-11-12
 
 - Linux and macOS: a pane whose starting directory doesn't exist (any more)
