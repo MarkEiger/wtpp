@@ -344,8 +344,20 @@ impl App {
         if let Some(d) = self.draft.as_mut() {
             f(d);
             d.dirty = true;
+            self.draft_changed();
         }
         self.refresh_settings();
+    }
+
+    /// The draft was edited: a note about what happened before ("No
+    /// changes.", "Saved to …") no longer applies. An error still does
+    /// (settings.json is broken: saving replaces it).
+    fn draft_changed(&self) {
+        let ui = self.ui();
+        let data = ui.global::<SettingsData>();
+        if !data.get_status_is_error() {
+            data.set_status("".into());
+        }
     }
 
     pub fn settings_set_value(&mut self, key: &str, value: &str) {
@@ -747,6 +759,7 @@ impl App {
             None => return,
         }
         d.dirty = true;
+        self.draft_changed();
         // Don't rebuild the list while the user is typing in it.
         self.ui().global::<SettingsData>().set_dirty(true);
     }
@@ -812,6 +825,9 @@ impl App {
                 None => format!("{} now runs {}.", chord.label(), action.label(&names)),
             }
         };
+        if self.draft.as_ref().is_some_and(|d| d.dirty) {
+            self.draft_changed();
+        }
         self.refresh_settings();
         self.ui().global::<SettingsData>().set_binding_message(message.into());
     }
