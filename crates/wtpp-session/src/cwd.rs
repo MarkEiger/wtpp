@@ -1,7 +1,7 @@
 //! A pane's current directory: what its shell reports (OSC 7, or Windows
 //! Terminal's OSC 9;9), or the shell process's own.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The longest OSC we keep: a path, with room to spare. Longer ones (images,
 /// big clipboard writes) are skipped, not collected.
@@ -27,10 +27,44 @@ pub struct CwdScanner {
     osc: Vec<u8>,
 }
 
+/// How a directory was reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CwdKind {
+    /// OSC 7: what shells call the directory, symbolic links and all.
+    Osc7,
+    /// OSC 9;9 (Windows Terminal's).
+    Osc99,
+}
+
+/// What a shell has reported about its directory.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reported {
+    /// The last report, of either kind.
+    pub last: Option<String>,
+    /// The last OSC 9;9.
+    pub osc99: Option<String>,
+    /// An OSC 7 sent since that OSC 9;9: the same directory by the name the
+    /// shell shows (wt++'s bash hook sends 9;9 without symbolic links, then 7).
+    pub logical: Option<String>,
+}
+
+impl Reported {
+    pub fn record(&mut self, kind: CwdKind, path: String) {
+        match kind {
+            CwdKind::Osc99 => {
+                self.osc99 = Some(path.clone());
+                self.logical = None;
+            }
+            CwdKind::Osc7 => self.logical = Some(path.clone()),
+        }
+        self.last = Some(path);
+    }
+}
+
 impl CwdScanner {
-    /// The last directory reported in `bytes`, if any.
-    pub fn feed(&mut self, bytes: &[u8]) -> Option<String> {
-        let mut found = None;
+    /// The directories reported in `bytes`, in order.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<(CwdKind, String)> {
+        let mut found = Vec::new();
         for &b in bytes {
             self.state = match (self.state, b) {
                 (State::Ground, 0x1b) => State::Esc,
@@ -43,7 +77,7 @@ impl CwdScanner {
                 (State::Esc, _) => State::Ground,
                 (State::Osc | State::Skip, 0x07) => {
                     if self.state == State::Osc {
-                        found = parse_cwd_osc(&self.osc).or(found);
+                        found.extend(parse_cwd_report(&self.osc));
                     }
                     State::Ground
                 }
@@ -59,7 +93,7 @@ impl CwdScanner {
                 (State::Skip, _) => State::Skip,
                 (State::OscEsc | State::SkipEsc, b'\\') => {
                     if self.state == State::OscEsc {
-                        found = parse_cwd_osc(&self.osc).or(found);
+                        found.extend(parse_cwd_report(&self.osc));
                     }
                     State::Ground
                 }
@@ -81,7 +115,13 @@ impl CwdScanner {
 /// means another machine's directory, as over ssh) or `9;9;path` (Windows
 /// Terminal's, maybe quoted). Windows paths come back as `C:\dir`.
 pub fn parse_cwd_osc(osc: &[u8]) -> Option<String> {
+    parse_cwd_report(osc).map(|(_, path)| path)
+}
+
+/// [`parse_cwd_osc`], and which kind of report it was.
+pub fn parse_cwd_report(osc: &[u8]) -> Option<(CwdKind, String)> {
     let text = std::str::from_utf8(osc).ok()?;
+    let kind = if text.starts_with("7;") { CwdKind::Osc7 } else { CwdKind::Osc99 };
     let path = if let Some(url) = text.strip_prefix("7;") {
         let rest = url.strip_prefix("file://")?;
         let (host, path) = rest.split_at(rest.find('/')?);
@@ -100,7 +140,7 @@ pub fn parse_cwd_osc(osc: &[u8]) -> Option<String> {
     } else {
         path
     };
-    (!path.is_empty()).then_some(path)
+    (!path.is_empty()).then_some((kind, path))
 }
 
 fn percent_decode(s: &str) -> Option<String> {
@@ -150,6 +190,22 @@ fn local_hostname() -> Option<String> {
         let len = buf.iter().position(|&b| b == 0)?;
         String::from_utf8(buf[..len].to_vec()).ok()
     }
+}
+
+/// `reported`, the name a shell gave its directory (with any symbolic
+/// links), if it's the same directory as `process`'s (which has none).
+pub fn same_directory_name(process: &Path, reported: Option<&str>) -> Option<String> {
+    let reported = reported?;
+    let same = Path::new(reported).is_absolute()
+        && Path::new(reported).canonicalize().ok()? == process.canonicalize().ok()?;
+    same.then(|| reported.to_string())
+}
+
+/// macOS: `/private/etc` is better known as `/etc` (a symbolic link to it),
+/// and so on for `/tmp` and `/var`: the short name, where it's the same.
+pub fn short_private_name(process: &Path) -> Option<String> {
+    let rest = process.to_str()?.strip_prefix("/private/")?;
+    same_directory_name(process, Some(&format!("/{rest}")))
 }
 
 /// Process `pid`'s working directory, as the system keeps it. Right for
@@ -303,7 +359,7 @@ mod tests {
         let mut scanner = CwdScanner::default();
         let mut last = None;
         for chunk in chunks {
-            last = scanner.feed(chunk).or(last);
+            last = scanner.feed(chunk).pop().map(|(_, p)| p).or(last);
         }
         last
     }
@@ -349,6 +405,27 @@ mod tests {
         assert_eq!(scan(&[b"\x1b[31m\x1b]9;9;C:\\x\x07\x1b[0m"]), Some(r"C:\x".into()));
     }
 
+    /// The bash hook's pair: without symbolic links (9;9), then as shown (7).
+    #[test]
+    fn reported_pairs() {
+        let mut scanner = CwdScanner::default();
+        let mut reported = Reported::default();
+        let mut feed = |bytes: &[u8], reported: &mut Reported| {
+            for (kind, path) in scanner.feed(bytes) {
+                reported.record(kind, path);
+            }
+        };
+        feed(b"\x1b]9;9;/usr/bin\x1b\\\x1b]7;file:///bin\x1b\\", &mut reported);
+        assert_eq!(reported, Reported { last: Some("/bin".into()), osc99: Some("/usr/bin".into()), logical: Some("/bin".into()) });
+        // A 9;9 alone (an older hook, PowerShell's): no logical name with it.
+        feed(b"\x1b]9;9;/tmp\x1b\\", &mut reported);
+        assert_eq!(reported, Reported { last: Some("/tmp".into()), osc99: Some("/tmp".into()), logical: None });
+        // `%` in a name comes encoded.
+        feed(b"\x1b]9;9;/srv/a%b c\x1b\\\x1b]7;file:///l/a%25b c\x1b\\", &mut reported);
+        assert_eq!(reported.logical.as_deref(), Some("/l/a%b c"));
+        assert_eq!(reported.osc99.as_deref(), Some("/srv/a%b c"));
+    }
+
     #[test]
     fn split_across_reads() {
         let bytes = b"ab\x1b]7;file:///home/my%20dir\x1b\\cd";
@@ -371,6 +448,25 @@ mod tests {
         huge.extend(b"\x07\x1b]9;9;C:\\after\x07");
         assert_eq!(scan(&[&huge]), Some(r"C:\after".into()));
         assert_eq!(scan(&[b"\x1b]9;9;C:\\unterminated"]), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn names_of_the_same_directory() {
+        let base = std::env::temp_dir().join(format!("wtpp-name-{}", std::process::id()));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        let link = base.join("link").to_string_lossy().into_owned();
+        let physical = real.canonicalize().unwrap();
+        assert_eq!(same_directory_name(&physical, Some(&link)), Some(link.clone()));
+        assert_eq!(same_directory_name(&real, Some(&link)), Some(link.clone()));
+        // Another directory, a relative or missing one, or none at all.
+        assert_eq!(same_directory_name(&physical, Some(&base.to_string_lossy())), None);
+        assert_eq!(same_directory_name(&physical, Some("link")), None);
+        assert_eq!(same_directory_name(&physical, Some("/wtpp-no-such-dir")), None);
+        assert_eq!(same_directory_name(&physical, None), None);
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[cfg(target_os = "linux")]

@@ -42,7 +42,7 @@ pub(crate) struct Pane {
     pub(crate) profile: ResolvedProfile,
     /// A directory it was started in instead of the profile's (another
     /// pane's current one, or `-d`'s); a restart starts there again.
-    started_in: Option<PathBuf>,
+    started_in: Option<StartIn>,
     theme: Theme,
     title: Option<String>,
     /// Logical rectangle inside the content area.
@@ -338,7 +338,7 @@ impl App {
         if let Some(commandline) = args.commandline {
             profile.commandline = commandline;
         }
-        self.new_tab_in(profile, args.starting_directory);
+        self.new_tab_in(profile, args.starting_directory.map(|dir| StartIn { dir, shown: None }));
         // A profile that can't start (a bad command line) mustn't take wt++
         // down with it: Settings is where to fix it.
         if self.tabs.is_empty() {
@@ -461,7 +461,7 @@ impl App {
 
     /// Start a pane running `profile`, in `start_in` if given (see
     /// `Pane::started_in`), else where the profile says.
-    fn spawn_pane(&mut self, id: PaneId, profile: ResolvedProfile, rect: Rect, start_in: Option<PathBuf>) -> bool {
+    fn spawn_pane(&mut self, id: PaneId, profile: ResolvedProfile, rect: Rect, start_in: Option<StartIn>) -> bool {
         self.spawn_pane_on(id, profile, rect, start_in, None)
     }
 
@@ -472,11 +472,11 @@ impl App {
         id: PaneId,
         profile: ResolvedProfile,
         rect: Rect,
-        start_in: Option<PathBuf>,
+        start_in: Option<StartIn>,
         pipes: Option<wtpp_session::Pipes>,
     ) -> bool {
         let Some(size) = self.grid_size(&profile, rect) else { return false };
-        let session_profile = self.session_profile(&profile, start_in.as_deref());
+        let session_profile = self.session_profile(&profile, start_in.as_ref());
         let pending = self.redraw_pending.clone();
         let on_event = move |event| match event {
             SessionEvent::Wakeup => {
@@ -571,29 +571,47 @@ impl App {
     /// `source`'s current directory, as far as it carries over to `target`'s
     /// shell (see `starting_directory_from`). `None` if it doesn't, if it's
     /// unknown or gone, or if that's turned off.
-    fn inherited_cwd(&self, source: &Pane, target: &ResolvedProfile) -> Option<PathBuf> {
+    fn inherited_cwd(&self, source: &Pane, target: &ResolvedProfile) -> Option<StartIn> {
+        use wtpp_config::settings::is_wsl_program;
         if !self.settings.inherit_working_directory {
             return None;
         }
         let session = &source.session;
         let program = &session.profile().program;
+        let reported = session.reported_dirs();
+        let wsl = is_wsl_program(program);
         // PowerShell's location isn't its process's directory, and wsl.exe's
         // is a Windows one: those only know what the shell reports.
-        let process = if is_powershell(program) || wtpp_config::settings::is_wsl_program(program) {
-            None
-        } else {
-            session.process_cwd().map(|p| p.to_string_lossy().into_owned())
+        let process = if is_powershell(program) || wsl { None } else { session.process_cwd() };
+        // The process's directory has no symbolic links; the name the shell
+        // reported for it (if any, and on Unix) is the one it shows.
+        let shown = process
+            .as_deref()
+            .filter(|_| cfg!(unix))
+            .and_then(|p| {
+                wtpp_session::cwd::same_directory_name(p, reported.last.as_deref())
+                    .or_else(|| wtpp_session::cwd::short_private_name(p))
+            });
+        // From WSL, the report without symbolic links: Windows starts the
+        // pane there, and the shell then changes to the name it shows.
+        let cwd = match (process, wsl) {
+            (Some(p), _) => p.to_string_lossy().into_owned(),
+            (None, true) => reported.osc99.clone().or(reported.last.clone())?,
+            (None, false) => reported.last.clone()?,
         };
-        let cwd = process.or_else(|| session.reported_cwd())?;
         let dir = wtpp_config::cwd::starting_directory_from(&cwd, &source.profile.commandline, &target.commandline)
             .map(PathBuf::from)
             .filter(|dir| dir.is_dir());
-        log::info!("new pane from {cwd:?} starts in {dir:?}");
-        dir
+        let start = dir.map(|dir| match shown {
+            Some(shown) => StartIn { dir: PathBuf::from(&shown), shown: Some(shown) },
+            None => StartIn { dir, shown: reported.logical.clone().filter(|_| wsl && is_wsl_program(&split_commandline(&target.commandline).0)) },
+        });
+        log::info!("new pane from {cwd:?} ({reported:?}) starts in {start:?}");
+        start
     }
 
     /// Everything the session needs to start a profile's shell.
-    fn session_profile(&self, p: &ResolvedProfile, start_in: Option<&Path>) -> wtpp_session::Profile {
+    fn session_profile(&self, p: &ResolvedProfile, start_in: Option<&StartIn>) -> wtpp_session::Profile {
         // Windows: the environment as it's set now, not as wt++ got it.
         let base_env = (cfg!(windows) && self.settings.reload_environment_variables)
             .then(wtpp_session::env::pane_environment)
@@ -604,7 +622,7 @@ impl App {
         };
         let expand_env = |s: &str| expand_env_with(s, var);
         let dir = match start_in {
-            Some(dir) => Some(StartDir::Literal(dir.to_string_lossy().into_owned())),
+            Some(start) => Some(StartDir::Literal(start.dir.to_string_lossy().into_owned())),
             None => p.starting_directory.clone().map(StartDir::Setting),
         };
         let cwd = start_directory(&p.name, &p.commandline, dir.as_ref(), expand_env, |d| d.is_dir());
@@ -637,10 +655,23 @@ impl App {
             } else if wtpp_config::settings::is_wsl_program(&program) {
                 let get = |name: &str| profile.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
                 let wslenv = get("WSLENV").or_else(|| var("WSLENV"));
-                let env = wtpp_config::cwd::wsl_prompt_env(get("PROMPT_COMMAND").is_some(), wslenv.as_deref());
+                let shown = start_in.and_then(|s| s.shown.as_deref());
+                let env = wtpp_config::cwd::wsl_prompt_env(get("PROMPT_COMMAND").is_some(), wslenv.as_deref(), shown);
                 profile.env.retain(|k, _| !k.eq_ignore_ascii_case("WSLENV"));
                 profile.env.extend(env);
+            } else if cfg!(unix) {
+                let get = |name: &str| profile.env.get(name).cloned().or_else(|| var(name));
+                let env = wtpp_config::cwd::unix_prompt_env(&program, zsh_integration().as_deref(), get);
+                profile.env.extend(env);
             }
+        }
+        // Unix: started in a symbolic link's name, the shell keeps that name
+        // only if PWD says so (it's checked to be the same directory).
+        if cfg!(unix)
+            && let Some(shown) = start_in.and_then(|s| s.shown.as_deref())
+            && profile.cwd.as_deref() == Some(Path::new(shown))
+        {
+            profile.env.insert("PWD".into(), shown.into());
         }
         profile.base_env = base_env;
         profile
@@ -693,7 +724,7 @@ impl App {
         self.new_tab_in(profile, None);
     }
 
-    fn new_tab_in(&mut self, profile: ResolvedProfile, start_in: Option<PathBuf>) {
+    fn new_tab_in(&mut self, profile: ResolvedProfile, start_in: Option<StartIn>) {
         let id = self.alloc_id();
         if !self.spawn_pane(id, profile, self.content_area(), start_in) {
             return;
@@ -2183,6 +2214,34 @@ pub fn mouse_report(mode: TermMode, button: u8, down: bool, motion: bool, col: u
     }
     let code = if down || button >= 64 { code } else { 3 + (code & !3) };
     Some(vec![0x1b, b'[', b'M', 32 + code as u8, 32 + col as u8, 32 + row as u8])
+}
+
+/// wt++'s zsh startup files (see `ZSH_FILES`), written once per run next to
+/// settings.json; `None` if they couldn't be.
+fn zsh_integration() -> Option<String> {
+    static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = wtpp_config::settings::settings_path().with_file_name("shell-integration").join("zsh");
+        match wtpp_config::cwd::write_zsh_integration(&dir) {
+            Ok(()) => Some(dir.to_string_lossy().into_owned()),
+            Err(e) => {
+                log::warn!("can't write zsh's shell integration to {}: {e}", dir.display());
+                None
+            }
+        }
+    })
+    .clone()
+}
+
+/// A directory a pane starts in instead of its profile's (see
+/// `Pane::started_in`).
+#[derive(Clone, Debug)]
+pub(crate) struct StartIn {
+    /// Where it starts.
+    dir: PathBuf,
+    /// The name the shell should show for it, symbolic links and all, where
+    /// that's another name than `dir`'s (WSL), or `dir` itself (Unix).
+    shown: Option<String>,
 }
 
 /// A directory a pane is to start in.

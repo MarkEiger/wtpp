@@ -5,6 +5,13 @@
 - Linux and macOS: a pane whose starting directory doesn't exist (any more)
   opens in your home folder, as on Windows, not in the directory wt++ itself
   was started from.
+- A split or duplicated tab shows the directory by the same name as the pane
+  it came from: `/bin` stays `/bin` (not `/usr/bin`), in WSL too, and on macOS
+  `/etc` stays `/etc` (not `/private/etc`). For that, bash (by
+  `PROMPT_COMMAND`, as in WSL) and zsh (by startup files of wt++'s own, which
+  run yours as before) now report their directory on Linux and macOS too.
+  Settings → Interaction → New panes start in the current directory turns
+  this off.
 
 ## 1.3.1 — 2026-11-11
 

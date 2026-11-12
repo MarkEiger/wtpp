@@ -148,7 +148,7 @@ pub struct Listener {
     /// The last of the output, to say in the log what rang the bell.
     recent_output: Arc<Mutex<Vec<u8>>>,
     /// The directory the shell last reported (see [`cwd::parse_cwd_osc`]).
-    reported_cwd: Arc<Mutex<Option<String>>>,
+    reported_cwd: Arc<Mutex<cwd::Reported>>,
 }
 
 impl Listener {
@@ -165,11 +165,13 @@ impl Listener {
             let extra = recent.len().saturating_sub(KEPT);
             recent.drain(..extra);
         }
-        let found = self.cwd_scanner.lock().ok().and_then(|mut scanner| scanner.feed(bytes));
-        if let Some(dir) = found
+        let found = self.cwd_scanner.lock().map(|mut scanner| scanner.feed(bytes)).unwrap_or_default();
+        if !found.is_empty()
             && let Ok(mut reported) = self.reported_cwd.lock()
         {
-            *reported = Some(dir);
+            for (kind, dir) in found {
+                reported.record(kind, dir);
+            }
         }
     }
 }
@@ -217,7 +219,7 @@ pub struct Session {
     /// The process the session started (or was handed): the shell.
     pid: Option<u32>,
     /// See [`Listener::reported_cwd`].
-    reported_cwd: Arc<Mutex<Option<String>>>,
+    reported_cwd: Arc<Mutex<cwd::Reported>>,
     /// For a handed-over console (see [`Pipes::keep_alive`]).
     _keep_alive: Vec<File>,
 }
@@ -376,7 +378,12 @@ impl Session {
 
     /// The directory the shell last reported, if it does (OSC 7 or 9;9).
     pub fn reported_cwd(&self) -> Option<String> {
-        self.reported_cwd.lock().ok()?.clone()
+        self.reported_cwd.lock().ok()?.last.clone()
+    }
+
+    /// Everything the shell reported about its directory.
+    pub fn reported_dirs(&self) -> cwd::Reported {
+        self.reported_cwd.lock().map(|r| r.clone()).unwrap_or_default()
     }
 
     /// The shell process's working directory (see [`cwd::process_cwd`]).
@@ -567,7 +574,7 @@ mod win32_input_tests {
         shells[1].args = wtpp_config::cwd::powershell_args_with_hook("powershell.exe", &shells[1].args).unwrap();
         if let Ok(distro) = std::env::var("WTPP_TEST_WSL_DISTRO") {
             let mut wsl = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
-            wsl.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None));
+            wsl.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None));
             shells.push(wsl);
         }
         for mut profile in shells {
@@ -737,5 +744,156 @@ mod tests {
         let term = session.term().lock();
         let line: String = (0..5).map(|c| term.grid()[alacritty_terminal::index::Line(0)][alacritty_terminal::index::Column(c)].c).collect();
         assert_eq!(line, "hello");
+    }
+}
+
+/// A pane opened from another shows the directory by the same name, symbolic
+/// links and all: real shells, through the real spawn path.
+#[cfg(test)]
+mod shown_name_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const SIZE: GridSize = GridSize { cols: 160, rows: 30, cell_width: 8, cell_height: 16 };
+
+    fn lines(session: &Session) -> Vec<String> {
+        let term = session.term().lock();
+        let grid = term.grid();
+        (0..SIZE.rows as i32)
+            .map(|l| {
+                (0..SIZE.cols as usize)
+                    .map(|c| grid[alacritty_terminal::index::Line(l)][alacritty_terminal::index::Column(c)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn wait(what: impl Fn() -> bool) -> bool {
+        let start = Instant::now();
+        while !what() && start.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        what()
+    }
+
+    fn type_line(session: &Session, line: &str) {
+        session.write(format!("{line}\r").into_bytes());
+    }
+
+    /// A directory and a symbolic link to it, with awkward names.
+    #[cfg(unix)]
+    fn linked_dirs() -> (std::path::PathBuf, String, String) {
+        let base = std::env::temp_dir().join(format!("wtpp-shown-{}-{}", std::process::id(), std::thread::current().name().unwrap_or("t").len()));
+        let real = base.join("real dir");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link %41 ü");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let real = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        (base, real, link.to_string_lossy().into_owned())
+    }
+
+    /// The parent reports `link` (its process says `real`); a pane started
+    /// as wt++ starts it from there shows `link` too.
+    #[cfg(unix)]
+    fn check(parent: Profile, child: impl Fn(&str) -> Profile, link: &str, real: &str) {
+        let session = Session::spawn(&parent, SIZE, |_| {}).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        type_line(&session, &format!("cd '{link}'"));
+        assert!(wait(|| session.reported_dirs().last.as_deref() == Some(link)), "{:?} {:?}", session.reported_dirs(), lines(&session));
+        let process = session.process_cwd().unwrap();
+        assert_eq!(process.to_string_lossy(), real);
+        let shown = cwd::same_directory_name(&process, session.reported_dirs().last.as_deref());
+        assert_eq!(shown.as_deref(), Some(link));
+        let mut profile = child(link);
+        profile.cwd = Some(link.into());
+        profile.env.insert("PWD".into(), link.into());
+        let new = Session::spawn(&profile, SIZE, |_| {}).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        type_line(&new, "pwd");
+        assert!(wait(|| lines(&new).iter().any(|l| l == link)), "{:?}", lines(&new));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash() {
+        let (base, real, link) = linked_dirs();
+        let bash = |_: &str| {
+            let mut p = Profile::new("bash", "bash", &["--norc", "--noprofile", "-i"]);
+            p.env.insert("PROMPT_COMMAND".into(), wtpp_config::cwd::UNIX_BASH_PROMPT_COMMAND.into());
+            p.cwd = Some("/".into());
+            p
+        };
+        check(bash(""), bash, &link, &real);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// zsh with wt++'s startup files, and the user's own still run. Set
+    /// WTPP_TEST_ZSH to a zsh to run it.
+    #[cfg(unix)]
+    #[test]
+    fn zsh() {
+        let Ok(zsh) = std::env::var("WTPP_TEST_ZSH") else { return };
+        let (base, real, link) = linked_dirs();
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".zshenv"), "WTPP_TEST_ENV=yes\n").unwrap();
+        std::fs::write(home.join(".zshrc"), "PS1='%~ %# '\nWTPP_TEST_RC=yes\nprecmd() { WTPP_TEST_PRECMD=yes }\n").unwrap();
+        std::fs::write(home.join(".zlogin"), "WTPP_TEST_LOGIN=yes\n").unwrap();
+        let integration = base.join("integration");
+        wtpp_config::cwd::write_zsh_integration(&integration).unwrap();
+        let home_text = home.to_string_lossy().into_owned();
+        for args in [&["-i"][..], &["-l", "-i"]] {
+            let make = |_: &str| {
+                let mut p = Profile::new("zsh", &zsh, args);
+                p.env.insert("HOME".into(), home_text.clone());
+                p.env.remove("ZDOTDIR");
+                let var = |n: &str| (n == "HOME").then(|| home_text.clone());
+                p.env.extend(wtpp_config::cwd::unix_prompt_env("zsh", Some(&integration.to_string_lossy()), var));
+                p.cwd = Some("/".into());
+                p
+            };
+            check(make(""), make, &link, &real);
+            // The user's files ran, their precmd too, and nothing of wt++'s is left.
+            let session = Session::spawn(&make(""), SIZE, |_| {}).unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            type_line(&session, "echo \"r=$WTPP_TEST_RC e=$WTPP_TEST_ENV l=${WTPP_TEST_LOGIN-n} p=$WTPP_TEST_PRECMD z=${ZDOTDIR-unset} u=${WTPP_USER_ZDOTDIR-unset}\"");
+            let login = if args.contains(&"-l") { "yes" } else { "n" };
+            let want = format!("r=yes e=yes l={login} p=yes z=unset u=unset");
+            assert!(wait(|| lines(&session).contains(&want)), "{args:?} {:?}", lines(&session));
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// bash in WSL: started where Windows can (`/usr/bin`, through \\wsl$),
+    /// the new pane shows `/bin` from its first prompt. Set
+    /// WTPP_TEST_WSL_DISTRO to a distro to run it.
+    #[cfg(windows)]
+    #[test]
+    fn wsl_bash() {
+        let Ok(distro) = std::env::var("WTPP_TEST_WSL_DISTRO") else { return };
+        let commandline = format!("wsl.exe ~ -d {distro}");
+        let mut parent = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
+        parent.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None));
+        let session = Session::spawn(&parent, SIZE, |_| {}).unwrap();
+        assert!(wait(|| session.reported_cwd().is_some()));
+        type_line(&session, "cd /bin");
+        assert!(wait(|| session.reported_dirs().logical.as_deref() == Some("/bin")), "{:?}", session.reported_dirs());
+        let reported = session.reported_dirs();
+        assert_eq!(reported.osc99.as_deref(), Some("/usr/bin"));
+        let dir = wtpp_config::cwd::starting_directory_from("/usr/bin", &commandline, &commandline).unwrap();
+        assert_eq!(dir, format!(r"\\wsl$\{distro}\usr\bin"));
+        let started = wtpp_config::settings::commandline_for_start(&commandline, Some(&dir));
+        let (program, args) = wtpp_config::settings::split_commandline(&started);
+        let mut child = Profile::new("wsl", &program, &[]);
+        child.args = args;
+        child.cwd = Some(dir.into());
+        child.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, reported.logical.as_deref()));
+        let new = Session::spawn(&child, SIZE, |_| {}).unwrap();
+        assert!(wait(|| new.reported_cwd().is_some()));
+        type_line(&new, "pwd");
+        assert!(wait(|| lines(&new).iter().any(|l| l == "/bin")), "{:?}", lines(&new));
+        assert_eq!(new.reported_dirs().logical.as_deref(), Some("/bin"));
     }
 }

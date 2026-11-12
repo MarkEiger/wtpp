@@ -51,14 +51,17 @@ between windows; `WTPP_WAYLAND=1` runs it as a Wayland app without those.
 
 ## New panes in the current directory
 
-Splitting a pane or duplicating a tab starts the new one where you are.
-Command Prompt and shells on Linux and macOS need nothing for that. wt++ has
-PowerShell (by wrapping its prompt, after your profile) and bash in WSL (by
-`PROMPT_COMMAND`, unless your `.bashrc` sets its own) tell it the directory.
+Splitting a pane or duplicating a tab starts the new one where you are, by
+the same name the prompt shows, symbolic links and all (`/bin`, not
+`/usr/bin`; on macOS `/etc`, not `/private/etc`). Command Prompt needs nothing
+for that. wt++ has the others tell it the directory: PowerShell by wrapping
+its prompt (after your profile), bash by `PROMPT_COMMAND` (unless your
+`.bashrc` sets its own), and zsh on Linux and macOS by startup files of its
+own, which run yours as usual and leave `ZDOTDIR` as it was (like VS Code's).
 Other shells can report it like they do for Windows Terminal, e.g. zsh in WSL:
 
 ```zsh
-precmd() { printf '\e]9;9;%s\e\\' "$PWD" }
+precmd() { printf '\e]7;file://%s\e\\' "${PWD//\%/%25}" }
 ```
 
 Settings → Interaction → **New panes start in the current directory** turns

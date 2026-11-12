@@ -113,24 +113,147 @@ pub fn powershell_args_with_hook(program: &str, args: &[String]) -> Option<Vec<S
 /// bash's PROMPT_COMMAND: report the directory at every prompt. Only from
 /// the environment, so a `.bashrc` that sets its own wins (and one that adds
 /// to it keeps this); other shells ignore it.
-pub const BASH_PROMPT_COMMAND: &str = r#"printf '\033]9;9;%s\033\\' "$(pwd -P 2>/dev/null || printf %s "$PWD")""#;
+///
+/// Two reports: OSC 9;9 without symbolic links, which Windows can start a
+/// program in (`\\wsl$\Debian\usr\bin`, not `…\bin`, a link), then OSC 7 with
+/// the name the prompt shows (`%` encoded). A pane opened from it starts in
+/// the first and gets the second as WTPP_CD: at its first prompt it changes
+/// to that name, if it's the same directory, quietly, and forgets it.
+pub const BASH_PROMPT_COMMAND: &str = concat!(
+    r#"[ -n "$WTPP_CD" ] && { [ "$WTPP_CD" -ef . ] && cd -- "$WTPP_CD"; unset WTPP_CD; } >/dev/null 2>&1; "#,
+    r#"printf '\033]9;9;%s\033\\\033]7;file://%s\033\\' "$(pwd -P 2>/dev/null || printf %s "$PWD")" "${PWD//\%/%25}""#,
+);
+
+/// bash on Linux and macOS: OSC 7 with the name the prompt shows (wt++ can
+/// read the directory without symbolic links from the process itself).
+pub const UNIX_BASH_PROMPT_COMMAND: &str = r#"printf '\033]7;file://%s\033\\' "${PWD//\%/%25}""#;
+
+/// zsh's startup files in wt++'s own ZDOTDIR, as VS Code does it: each runs
+/// the user's own from where zsh would have read it (their ZDOTDIR, or HOME;
+/// their .zshenv may move it), with ZDOTDIR set to that while it runs. The
+/// last file read puts ZDOTDIR back as it was, so nothing started later sees
+/// wt++'s. The .zshrc adds a precmd function reporting the directory (OSC 7).
+pub const ZSH_FILES: [(&str, &str); 4] = [
+    (
+        ".zshenv",
+        r#"# wt++ shell integration (see wt++'s README). Runs your own startup files.
+__wtpp_user() {
+  builtin typeset -g WTPP_ZDOTDIR=$ZDOTDIR
+  ZDOTDIR=${WTPP_USER_ZDOTDIR:-$HOME}
+  if [[ -f $ZDOTDIR/$1 && $ZDOTDIR != $WTPP_ZDOTDIR ]]; then
+    builtin source -- "$ZDOTDIR/$1"
+  fi
+  builtin typeset -g WTPP_USER_ZDOTDIR=$ZDOTDIR
+  ZDOTDIR=$WTPP_ZDOTDIR
+}
+__wtpp_restore() {
+  if [[ -n $WTPP_ZDOTDIR_WAS_SET || $WTPP_USER_ZDOTDIR != $HOME ]]; then
+    ZDOTDIR=$WTPP_USER_ZDOTDIR
+  else
+    builtin unset ZDOTDIR
+  fi
+  builtin unset WTPP_USER_ZDOTDIR WTPP_ZDOTDIR WTPP_ZDOTDIR_WAS_SET
+  builtin unfunction __wtpp_user __wtpp_restore
+}
+__wtpp_user .zshenv
+[[ -o interactive || -o login ]] || __wtpp_restore
+"#,
+    ),
+    (
+        ".zprofile",
+        r#"# wt++ shell integration (see wt++'s README). Runs your own startup files.
+__wtpp_user .zprofile
+"#,
+    ),
+    (
+        ".zshrc",
+        r#"# wt++ shell integration (see wt++'s README). Runs your own startup files.
+__wtpp_user .zshrc
+__wtpp_report_cwd() {
+  builtin emulate -L zsh
+  builtin printf '\e]7;file://%s\e\\' "${PWD//\%/%25}"
+}
+builtin typeset -ga precmd_functions
+precmd_functions+=(__wtpp_report_cwd)
+[[ -o login ]] || __wtpp_restore
+"#,
+    ),
+    (
+        ".zlogin",
+        r#"# wt++ shell integration (see wt++'s README). Runs your own startup files.
+__wtpp_user .zlogin
+__wtpp_restore
+"#,
+    ),
+];
+
+/// Write [`ZSH_FILES`] to `dir`, where they aren't already as they should be.
+pub fn write_zsh_integration(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (name, text) in ZSH_FILES {
+        let path = dir.join(name);
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(text) {
+            std::fs::write(&path, text)?;
+        }
+    }
+    Ok(())
+}
+
+/// Environment for a bash or zsh on Linux and macOS so it reports the
+/// directory by the name it shows (`env` gets what to add). `zsh_dir` holds
+/// [`ZSH_FILES`]; `var` reads the environment the shell would get. Nothing
+/// for other programs, or where the user has set things up themselves.
+pub fn unix_prompt_env(program: &str, zsh_dir: Option<&str>, var: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let file = program.rsplit('/').next().unwrap_or(program);
+    match file {
+        "bash" => match var("PROMPT_COMMAND").filter(|p| !p.trim().is_empty()) {
+            Some(theirs) if theirs.contains(UNIX_BASH_PROMPT_COMMAND) => Vec::new(),
+            Some(theirs) => vec![("PROMPT_COMMAND".into(), format!("{theirs}; {UNIX_BASH_PROMPT_COMMAND}"))],
+            None => vec![("PROMPT_COMMAND".into(), UNIX_BASH_PROMPT_COMMAND.into())],
+        },
+        "zsh" => {
+            let Some(dir) = zsh_dir else { return Vec::new() };
+            let theirs = var("ZDOTDIR").filter(|z| !z.is_empty());
+            // Started from a pane that has it already (wt++ in wt++).
+            if theirs.as_deref() == Some(dir) {
+                return Vec::new();
+            }
+            let home = var("HOME").unwrap_or_default();
+            let mut env = vec![("ZDOTDIR".to_string(), dir.to_string()), ("WTPP_USER_ZDOTDIR".to_string(), theirs.clone().unwrap_or(home))];
+            if theirs.is_some() {
+                env.push(("WTPP_ZDOTDIR_WAS_SET".into(), "1".into()));
+            }
+            env
+        }
+        _ => Vec::new(),
+    }
+}
 
 /// Environment for a WSL profile so its bash reports the directory: our
-/// PROMPT_COMMAND, passed into WSL by WSLENV (added to what's there). Nothing
-/// if the profile sets PROMPT_COMMAND itself. `wslenv` is the WSLENV the
-/// shell would otherwise get.
-pub fn wsl_prompt_env(profile_sets_prompt_command: bool, wslenv: Option<&str>) -> Vec<(String, String)> {
+/// PROMPT_COMMAND, passed into WSL by WSLENV (added to what's there), and
+/// with `logical_dir`, WTPP_CD (see [`BASH_PROMPT_COMMAND`]). Nothing if the
+/// profile sets PROMPT_COMMAND itself. `wslenv` is the WSLENV the shell would
+/// otherwise get.
+pub fn wsl_prompt_env(profile_sets_prompt_command: bool, wslenv: Option<&str>, logical_dir: Option<&str>) -> Vec<(String, String)> {
     if profile_sets_prompt_command {
         return Vec::new();
     }
-    let wslenv = wslenv.unwrap_or("").trim_matches(':');
-    let listed = wslenv.split(':').any(|v| v.split('/').next().is_some_and(|name| name.eq_ignore_ascii_case("PROMPT_COMMAND")));
-    let wslenv = match (listed, wslenv.is_empty()) {
-        (true, _) => wslenv.to_string(),
-        (false, true) => "PROMPT_COMMAND/u".to_string(),
-        (false, false) => format!("{wslenv}:PROMPT_COMMAND/u"),
-    };
-    vec![("PROMPT_COMMAND".into(), BASH_PROMPT_COMMAND.into()), ("WSLENV".into(), wslenv)]
+    let mut wslenv = wslenv.unwrap_or("").trim_matches(':').to_string();
+    let mut env = vec![("PROMPT_COMMAND".to_string(), BASH_PROMPT_COMMAND.to_string())];
+    if let Some(dir) = logical_dir {
+        env.push(("WTPP_CD".into(), dir.into()));
+    }
+    for (name, _) in &env {
+        let listed = wslenv.split(':').any(|v| v.split('/').next().is_some_and(|n| n.eq_ignore_ascii_case(name)));
+        if !listed {
+            if !wslenv.is_empty() {
+                wslenv.push(':');
+            }
+            wslenv.push_str(&format!("{name}/u"));
+        }
+    }
+    env.push(("WSLENV".into(), wslenv));
+    env
 }
 
 /// For tests and logs: a command line with the hook, as it would be run.
@@ -224,7 +347,7 @@ mod tests {
 
     #[test]
     fn wsl_env() {
-        let env = |sets, wslenv| wsl_prompt_env(sets, wslenv);
+        let env = |sets, wslenv| wsl_prompt_env(sets, wslenv, None);
         assert_eq!(env(false, None)[1], ("WSLENV".into(), "PROMPT_COMMAND/u".into()));
         assert_eq!(env(false, None)[0], ("PROMPT_COMMAND".into(), BASH_PROMPT_COMMAND.into()));
         assert_eq!(env(false, Some("USERPROFILE/p:FOO"))[1].1, "USERPROFILE/p:FOO:PROMPT_COMMAND/u");
@@ -235,5 +358,74 @@ mod tests {
         // The directory without symbolic links (`/bin` is one to `/usr/bin`):
         // Windows can't start a program in a Linux symbolic link.
         assert!(BASH_PROMPT_COMMAND.contains("pwd -P"));
+        // With the name the prompt shows.
+        let with = wsl_prompt_env(false, Some("FOO"), Some("/bin"));
+        assert_eq!(with[1], ("WTPP_CD".into(), "/bin".into()));
+        assert_eq!(with[2], ("WSLENV".into(), "FOO:PROMPT_COMMAND/u:WTPP_CD/u".into()));
+        assert!(wsl_prompt_env(true, None, Some("/bin")).is_empty());
+    }
+
+    #[test]
+    fn unix_shells() {
+        let none = |_: &str| None;
+        assert_eq!(unix_prompt_env("/bin/bash", None, none), [("PROMPT_COMMAND".to_string(), UNIX_BASH_PROMPT_COMMAND.to_string())]);
+        let theirs = |n: &str| (n == "PROMPT_COMMAND").then(|| "history -a".to_string());
+        assert_eq!(unix_prompt_env("bash", None, theirs)[0].1, format!("history -a; {UNIX_BASH_PROMPT_COMMAND}"));
+        let ours = |n: &str| (n == "PROMPT_COMMAND").then(|| UNIX_BASH_PROMPT_COMMAND.to_string());
+        assert!(unix_prompt_env("bash", None, ours).is_empty());
+        let home = |n: &str| (n == "HOME").then(|| "/home/me".to_string());
+        assert_eq!(
+            unix_prompt_env("/usr/bin/zsh", Some("/wt/zsh"), home),
+            [("ZDOTDIR".to_string(), "/wt/zsh".to_string()), ("WTPP_USER_ZDOTDIR".to_string(), "/home/me".to_string())]
+        );
+        let set = |n: &str| match n {
+            "ZDOTDIR" => Some("/home/me/.config/zsh".to_string()),
+            "HOME" => Some("/home/me".to_string()),
+            _ => None,
+        };
+        assert_eq!(unix_prompt_env("zsh", Some("/wt/zsh"), set)[1].1, "/home/me/.config/zsh");
+        assert_eq!(unix_prompt_env("zsh", Some("/wt/zsh"), set)[2], ("WTPP_ZDOTDIR_WAS_SET".to_string(), "1".to_string()));
+        assert!(unix_prompt_env("zsh", None, set).is_empty());
+        assert!(unix_prompt_env("zsh", Some("/wt/zsh"), |n| (n == "ZDOTDIR").then(|| "/wt/zsh".to_string())).is_empty());
+        assert!(unix_prompt_env("fish", Some("/wt/zsh"), home).is_empty());
+        for (_, text) in ZSH_FILES {
+            assert!(text.contains("__wtpp_user"));
+        }
+    }
+
+    /// The hook in a real bash: the first prompt goes to WTPP_CD if it's the
+    /// same directory, says nothing either way, and reports both names.
+    #[cfg(unix)]
+    #[test]
+    fn bash_hook() {
+        let Ok(bash) = std::process::Command::new("bash").arg("--version").output() else { return };
+        assert!(bash.status.success());
+        let base = std::env::temp_dir().join(format!("wtpp-hook-{}", std::process::id()));
+        let real = base.join("real dir %41 ü");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let run = |cwd: &std::path::Path, wtpp_cd: &str| {
+            let out = std::process::Command::new("bash")
+                .args(["--norc", "--noprofile", "-c", &format!("eval \"$PROMPT_COMMAND\"; echo; echo \"pwd=$(pwd) cd=${{WTPP_CD-unset}}\"")])
+                .current_dir(cwd)
+                .env("PROMPT_COMMAND", BASH_PROMPT_COMMAND)
+                .env("WTPP_CD", wtpp_cd)
+                .env_remove("PWD")
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap() + &String::from_utf8(out.stderr).unwrap()
+        };
+        let real_text = real.canonicalize().unwrap().to_string_lossy().into_owned();
+        let link_text = link.to_string_lossy().into_owned();
+        let out = run(&real, &link_text);
+        let encoded = link_text.replace('%', "%25");
+        assert_eq!(out, format!("\x1b]9;9;{real_text}\x1b\\\x1b]7;file://{encoded}\x1b\\\npwd={link_text} cd=unset\n"));
+        // Not the same directory (or gone): stays, and quiet.
+        let out = run(&real, "/");
+        assert!(out.ends_with(&format!("\npwd={real_text} cd=unset\n")), "{out}");
+        let out = run(&real, &base.join("gone").to_string_lossy());
+        assert!(out.ends_with(&format!("\npwd={real_text} cd=unset\n")), "{out}");
+        std::fs::remove_dir_all(&base).ok();
     }
 }
