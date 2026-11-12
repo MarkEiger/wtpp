@@ -64,6 +64,8 @@ pub(crate) struct Pane {
     last_key: Option<Instant>,
     /// Keys waiting for a word edit to be sent first (see `word_edit`).
     waiting: std::collections::VecDeque<Waiting>,
+    /// Why its program couldn't be started, shown again after a resize.
+    failure: Option<String>,
 }
 
 /// Input for a pane waiting its turn (see `App::word_edit`).
@@ -657,6 +659,7 @@ impl App {
                         wheel_lines: 0,
                         last_key: None,
                         waiting: Default::default(),
+                        failure: None,
                     },
                 );
                 true
@@ -669,7 +672,8 @@ impl App {
                 // Like a pane whose shell exited: Enter tries again.
                 let session = Session::failed(&session_profile, size, |_| {});
                 let settings_key = self.keymap.chord_label(&Action::OpenSettings).unwrap_or_default();
-                session.feed(start_failure_message(&session_profile.program, &e, &settings_key).as_bytes());
+                let failure = start_failure_message(&session_profile.program, &e, &settings_key);
+                session.feed(failure.as_bytes());
                 self.ensure_icon(&profile);
                 let theme = theme_for(&self.settings, &profile);
                 self.panes.insert(
@@ -690,6 +694,7 @@ impl App {
                         wheel_lines: 0,
                         last_key: None,
                         waiting: Default::default(),
+                        failure: Some(failure),
                     },
                 );
                 true
@@ -1190,7 +1195,12 @@ impl App {
             let size = self.grid_size(&profile, rect);
             if let (Some(pane), Some(size)) = (self.panes.get_mut(&id), size) {
                 pane.rect = rect;
+                let resized = pane.session.size() != size;
                 pane.session.resize(size);
+                // Rewrapped, its first line would scroll away: say it again.
+                if let Some(failure) = pane.failure.as_ref().filter(|_| resized) {
+                    pane.session.feed(format!("\x1b[H\x1b[2J\x1b[3J{failure}").as_bytes());
+                }
             }
         }
         self.refresh_chrome();
