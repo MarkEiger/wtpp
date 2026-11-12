@@ -99,6 +99,8 @@ enum Io {
     /// `None` on the input channel (or an empty signal) means the session
     /// is closing: the console host exits when its pipes close.
     Pipes { input: mpsc::Sender<Option<Cow<'static, [u8]>>>, signal: Arc<Mutex<Option<File>>> },
+    /// Nothing: the program couldn't be started (see [`Session::failed`]).
+    None,
 }
 
 impl Io {
@@ -112,6 +114,7 @@ impl Io {
             Io::Pipes { input, .. } => {
                 let _ = input.send(Some(bytes));
             }
+            Io::None => {}
         }
     }
 
@@ -133,6 +136,7 @@ impl Io {
                     let _ = signal.write_all(&packet);
                 }
             }
+            Io::None => {}
         }
     }
 }
@@ -363,6 +367,14 @@ impl Session {
         Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, _keep_alive: keep_alive })
     }
 
+    /// A session for a program that couldn't be started: a terminal to say
+    /// so in (see [`Session::feed`]), with no process behind it.
+    pub fn failed(profile: &Profile, size: GridSize, on_event: impl Fn(SessionEvent) + Send + Sync + 'static) -> Session {
+        let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
+        let reported_cwd = listener.reported_cwd.clone();
+        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, _keep_alive: Vec::new() }
+    }
+
     pub fn term(&self) -> &Arc<FairMutex<Term<Listener>>> {
         &self.term
     }
@@ -454,6 +466,7 @@ impl Drop for Session {
                     signal.take();
                 }
             }
+            Io::None => {}
         }
     }
 }

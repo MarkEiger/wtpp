@@ -385,11 +385,12 @@ impl App {
         if let Some(commandline) = args.commandline {
             profile.commandline = commandline;
         }
-        self.new_tab_in(profile, args.starting_directory.map(|dir| StartIn { dir, shown: None }));
+        self.new_tab_in(profile, args.starting_directory.map(|dir| StartIn { dir, shown: None }), false);
         // A profile that can't start (a bad command line) mustn't take wt++
-        // down with it: Settings is where to fix it.
+        // down with it: the system's shell instead, and Settings is where to
+        // fix it.
         if self.tabs.is_empty() {
-            self.new_tab_with(self.settings.fallback_profile());
+            self.new_tab_in(self.settings.fallback_profile(), None, false);
         }
         if self.tabs.is_empty() {
             log::error!("could not start any shell");
@@ -508,8 +509,10 @@ impl App {
 
     /// Start a pane running `profile`, in `start_in` if given (see
     /// `Pane::started_in`), else where the profile says.
-    fn spawn_pane(&mut self, id: PaneId, profile: ResolvedProfile, rect: Rect, start_in: Option<StartIn>) -> bool {
-        self.spawn_pane_on(id, profile, rect, start_in, None)
+    /// `keep_failed`: a program that can't be started still gets its pane,
+    /// which says why (see `Failure`); otherwise there's no pane.
+    fn spawn_pane(&mut self, id: PaneId, profile: ResolvedProfile, rect: Rect, start_in: Option<StartIn>, keep_failed: bool) -> bool {
+        self.spawn_pane_on(id, profile, rect, start_in, None, keep_failed)
     }
 
     /// Start a pane: the profile's shell, or with `pipes`, a console Windows
@@ -521,6 +524,7 @@ impl App {
         rect: Rect,
         start_in: Option<StartIn>,
         pipes: Option<wtpp_session::Pipes>,
+        keep_failed: bool,
     ) -> bool {
         let Some(size) = self.grid_size(&profile, rect) else { return false };
         let session_profile = self.session_profile(&profile, start_in.as_ref());
@@ -609,7 +613,34 @@ impl App {
             }
             Err(e) => {
                 log::error!("failed to start {}: {e:#}", profile.commandline);
-                false
+                if !keep_failed {
+                    return false;
+                }
+                // Like a pane whose shell exited: Enter tries again.
+                let session = Session::failed(&session_profile, size, |_| {});
+                let settings_key = self.keymap.chord_label(&Action::OpenSettings).unwrap_or_default();
+                session.feed(start_failure_message(&session_profile.program, &e, &settings_key).as_bytes());
+                self.ensure_icon(&profile);
+                let theme = theme_for(&self.settings, &profile);
+                self.panes.insert(
+                    id,
+                    Pane {
+                        session,
+                        profile,
+                        started_in: start_in,
+                        theme,
+                        title: None,
+                        rect,
+                        target: None,
+                        selecting: false,
+                        emulate_kill_word: false,
+                        exited: true,
+                        last_click: None,
+                        scroll_remainder: 0.0,
+                        wheel_lines: 0,
+                    },
+                );
+                true
             }
         }
     }
@@ -759,7 +790,7 @@ impl App {
         profile.commandline = format!("\"{program}\"");
         profile.key_encoding = KeyEncoding::Windows;
         let id = self.alloc_id();
-        if !self.spawn_pane_on(id, profile, self.content_area(), None, Some(handoff.into_pipes())) {
+        if !self.spawn_pane_on(id, profile, self.content_area(), None, Some(handoff.into_pipes()), false) {
             return;
         }
         self.tabs.push(Tab::new(TabKind::Terminal { root: Node::Leaf(id), focused: id, zoomed: false }));
@@ -767,13 +798,14 @@ impl App {
         self.relayout();
     }
 
+    /// A new tab; if its program can't be started, it says why.
     fn new_tab_with(&mut self, profile: ResolvedProfile) {
-        self.new_tab_in(profile, None);
+        self.new_tab_in(profile, None, true);
     }
 
-    fn new_tab_in(&mut self, profile: ResolvedProfile, start_in: Option<StartIn>) {
+    fn new_tab_in(&mut self, profile: ResolvedProfile, start_in: Option<StartIn>, keep_failed: bool) {
         let id = self.alloc_id();
-        if !self.spawn_pane(id, profile, self.content_area(), start_in) {
+        if !self.spawn_pane(id, profile, self.content_area(), start_in, keep_failed) {
             return;
         }
         self.tabs.push(Tab::new(TabKind::Terminal { root: Node::Leaf(id), focused: id, zoomed: false }));
@@ -802,7 +834,7 @@ impl App {
         *zoomed = false;
         root.split(target, id, side.axis(), new_first);
         let rect = root.layout(area, PANE_GAP).into_iter().find(|(p, _)| *p == id).unwrap().1;
-        let spawned = self.spawn_pane(id, profile, rect, start_in);
+        let spawned = self.spawn_pane(id, profile, rect, start_in, true);
         if let TabKind::Terminal { root, focused, .. } = &mut self.tabs[self.active].kind {
             if spawned {
                 *focused = id;
@@ -1042,7 +1074,7 @@ impl App {
         let Some(old) = self.panes.remove(&id) else { return };
         let (profile, rect, start_in) = (old.profile.clone(), old.rect, old.started_in.clone());
         drop(old);
-        if !self.spawn_pane(id, profile, rect, start_in) {
+        if !self.spawn_pane(id, profile, rect, start_in, true) {
             self.close_pane(id);
             return;
         }
@@ -1528,7 +1560,7 @@ impl App {
                 Some(pane) => {
                     let profile = pane.profile.clone();
                     let start_in = self.inherited_cwd(pane, &profile);
-                    self.new_tab_in(profile, start_in)
+                    self.new_tab_in(profile, start_in, true)
                 }
                 None => return false,
             },
@@ -2038,6 +2070,21 @@ impl App {
         }
         true
     }
+}
+
+/// What a pane whose program couldn't be started shows, like an exited one.
+fn start_failure_message(program: &str, error: &anyhow::Error, settings_key: &str) -> String {
+    // The OS's own words, without Rust's "(os error 2)".
+    let error = format!("{error:#}");
+    let error = match error.rfind(" (os error ") {
+        Some(at) if error.ends_with(')') => &error[..at],
+        _ => &error,
+    };
+    let settings = if settings_key.is_empty() { String::new() } else { format!(", or {settings_key} to fix it in Settings") };
+    format!(
+        "\x1b[0m\x1b[90m[couldn't start \"{program}\": {error}]\x1b[0m\r\n\
+         Press Enter to try again, Ctrl+D to close this terminal{settings}.\r\n"
+    )
 }
 
 /// How often output is drawn at most (120 Hz).
@@ -2570,6 +2617,38 @@ mod tests {
         let only_multi = Settings { large_paste_warning: false, ..Settings::default() };
         assert!(paste_warning(&large, false, &only_multi).is_none());
         assert!(paste_warning(multi, false, &only_multi).is_some());
+    }
+
+    #[test]
+    fn start_failures() {
+        let error = anyhow::Error::from(std::io::Error::from_raw_os_error(2));
+        let text = start_failure_message("no-such.exe", &error, "Ctrl+,");
+        let first = text.lines().next().unwrap();
+        let os = std::io::Error::from_raw_os_error(2).to_string();
+        let os = os.trim_end_matches(" (os error 2)");
+        assert_eq!(first, format!("\x1b[0m\x1b[90m[couldn't start \"no-such.exe\": {os}]\x1b[0m"));
+        assert!(text.starts_with(&format!("{first}\r\n")));
+        assert!(!first.contains("os error"));
+        assert!(text.contains("Press Enter to try again, Ctrl+D to close this terminal, or Ctrl+, to fix it in Settings."));
+        let unbound = start_failure_message("x", &anyhow::anyhow!("odd (thing)"), "");
+        assert!(unbound.contains("[couldn't start \"x\": odd (thing)]"));
+        assert!(unbound.contains("close this terminal.\r\n"));
+    }
+
+    /// A profile whose program doesn't exist: the spawn fails (that's what
+    /// gets a pane saying so), and the pane's terminal shows the message.
+    #[test]
+    fn missing_program_fails_the_spawn() {
+        let size = GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
+        let profile = wtpp_session::Profile::new("t", "wtpp-no-such-program.exe", &[]);
+        let error = Session::spawn(&profile, size, |_| {}).err().expect("no such program");
+        let session = Session::failed(&profile, size, |_| {});
+        session.feed(start_failure_message(&profile.program, &error, "Ctrl+,").as_bytes());
+        session.write(&b"ignored\r"[..]);
+        let term = session.term().lock();
+        let line: String = (0..80).map(|c| term.grid()[wtpp_session::alacritty_terminal::index::Line(0)][Column(c)].c).collect();
+        assert!(line.starts_with("[couldn't start \"wtpp-no-such-program.exe\": "), "{line}");
+        assert_eq!(session.pid(), None);
     }
 
     #[test]
