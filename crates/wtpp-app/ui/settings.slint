@@ -1194,13 +1194,16 @@ export component SettingsPage inherits Rectangle {
                     }
                 }
 
-                // Footer
+                // Footer: taller for a long message (an error in
+                // settings.json), so it isn't cut off.
                 Rectangle {
-                    height: 60px;
+                    min-height: 60px;
                     background: Theme.nav-bg;
                     HorizontalLayout {
                         padding-left: 24px;
                         padding-right: 24px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
                         spacing: 8px;
                         Text {
                             text: SettingsData.status;

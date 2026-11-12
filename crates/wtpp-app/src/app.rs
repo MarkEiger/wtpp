@@ -1109,15 +1109,7 @@ impl App {
             self.close_pane(id);
             return;
         }
-        let code = code.unwrap_or(0);
-        pane.session.feed(
-            format!(
-                "\r\n\x1b[0m\x1b[90m[process exited with code {code} (0x{:08x})]\x1b[0m\r\n\
-                 You can now close this terminal with Ctrl+D, or press Enter to restart.\r\n",
-                code as u32
-            )
-            .as_bytes(),
-        );
+        pane.session.feed(exit_message(code.unwrap_or(0), cfg!(windows)).as_bytes());
         self.render();
     }
 
@@ -2167,6 +2159,16 @@ impl App {
     }
 }
 
+/// What a pane whose shell exited shows under its output. Windows exit
+/// codes are often NTSTATUS or HRESULT values, so there in hex too, like WT.
+fn exit_message(code: i32, windows: bool) -> String {
+    let hex = if windows { format!(" (0x{:08x})", code as u32) } else { String::new() };
+    format!(
+        "\r\n\x1b[0m\x1b[90m[process exited with code {code}{hex}]\x1b[0m\r\n\
+         You can now close this terminal with Ctrl+D, or press Enter to restart.\r\n"
+    )
+}
+
 /// What a pane whose program couldn't be started shows, like an exited one.
 fn start_failure_message(program: &str, error: &anyhow::Error, settings_key: &str) -> String {
     // The OS's own words, without Rust's "(os error 2)".
@@ -2774,6 +2776,15 @@ mod tests {
             }
             assert_eq!(text_before_cursor(&session).iter().collect::<String>(), ">one ");
         }
+    }
+
+    #[test]
+    fn exit_messages() {
+        let first = |code, windows| exit_message(code, windows).lines().nth(1).unwrap().to_string();
+        assert_eq!(first(3, true), "\x1b[0m\x1b[90m[process exited with code 3 (0x00000003)]\x1b[0m");
+        assert_eq!(first(-1073741510, true), "\x1b[0m\x1b[90m[process exited with code -1073741510 (0xc000013a)]\x1b[0m");
+        assert_eq!(first(3, false), "\x1b[0m\x1b[90m[process exited with code 3]\x1b[0m");
+        assert!(exit_message(0, false).ends_with("You can now close this terminal with Ctrl+D, or press Enter to restart.\r\n"));
     }
 
     #[test]

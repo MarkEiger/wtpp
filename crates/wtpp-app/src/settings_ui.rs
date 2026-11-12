@@ -164,8 +164,8 @@ impl App {
         if let (_, Some(error)) = Settings::load(&self.settings_path) {
             self.set_status(
                 &format!(
-                    "settings.json has an error and isn't being used: {error}. Fix it with Open JSON file; \
-                     if you save here instead, the old file is kept as settings.json.bak."
+                    "settings.json has an error and isn't used: {error}. Open JSON file to fix it; saving here \
+                     keeps the old one as settings.json.bak."
                 ),
                 true,
             );
