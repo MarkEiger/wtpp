@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.2 — 2026-11-12
 
 - Linux and macOS: a pane whose starting directory doesn't exist (any more)
   opens in your home folder, as on Windows, not in the directory wt++ itself
