@@ -689,7 +689,7 @@ pub fn is_wsl_program(program: &str) -> bool {
 
 /// The distro a profile runs, if it runs `wsl.exe`: its `-d`, else its name.
 fn wsl_distro_of(p: &ProfileSettings) -> Option<String> {
-    let (program, args) = split_commandline(p.commandline.as_deref()?);
+    let (program, args) = split_commandline_windows(p.commandline.as_deref()?);
     if !is_wsl_program(&program) {
         return None;
     }
@@ -700,7 +700,7 @@ fn wsl_distro_of(p: &ProfileSettings) -> Option<String> {
 /// Every command line wt++ has written for a distro: 1.1.2's `--cd ~` (which
 /// fails on Windows 10's inbox WSL), then `~` first, then neither.
 fn generated_wsl_commandlines(distro: &str) -> [String; 3] {
-    let line = |args: &[&str]| join_commandline("wsl.exe", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+    let line = |args: &[&str]| join_commandline_windows("wsl.exe", &args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
     [line(&["-d", distro, "--cd", "~"]), line(&["~", "-d", distro]), line(&["-d", distro])]
 }
 
@@ -723,7 +723,7 @@ fn is_same_shell(p: &ProfileSettings, d: &DiscoveredProfile) -> bool {
 /// `--cd` with such a path fails on inbox wsl.exe: it opens in the Linux home.
 pub fn is_wsl_linux_dir(commandline: &str, dir: &str) -> bool {
     let dir = dir.trim();
-    is_wsl_program(&split_commandline(commandline).0) && (dir == "~" || dir.starts_with("~/") || dir.starts_with('/'))
+    is_wsl_program(&split_commandline_windows(commandline).0) && (dir == "~" || dir.starts_with("~/") || dir.starts_with('/'))
 }
 
 /// The command line to start a profile with. A starting directory takes over
@@ -1048,8 +1048,17 @@ pub fn guid_for(name: &str) -> String {
     )
 }
 
-/// Split a command line into program and arguments (double quotes group).
+/// Split a profile's command line into program and arguments, by the
+/// rules of the platform's shells: Windows' on Windows (see
+/// [`split_commandline_windows`]), POSIX shell words elsewhere (see
+/// [`split_commandline_unix`]).
 pub fn split_commandline(s: &str) -> (String, Vec<String>) {
+    if cfg!(windows) { split_commandline_windows(s) } else { split_commandline_unix(s) }
+}
+
+/// Windows rules (as WT reads `commandline`): whitespace separates, double
+/// quotes group, backslashes are ordinary characters.
+pub fn split_commandline_windows(s: &str) -> (String, Vec<String>) {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let mut quoted = false;
@@ -1079,11 +1088,98 @@ pub fn split_commandline(s: &str) -> (String, Vec<String>) {
     (parts.next().unwrap_or_default(), parts.collect())
 }
 
-/// Quote program and arguments back into a command line.
+/// POSIX shell words, as `sh` would split them, without expanding anything
+/// (no variables, `~` or globs): single quotes keep everything; in double
+/// quotes a backslash escapes only `$`, `` ` ``, `"`, `\` and a newline;
+/// outside quotes it escapes any character. An unterminated quote runs to
+/// the end.
+pub fn split_commandline_unix(s: &str) -> (String, Vec<String>) {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                started = true;
+                for c in chars.by_ref() {
+                    if c == '\'' {
+                        break;
+                    }
+                    cur.push(c);
+                }
+            }
+            '"' => {
+                started = true;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => match chars.peek() {
+                            Some('\n') => {
+                                chars.next();
+                            }
+                            Some(&e @ ('$' | '`' | '"' | '\\')) => {
+                                chars.next();
+                                cur.push(e);
+                            }
+                            _ => cur.push('\\'),
+                        },
+                        c => cur.push(c),
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                Some('\n') => {}
+                Some(e) => {
+                    cur.push(e);
+                    started = true;
+                }
+                None => {
+                    cur.push('\\');
+                    started = true;
+                }
+            },
+            c if c.is_whitespace() => {
+                if started {
+                    parts.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        parts.push(cur);
+    }
+    let mut parts = parts.into_iter();
+    (parts.next().unwrap_or_default(), parts.collect())
+}
+
+/// Quote program and arguments back into a command line that
+/// [`split_commandline`] gives back.
 pub fn join_commandline(program: &str, args: &[String]) -> String {
+    if cfg!(windows) { join_commandline_windows(program, args) } else { join_commandline_unix(program, args) }
+}
+
+/// See [`split_commandline_windows`].
+pub fn join_commandline_windows(program: &str, args: &[String]) -> String {
     std::iter::once(program)
         .chain(args.iter().map(String::as_str))
         .map(|p| if p.contains(char::is_whitespace) || p.is_empty() { format!("\"{p}\"") } else { p.to_string() })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// See [`split_commandline_unix`]: single quotes around anything but plain
+/// words.
+pub fn join_commandline_unix(program: &str, args: &[String]) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-~".contains(c);
+    std::iter::once(program)
+        .chain(args.iter().map(String::as_str))
+        .map(|p| if !p.is_empty() && p.chars().all(plain) { p.to_string() } else { format!("'{}'", p.replace('\'', r"'\''")) })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1829,11 +1925,48 @@ mod tests {
     #[test]
     fn commandlines() {
         assert_eq!(
-            split_commandline(r#""C:\Program Files\Git\bin\bash.exe" -i -l"#),
+            split_commandline_windows(r#""C:\Program Files\Git\bin\bash.exe" -i -l"#),
             (r"C:\Program Files\Git\bin\bash.exe".to_string(), vec!["-i".to_string(), "-l".to_string()])
         );
-        assert_eq!(split_commandline("wsl.exe -d Debian"), ("wsl.exe".into(), vec!["-d".into(), "Debian".into()]));
-        assert_eq!(join_commandline(r"C:\Program Files\x.exe", &["-a".into()]), r#""C:\Program Files\x.exe" -a"#);
+        assert_eq!(split_commandline_windows("wsl.exe -d Debian"), ("wsl.exe".into(), vec!["-d".into(), "Debian".into()]));
+        assert_eq!(join_commandline_windows(r"C:\Program Files\x.exe", &["-a".into()]), r#""C:\Program Files\x.exe" -a"#);
+        // Backslashes are path separators, single quotes ordinary.
+        assert_eq!(split_commandline_windows(r"C:\Windows\system32\cmd.exe /c 'x'").1, ["/c", "'x'"]);
+        assert_eq!(split_commandline_windows(r"C:\Windows\system32\cmd.exe").0, r"C:\Windows\system32\cmd.exe");
+        // The platform's own.
+        let (windows, unix) = (split_commandline_windows("sh -c 'a b'"), split_commandline_unix("sh -c 'a b'"));
+        assert_eq!(split_commandline("sh -c 'a b'"), if cfg!(windows) { windows } else { unix });
+    }
+
+    /// POSIX shell words on Linux and macOS.
+    #[test]
+    fn unix_commandlines() {
+        let split = |s: &str| {
+            let (p, a) = split_commandline_unix(s);
+            std::iter::once(p).chain(a).collect::<Vec<_>>()
+        };
+        assert_eq!(split("sh -c 'echo hello; exit 3'"), ["sh", "-c", "echo hello; exit 3"]);
+        assert_eq!(split(r#"/bin/bash -l"#), ["/bin/bash", "-l"]);
+        assert_eq!(split(r#""/opt/my shell/bin/zsh" -l"#), ["/opt/my shell/bin/zsh", "-l"]);
+        assert_eq!(split(r#"/opt/my\ shell/zsh"#), ["/opt/my shell/zsh"]);
+        assert_eq!(split(r#"echo "a \"b\" \$HOME \\ \n" x"#), ["echo", r#"a "b" $HOME \ \n"#, "x"]);
+        assert_eq!(split(r#"echo 'it'\''s' "$HOME" ~ *"#), ["echo", "it's", "$HOME", "~", "*"]);
+        assert_eq!(split("a '' \"\" b"), ["a", "", "", "b"]);
+        assert_eq!(split("  a\tb  \n c "), ["a", "b", "c"]);
+        assert_eq!(split("a\\\nb"), ["ab"]);
+        assert_eq!(split("a 'unterminated b"), ["a", "unterminated b"]);
+        assert_eq!(split(r"trailing\"), [r"trailing\"]);
+        assert_eq!(split_commandline_unix(""), (String::new(), vec![]));
+        // What's joined splits back.
+        for args in [&["-c", "echo hello; exit 3"][..], &["it's", "", "a\\b", "$x", "tab\there", "plain-arg", "~/x"], &[]] {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            for program in ["sh", "/opt/my shell/zsh"] {
+                let line = join_commandline_unix(program, &args);
+                assert_eq!(split_commandline_unix(&line), (program.to_string(), args.clone()), "{line}");
+            }
+        }
+        assert_eq!(join_commandline_unix("/bin/bash", &["-l".into()]), "/bin/bash -l");
+        assert_eq!(join_commandline_unix("sh", &["-c".into(), "a b".into()]), "sh -c 'a b'");
     }
 
     #[test]

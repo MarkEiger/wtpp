@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn home_only_where_windows_has_it() {
-        let commandline = |build| wtpp_config::settings::join_commandline("wsl.exe", &wsl_args("Debian", build));
+        let commandline = |build| wtpp_config::settings::join_commandline_windows("wsl.exe", &wsl_args("Debian", build));
         assert_eq!(commandline(Some(17763)), "wsl.exe -d Debian");
         assert_eq!(commandline(Some(18361)), "wsl.exe -d Debian");
         assert_eq!(commandline(Some(18362)), "wsl.exe ~ -d Debian");
@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn distro_names_survive_the_commandline() {
-        use wtpp_config::settings::{join_commandline, split_commandline};
+        use wtpp_config::settings::{join_commandline_windows as join_commandline, split_commandline_windows as split_commandline};
         for distro in ["My Distro", "Ubuntu-22.04", "Tab\tName", "ünï cödé", "a&b (c)", "100%"] {
             let args = wsl_args(distro, Some(26100));
             let line = join_commandline("wsl.exe", &args);
@@ -920,7 +920,7 @@ mod tests {
     }
 
     fn v112_profile(name: &str) -> wtpp_config::settings::ProfileSettings {
-        use wtpp_config::settings::{DISCOVERED_SOURCE, guid_for, join_commandline};
+        use wtpp_config::settings::{DISCOVERED_SOURCE, guid_for, join_commandline_windows as join_commandline};
         let args: Vec<String> = ["-d", name, "--cd", "~"].iter().map(|s| s.to_string()).collect();
         wtpp_config::settings::ProfileSettings {
             guid: Some(guid_for(name)),
@@ -934,7 +934,7 @@ mod tests {
     /// The found list and `wsl_known` of a machine in a captured state where
     /// the registry has nothing, so `wsl.exe` gets asked.
     fn discovered_in(capture: &Capture) -> (Vec<wtpp_config::settings::DiscoveredProfile>, bool) {
-        use wtpp_config::settings::{DiscoveredProfile, join_commandline};
+        use wtpp_config::settings::{DiscoveredProfile, join_commandline_windows as join_commandline};
         let parsed = capture.parsed();
         let wsl_known = parsed.is_some();
         let mut found = vec![

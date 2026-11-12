@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Linux and macOS: a profile's command line is read like a shell does (single
+  quotes, backslashes), so `sh -c 'echo hello; exit 3'` runs; it failed with
+  "Unterminated quoted string". Windows reads it as before.
 - The "Paste anyway?" warning for multi-line or large pastes (and "Close all
   tabs?") now has the keyboard while it's open: Enter pastes, Esc cancels,
   Tab moves between its buttons (Enter then presses the one with the focus),

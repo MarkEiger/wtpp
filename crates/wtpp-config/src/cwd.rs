@@ -1,12 +1,12 @@
 //! Opening a new pane in another pane's current directory: which directory
 //! that is for the new pane's shell, and having shells report it.
 
-use crate::settings::{is_wsl_program, join_commandline, split_commandline};
+use crate::settings::{is_wsl_program, join_commandline, split_commandline_windows};
 
 /// The distro a WSL command line runs (`-d`), or `None` for the default one
 /// or a command line that isn't WSL's.
 fn distro(commandline: &str) -> Option<String> {
-    let (program, args) = split_commandline(commandline);
+    let (program, args) = split_commandline_windows(commandline);
     if !is_wsl_program(&program) {
         return None;
     }
@@ -15,11 +15,11 @@ fn distro(commandline: &str) -> Option<String> {
 }
 
 fn is_wsl(commandline: &str) -> bool {
-    is_wsl_program(&split_commandline(commandline).0)
+    is_wsl_program(&split_commandline_windows(commandline).0)
 }
 
 fn is_cmd(commandline: &str) -> bool {
-    let (program, _) = split_commandline(commandline);
+    let (program, _) = split_commandline_windows(commandline);
     let file = program.rsplit(['/', '\\']).next().unwrap_or(&program).to_ascii_lowercase();
     file == "cmd" || file == "cmd.exe"
 }
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(powershell_args_with_hook("/bin/bash", &[]), None);
         // It survives a round trip through a command line as one argument.
         let line = powershell_commandline_with_hook("powershell.exe", &args(&["-NoLogo"])).unwrap();
-        assert_eq!(split_commandline(&line).1, with);
+        assert_eq!(crate::settings::split_commandline(&line).1, with);
         assert!(!POWERSHELL_PROMPT_HOOK.contains('"'));
     }
 
