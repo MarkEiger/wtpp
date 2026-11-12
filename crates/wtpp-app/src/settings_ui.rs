@@ -593,13 +593,22 @@ impl App {
         }
         let profiles = wt.profiles.list.len();
         let schemes = wt.schemes.len();
+        let mut bindings = 0;
         self.edit(|d| {
-            d.settings.import_windows_terminal(&wt);
+            // Into the bindings as they are here, unsaved edits included.
+            d.settings.set_keymap(&d.keymap);
+            bindings = d.settings.import_windows_terminal(&wt);
             d.keymap = d.settings.keymap().0;
             d.catalog = Action::catalog(d.settings.visible_profiles().len());
         });
+        let plural = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
         self.set_status(
-            &format!("Imported {profiles} profiles and {schemes} color schemes from Windows Terminal. Review, then Save."),
+            &format!(
+                "Imported {}, {} and {} from Windows Terminal. Review, then Save.",
+                plural(profiles, "profile"),
+                plural(schemes, "color scheme"),
+                plural(bindings, "key binding")
+            ),
             false,
         );
     }

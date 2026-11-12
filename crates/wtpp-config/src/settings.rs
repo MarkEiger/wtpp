@@ -961,8 +961,9 @@ impl Settings {
     }
 
     /// Import a Windows Terminal settings file: profiles (matched by name),
-    /// color schemes, key bindings and the default profile.
-    pub fn import_windows_terminal(&mut self, wt: &Settings) {
+    /// color schemes, key bindings and the default profile. Returns how many
+    /// key bindings it brought (see `merge_bindings`).
+    pub fn import_windows_terminal(&mut self, wt: &Settings) -> usize {
         for p in &wt.profiles.list {
             let Some(name) = &p.name else { continue };
             match self.profiles.list.iter_mut().find(|q| q.name.as_ref() == Some(name)) {
@@ -984,8 +985,7 @@ impl Settings {
             self.schemes.retain(|x| x.name != s.name);
             self.schemes.push(s.clone());
         }
-        let (keymap, _) = wt.keymap();
-        self.set_keymap(&keymap);
+        let bindings = self.merge_bindings(wt);
         if let Some(default) = &wt.default_profile {
             let name = wt.profiles.list.iter().find(|p| p.guid.as_ref() == Some(default)).and_then(|p| p.name.clone());
             self.default_profile = name.or(Some(default.clone()));
@@ -995,6 +995,30 @@ impl Settings {
         self.launch_mode = wt.launch_mode;
         self.initial_cols = wt.initial_cols;
         self.initial_rows = wt.initial_rows;
+        bindings
+    }
+
+    /// Add `wt`'s key bindings to ours, like its profiles: what it binds (or
+    /// unbinds) wins for those keys, and the keys it says nothing about keep
+    /// whatever we have, our own bindings included. (Taking its keymap whole
+    /// dropped ours, all of them when it had none.) Returns how many it had.
+    fn merge_bindings(&mut self, wt: &Settings) -> usize {
+        let defaults = Keymap::defaults();
+        let (theirs, _) = wt.keymap();
+        let (mut ours, _) = self.keymap();
+        let mut count = 0;
+        for d in &defaults.bindings {
+            if !theirs.bindings.iter().any(|b| b.chord == d.chord) {
+                ours.bindings.retain(|b| b.chord != d.chord);
+                count += 1;
+            }
+        }
+        for b in theirs.bindings.iter().filter(|b| !defaults.bindings.contains(b)) {
+            ours.bind(b.chord, b.action.clone());
+            count += 1;
+        }
+        self.set_keymap(&ours);
+        count
     }
 }
 
@@ -1295,6 +1319,57 @@ mod tests {
         assert!(ours.all_schemes().iter().any(|s| s.name == "Mine"));
         let (keymap, _) = ours.keymap();
         assert_eq!(keymap.lookup(wtpp_input::Key::Char('v'), wtpp_input::Mods::CTRL), None);
+    }
+
+    /// Importing adds WT's key bindings to ours; it doesn't take ours away,
+    /// least of all when WT has none. (The PC defaults' keys.)
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn import_keeps_our_key_bindings() {
+        use crate::actions::Action;
+        use wtpp_input::{Key, Mods};
+        let ctrl_alt = Mods { ctrl: true, alt: true, ..Mods::NONE };
+        let ctrl_shift = Mods { ctrl: true, shift: true, ..Mods::NONE };
+        let mut ours = Settings::default();
+        let (mut keymap, _) = ours.keymap();
+        keymap.bind(Chord::parse("ctrl+alt+k").unwrap(), Action::ClosePane);
+        keymap.bindings.retain(|b| b.chord != Chord::parse("ctrl+shift+f").unwrap());
+        ours.set_keymap(&keymap);
+        let saved = Settings::parse(&ours.to_json()).unwrap();
+        // (Those keys are the defaults' to start with.)
+        assert_eq!(Keymap::defaults().lookup(Key::Char('F'), ctrl_shift), Some(&Action::Find));
+        assert!(Keymap::defaults().lookup(Key::Char('T'), ctrl_shift).is_some());
+        assert!(Keymap::defaults().lookup(Key::Char('W'), ctrl_shift).is_some());
+
+        // A WT file with an empty `actions` list, or none.
+        for wt in [r#"{ "actions": [], "profiles": { "list": [] } }"#, r#"{ "profiles": [] }"#] {
+            let mut s = saved.clone();
+            assert_eq!(s.import_windows_terminal(&Settings::parse(wt).unwrap()), 0);
+            let (keymap, _) = Settings::parse(&s.to_json()).unwrap().keymap();
+            assert_eq!(keymap.lookup(Key::Char('k'), ctrl_alt), Some(&Action::ClosePane), "{wt}");
+            assert_eq!(keymap.lookup(Key::Char('F'), ctrl_shift), None, "{wt}");
+            assert_eq!(keymap, saved.keymap().0, "{wt}");
+        }
+
+        // WT's own: a new key, a key we use for something else, an unbind.
+        let wt = Settings::parse(
+            r#"{ "actions": [
+                { "command": "paste", "keys": "ctrl+alt+v" },
+                { "command": "find", "keys": "ctrl+alt+k" },
+                { "command": "unbound", "keys": "ctrl+shift+t" }
+            ] }"#,
+        )
+        .unwrap();
+        let mut s = saved.clone();
+        assert_eq!(s.import_windows_terminal(&wt), 3);
+        let (keymap, _) = Settings::parse(&s.to_json()).unwrap().keymap();
+        assert_eq!(keymap.lookup(Key::Char('v'), ctrl_alt), Some(&Action::Paste));
+        assert_eq!(keymap.lookup(Key::Char('k'), ctrl_alt), Some(&Action::Find));
+        assert_eq!(keymap.lookup(Key::Char('T'), ctrl_shift), None);
+        // The rest as it was, ours and the defaults.
+        assert_eq!(keymap.lookup(Key::Char('F'), ctrl_shift), None);
+        assert_eq!(keymap.lookup(Key::Char('W'), ctrl_shift), Keymap::defaults().lookup(Key::Char('W'), ctrl_shift));
+        assert_eq!(keymap.bindings.len(), saved.keymap().0.bindings.len() + 1 - 1);
     }
 
     /// What 1.1.2 wrote where `wsl -l -q` printed its usage: a profile per line.
