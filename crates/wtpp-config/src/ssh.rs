@@ -218,12 +218,27 @@ pub fn env_value(args: &[String]) -> String {
     args.join("\n")
 }
 
+/// How the new pane's shell runs the ssh it's given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Run {
+    /// Through `ssh` as the shell knows it: the function, which shares the
+    /// connection (the arguments are the ones the function reported).
+    Function,
+    /// As `command ssh`, past aliases and functions: the arguments were found
+    /// on the running ssh, so whatever an alias or function of the user's
+    /// added is in them already, and must not be added twice.
+    Command,
+}
+
 /// Environment variables for the shell of a pane: its token, and with `ssh`
-/// the arguments for the ssh it runs at its first prompt.
-pub fn shell_env(token: &str, ssh: Option<&[String]>) -> Vec<(String, String)> {
+/// the arguments for the ssh it runs at its first prompt, and how.
+pub fn shell_env(token: &str, ssh: Option<(&[String], Run)>) -> Vec<(String, String)> {
     let mut env = vec![("WTPP_TOKEN".to_string(), token.to_string())];
-    if let Some(args) = ssh {
+    if let Some((args, run)) = ssh {
         env.push(("WTPP_SSH".into(), env_value(args)));
+        if run == Run::Command {
+            env.push(("WTPP_SSH_DIRECT".into(), "1".into()));
+        }
     }
     env
 }
@@ -259,10 +274,12 @@ pub const BASH_SSH_INIT: &str = concat!(
 );
 
 /// bash: the ssh a new pane was given (`WTPP_SSH`), once, through `ssh` as
-/// the shell knows it, and into the history so ↑ runs it again.
+/// the shell knows it, or with `WTPP_SSH_DIRECT` as `command ssh` (see
+/// [`Run`]), and into the history so ↑ runs it again.
 pub const BASH_SSH_RUN: &str = concat!(
-    r#"[ -n "${WTPP_SSH-}" ] && { IFS=$'\n' read -r -d '' -a __wtpp_a <<< "$WTPP_SSH"; unset WTPP_SSH; "#,
-    r#"printf -v __wtpp_h ' %q' "${__wtpp_a[@]}"; history -s "ssh$__wtpp_h"; ssh "${__wtpp_a[@]}"; unset __wtpp_a __wtpp_h; }"#,
+    r#"[ -n "${WTPP_SSH-}" ] && { IFS=$'\n' read -r -d '' -a __wtpp_a <<< "$WTPP_SSH"; __wtpp_c=${WTPP_SSH_DIRECT:+command }; "#,
+    r#"unset WTPP_SSH WTPP_SSH_DIRECT; printf -v __wtpp_h ' %q' "${__wtpp_a[@]}"; history -s "${__wtpp_c}ssh$__wtpp_h"; "#,
+    r#"if [ -n "$__wtpp_c" ]; then command ssh "${__wtpp_a[@]}"; else ssh "${__wtpp_a[@]}"; fi; unset __wtpp_a __wtpp_h __wtpp_c; }"#,
 );
 
 /// zsh's part of `.zshrc` (see [`crate::cwd::ZSH_FILES`]): the same as bash's.
@@ -302,10 +319,13 @@ pub const ZSH_SSH: &str = r#"if [[ -n $WTPP_TOKEN ]]; then
     precmd_functions=(${precmd_functions:#__wtpp_ssh_run})
     [[ -n $WTPP_SSH ]] || return 0
     local -a a
+    local c=${WTPP_SSH_DIRECT:+command }
     a=("${(@f)WTPP_SSH}")
-    builtin unset WTPP_SSH
-    builtin print -rs -- "ssh ${(j: :)${(@q)a}}"
-    { ssh "${a[@]}" } always { __wtpp_ssh_idle }
+    builtin unset WTPP_SSH WTPP_SSH_DIRECT
+    builtin print -rs -- "${c}ssh ${(j: :)${(@q)a}}"
+    {
+      if [[ -n $c ]]; then command ssh "${a[@]}"; else ssh "${a[@]}"; fi
+    } always { __wtpp_ssh_idle }
   }
   # At a prompt, ssh isn't running (also if Ctrl+C ended the function).
   __wtpp_ssh_idle() {

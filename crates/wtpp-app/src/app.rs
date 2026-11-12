@@ -816,7 +816,10 @@ impl App {
         let cwd = self.settings.inherit_working_directory;
         let token = self.settings.split_duplicates_ssh.then(wtpp_config::ssh::new_token);
         let ssh = ssh.filter(|_| self.settings.split_duplicates_ssh);
-        let ssh_env = token.as_deref().map(|t| wtpp_config::ssh::shell_env(t, ssh.map(|s| &s.args[..]))).unwrap_or_default();
+        // Found on the running ssh (not reported by the function), its
+        // arguments include what an alias of the user's added.
+        let run = |s: &SshStart| if s.program.is_some() { wtpp_config::ssh::Run::Command } else { wtpp_config::ssh::Run::Function };
+        let ssh_env = token.as_deref().map(|t| wtpp_config::ssh::shell_env(t, ssh.map(|s| (&s.args[..], run(s))))).unwrap_or_default();
         let mut ssh_runs = false;
         if is_powershell(&program) {
             use wtpp_config::cwd::{POWERSHELL_PROMPT_HOOK, powershell_args_with_command};

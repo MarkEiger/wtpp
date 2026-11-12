@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(with[2], ("WSLENV".into(), "FOO:PROMPT_COMMAND/u:WTPP_CD/u".into()));
         assert!(wsl_prompt_env(true, None, Some("/bin"), true, &[]).is_empty());
         // The ssh function, with or without the directory.
-        let ssh = crate::ssh::shell_env("tok", Some(&["-p".to_string(), "22".to_string(), "h".to_string()]));
+        let ssh = crate::ssh::shell_env("tok", Some((&["-p".to_string(), "22".to_string(), "h".to_string()], crate::ssh::Run::Function)));
         let with = wsl_prompt_env(false, None, Some("/bin"), true, &ssh);
         assert_eq!(with[0].1, bash_prompt_command(true, true, true).unwrap());
         assert_eq!(with[2], ("WTPP_TOKEN".into(), "tok".into()));

@@ -1071,7 +1071,7 @@ mod ssh_tests {
         let home_text = home.to_string_lossy().into_owned();
         let var = |n: &str| (n == "HOME").then(|| home_text.clone());
         let file = program.rsplit('/').next().unwrap();
-        p.env.extend(wtpp_config::cwd::unix_prompt_env(file, zsh_dir, var, true, &wtpp_config::ssh::shell_env(&token, ssh)));
+        p.env.extend(wtpp_config::cwd::unix_prompt_env(file, zsh_dir, var, true, &wtpp_config::ssh::shell_env(&token, ssh.map(|a| (a, wtpp_config::ssh::Run::Function)))));
         p.ssh_token = Some(token);
         p.cwd = Some(dir.to_path_buf());
         p
@@ -1144,6 +1144,69 @@ mod ssh_tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// The user's own `alias ssh='ssh -o …'` (so there's no function, and the
+    /// split found the ssh among the pane's processes, the alias's options
+    /// included): the new pane runs it past the alias, which would add them
+    /// again. Given by the function's report instead, it goes through `ssh`
+    /// as the shell knows it. A stand-in ssh on PATH prints what it gets.
+    #[cfg(unix)]
+    fn check_alias(program: &str, shell_args: &[&str], zsh_dir: Option<&str>) {
+        let dir = scratch(&format!("ssha-{}", program.rsplit('/').next().unwrap()));
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("ssh"), "#!/bin/sh\necho \"ARGV[$*]\"\n").unwrap();
+        std::fs::set_permissions(bin.join("ssh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let alias = "alias ssh='ssh -o ServerAliveInterval=30'\n";
+        let found = ["-o", "ServerAliveInterval=30", "-p", "22", "me@host"].map(String::from);
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let run = |args: &[String], how: wtpp_config::ssh::Run| {
+            let mut p = shell(program, shell_args, &dir, zsh_dir, None);
+            let home = std::path::PathBuf::from(&p.env["HOME"]);
+            std::fs::write(home.join(".bashrc"), alias).unwrap();
+            std::fs::write(home.join(".zshrc"), alias).unwrap();
+            let token = p.ssh_token.clone().unwrap();
+            p.env.retain(|k, _| k != "WTPP_SSH" && k != "WTPP_SSH_DIRECT");
+            p.env.extend(wtpp_config::ssh::shell_env(&token, Some((args, how))).into_iter().skip(1));
+            p.env.insert("PATH".into(), path.clone());
+            let session = Session::spawn(&p, SIZE, |_| {}).unwrap();
+            assert!(wait(20, || screen(&session).iter().any(|l| l.starts_with("ARGV["))), "{:?}", screen(&session));
+            std::thread::sleep(Duration::from_millis(300));
+            let lines: Vec<String> = screen(&session).into_iter().filter(|l| l.starts_with("ARGV[")).collect();
+            (session, lines)
+        };
+        // Found running: as it was, once.
+        let (session, lines) = run(&found, wtpp_config::ssh::Run::Command);
+        assert_eq!(lines, ["ARGV[-o ServerAliveInterval=30 -p 22 me@host]"], "{program}");
+        // In the history the same way, and the variable is gone.
+        session.write(&b"\x1b[A"[..]);
+        assert!(wait(10, || screen(&session).iter().any(|l| l.ends_with("command ssh -o ServerAliveInterval=30 -p 22 me@host"))), "{:?}", screen(&session));
+        session.write(&b"\x15"[..]);
+        type_line(&session, "echo \"d=${WTPP_SSH_DIRECT-unset}\"");
+        assert!(wait(10, || shows(&session, "d=unset")), "{:?}", screen(&session));
+        // Reported by the function: through `ssh` as the shell has it (here
+        // the alias, which then adds its option, as it would when typed).
+        let (_, lines) = run(&found[2..], wtpp_config::ssh::Run::Function);
+        assert_eq!(lines, ["ARGV[-o ServerAliveInterval=30 -p 22 me@host]"], "{program}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_alias() {
+        check_alias("bash", &["--noprofile", "-i"], None);
+    }
+
+    /// Set WTPP_TEST_ZSH to a zsh to run it.
+    #[cfg(unix)]
+    #[test]
+    fn zsh_alias() {
+        let Ok(zsh) = std::env::var("WTPP_TEST_ZSH") else { return };
+        let dir = scratch("sshz-alias-files");
+        wtpp_config::cwd::write_zsh_integration(&dir).unwrap();
+        check_alias(&zsh, &["-i"], Some(&dir.to_string_lossy()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1262,7 +1325,7 @@ mod ssh_tests {
         let pane = |ssh: Option<&[String]>| {
             let mut p = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
             let token = wtpp_config::ssh::new_token();
-            p.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, &wtpp_config::ssh::shell_env(&token, ssh)));
+            p.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, &wtpp_config::ssh::shell_env(&token, ssh.map(|a| (a, wtpp_config::ssh::Run::Function)))));
             p.ssh_token = Some(token);
             Session::spawn(&p, SIZE, |_| {}).unwrap()
         };
