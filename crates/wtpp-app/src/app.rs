@@ -607,11 +607,13 @@ impl App {
             Some(dir) => Some(StartDir::Literal(dir.to_string_lossy().into_owned())),
             None => p.starting_directory.clone().map(StartDir::Setting),
         };
-        let commandline = commandline_for_start(&p.commandline, dir.as_ref().map(StartDir::text));
+        let cwd = start_directory(&p.name, &p.commandline, dir.as_ref(), expand_env, |d| d.is_dir());
+        // Only a directory it starts in takes over from a WSL profile's `~`.
+        let commandline = commandline_for_start(&p.commandline, dir.as_ref().filter(|_| cwd.is_some()).map(StartDir::text));
         let (program, args) = split_commandline(&expand_env(&commandline));
         let mut profile = wtpp_session::Profile::new(&p.name, &program, &[]);
         profile.args = args;
-        profile.cwd = Some(start_directory(&p.name, &p.commandline, dir.as_ref(), expand_env).unwrap_or_else(home_dir));
+        profile.cwd = Some(cwd.unwrap_or_else(home_dir));
         profile.key_style = match p.key_encoding {
             KeyEncoding::Auto => wtpp_session::profiles::key_style_for(&program),
             KeyEncoding::Unix => KeyStyle::Unix,
@@ -2201,8 +2203,16 @@ impl StartDir {
 }
 
 /// The working directory for a pane's shell; `None` for the home folder (no
-/// directory, or a Linux one for wsl.exe, which can't start there).
-fn start_directory(name: &str, commandline: &str, dir: Option<&StartDir>, expand: impl Fn(&str) -> String) -> Option<PathBuf> {
+/// directory, one that doesn't exist, or a Linux one for wsl.exe, which can't
+/// start there). Checked here, not left to the spawn to fail: on Unix it
+/// doesn't, and the shell starts in wt++'s own directory.
+fn start_directory(
+    name: &str,
+    commandline: &str,
+    dir: Option<&StartDir>,
+    expand: impl Fn(&str) -> String,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let text = dir?.text();
     if is_wsl_linux_dir(commandline, text) {
         if text.trim() != "~" {
@@ -2210,11 +2220,16 @@ fn start_directory(name: &str, commandline: &str, dir: Option<&StartDir>, expand
         }
         return None;
     }
-    match dir? {
-        StartDir::Literal(dir) => Some(PathBuf::from(dir)),
-        StartDir::Setting(dir) if !dir.trim().is_empty() => Some(PathBuf::from(expand(dir))),
-        StartDir::Setting(_) => None,
+    let path = match dir? {
+        StartDir::Literal(dir) => PathBuf::from(dir),
+        StartDir::Setting(dir) if !dir.trim().is_empty() => PathBuf::from(expand(dir)),
+        StartDir::Setting(_) => return None,
+    };
+    if !is_dir(&path) {
+        log::warn!("{name}: can't start in {}, using the home folder: no such directory", path.display());
+        return None;
     }
+    Some(path)
 }
 
 #[cfg(test)]
@@ -2224,7 +2239,7 @@ mod tests {
     #[test]
     fn live_directories_are_taken_literally() {
         let expand = |s: &str| expand_env_with(s, |name| (name == "HOME" || name == "USERPROFILE").then(|| "/home/me".to_string()));
-        let start = |dir: StartDir| start_directory("p", "/bin/bash -l", Some(&dir), expand);
+        let start = |dir: StartDir| start_directory("p", "/bin/bash -l", Some(&dir), expand, |_| true);
         // Another pane's directory, or -d's: `%` and `~` are part of the name.
         assert_eq!(start(StartDir::Literal("/tmp/wtpp t/x%HOME%y".into())), Some(PathBuf::from("/tmp/wtpp t/x%HOME%y")));
         assert_eq!(start(StartDir::Literal("~".into())), Some(PathBuf::from("~")));
@@ -2233,12 +2248,26 @@ mod tests {
         assert_eq!(start(StartDir::Setting("%HOME%/src".into())), Some(PathBuf::from("/home/me/src")));
         assert_eq!(start(StartDir::Setting("~/src".into())), Some(PathBuf::from("/home/me/src")));
         assert_eq!(start(StartDir::Setting("  ".into())), None);
-        assert_eq!(start_directory("p", "/bin/bash -l", None, expand), None);
+        assert_eq!(start_directory("p", "/bin/bash -l", None, expand, |_| true), None);
         // wsl.exe can't start in a Linux directory, either way.
         for dir in [StartDir::Literal("/home/me".into()), StartDir::Setting("/home/me".into())] {
-            assert_eq!(start_directory("p", "wsl.exe ~ -d Debian", Some(&dir), expand), None);
+            assert_eq!(start_directory("p", "wsl.exe ~ -d Debian", Some(&dir), expand, |_| true), None);
         }
-        assert_eq!(start_directory("p", "wsl.exe ~ -d Debian", Some(&StartDir::Literal(r"\\wsl$\Debian\x%y".into())), expand), Some(PathBuf::from(r"\\wsl$\Debian\x%y")));
+        assert_eq!(start_directory("p", "wsl.exe ~ -d Debian", Some(&StartDir::Literal(r"\\wsl$\Debian\x%y".into())), expand, |_| true), Some(PathBuf::from(r"\\wsl$\Debian\x%y")));
+    }
+
+    /// A directory that isn't there (gone since, or never was) means home,
+    /// not wt++'s own directory, which is where a Unix shell would end up.
+    #[test]
+    fn missing_directories_mean_home() {
+        let expand = |s: &str| s.to_string();
+        let gone = std::env::temp_dir().join(format!("wtpp-gone-{}", std::process::id()));
+        for dir in [StartDir::Literal(gone.to_string_lossy().into_owned()), StartDir::Setting(gone.to_string_lossy().into_owned())] {
+            assert_eq!(start_directory("p", "/bin/bash -l", Some(&dir), expand, |d| d.is_dir()), None);
+        }
+        let here = std::env::temp_dir();
+        let dir = StartDir::Literal(here.to_string_lossy().into_owned());
+        assert_eq!(start_directory("p", "/bin/bash -l", Some(&dir), expand, |d| d.is_dir()), Some(here));
     }
 
     #[test]

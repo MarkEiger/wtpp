@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Linux and macOS: a pane whose starting directory doesn't exist (any more)
+  opens in your home folder, as on Windows, not in the directory wt++ itself
+  was started from.
+
 ## 1.3.1 — 2026-11-11
 
 - Windows: every key played the error sound in a window opened for a console
