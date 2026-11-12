@@ -448,9 +448,10 @@ fn select_backend(settings: &wtpp_config::Settings) -> anyhow::Result<()> {
             "wt++ can't start",
             &format!(
                 "wt++ found no way to draw its window: {e}\n\n\
-                 If this computer has no working graphics driver, the software renderer may still work. Add this \
-                 line to {}, inside the outer braces:\n\n    \"rendering.graphicsAPI\": \"software\",\n\n\
-                 Or set the environment variable SLINT_WGPU_CPU=1 before starting wt++.",
+                 If this computer has no working graphics driver, the software renderer may still work: in {}, \
+                 set\n\n    \"rendering.graphicsAPI\": \"software\",\n\n\
+                 (add the line inside the outer braces if it isn't there). Or set the environment variable \
+                 SLINT_WGPU_CPU=1 before starting wt++.",
                 path.display()
             ),
         );
