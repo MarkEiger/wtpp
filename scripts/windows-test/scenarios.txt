@@ -14,6 +14,8 @@ settings-pages: sleep:600|^,|sleep:1200|shot:startup|click:60,104|shot:interacti
 tab-menu: sleep:600|^+t|sleep:800|rclick:120,22|sleep:400|shot:menu|{ESC}
 tab-rename: sleep:600|dclick:120,22|sleep:400|renamed{ENTER}|sleep:300|shot:renamed
 tab-drag: sleep:600|^+2|sleep:1200|drag:120,22,600,22|sleep:300|shot:moved
+tab-group: sleep:600|^+t|sleep:800|^+p|add tab to new group|{ENTER}|sleep:400|Work{ENTER}|sleep:300|shot:grouped|click:255,22|sleep:400|shot:collapsed|click:255,22|sleep:400|shot:expanded|click:255,22|sleep:400|^+p|switch to tab 2|{ENTER}|sleep:400|shot:switched-opens
+tab-group-menu: sleep:600|^+t|sleep:800|rclick:330,22|sleep:400|shot:menu|{ESC}
 titlebar: sleep:600|move:1140,20|sleep:1200|shot:snap|move:600,300|dclick:800,20|sleep:800|shot:max|dclick:800,10|sleep:800|rect
 zoom-font: sleep:600|^=^=|sleep:500|shot:bigger|^0|sleep:400|rect
 paste-warning: sleep:600|^+2|sleep:1500|clip:echo one\necho two|^v|sleep:500|shot:dialog|{ESC}|sleep:300|click:0,0

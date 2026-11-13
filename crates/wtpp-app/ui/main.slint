@@ -17,6 +17,25 @@ export struct TabData {
     is-settings: bool,
     renaming: bool,
     zoomed: bool,
+    // Its tab group (`in-group` false: none). Only the group's first tab
+    // (`group-start`) shows the chip; `group-size` is how many tabs it has.
+    group-id: string,
+    group-color: color,
+    in-group: bool,
+    group-start: bool,
+    group-end: bool,
+    group-title: string,
+    group-collapsed: bool,
+    group-renaming: bool,
+    group-size: int,
+    // In a collapsed group (and not the active tab): takes no room.
+    hidden: bool,
+}
+
+// A tab group, for the tab menu's "Add tab to group".
+export struct GroupMenuEntry {
+    id: string,
+    title: string,
 }
 
 export struct DividerData {
@@ -146,6 +165,202 @@ component CaptionButton inherits Rectangle {
     }
 }
 
+// A tab group's label in the tab strip, before its first tab: click to
+// collapse or expand the group, right-click for its menu.
+component GroupChip inherits Rectangle {
+    in property <bool> shown;
+    in property <string> title;
+    in property <color> group-color;
+    in property <bool> collapsed;
+    in property <bool> renaming;
+    in property <int> size;
+    callback toggled();
+    callback renamed(string);
+    // An entry of the right-click menu.
+    callback menu(string);
+
+    // Untitled and open, the chip is just a dot of the group's colour;
+    // collapsed, it also says how many tabs it holds.
+    property <bool> dot: root.title == "" && !root.collapsed && !root.renaming;
+    property <length> text-width: (root.title == "" ? 0px : min(140px, label.preferred-width))
+        + (root.collapsed ? count.preferred-width + (root.title == "" ? 0px : 6px) : 0px);
+    property <length> pill-width: root.renaming ? 120px : root.dot ? 12px : root.text-width + 16px;
+
+    min-width: root.shown ? root.pill-width + 8px : 0px;
+    preferred-width: self.min-width;
+    max-width: self.min-width;
+    clip: true;
+
+    pill := Rectangle {
+        x: 2px;
+        y: (parent.height - self.height) / 2;
+        width: root.pill-width;
+        height: root.dot ? 12px : root.renaming ? 28px : 22px;
+        border-radius: 6px;
+        background: ta.has-hover ? root.group-color.darker(20%) : root.group-color;
+
+        ta := TouchArea {
+            clicked => {
+                root.toggled();
+            }
+        }
+
+        label := Text {
+            x: 8px;
+            width: min(140px, self.preferred-width);
+            height: parent.height;
+            visible: !root.renaming && root.title != "";
+            text: root.title;
+            // The palette's colours are all dark enough for white text.
+            color: white;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        count := Text {
+            x: parent.width - 8px - self.width;
+            width: self.preferred-width;
+            height: parent.height;
+            visible: root.collapsed && !root.renaming;
+            text: root.size;
+            color: white;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+
+        if root.renaming: FocusScope {
+            x: 2px;
+            width: parent.width - 4px;
+            key-pressed(e) => {
+                if e.text == Key.Escape {
+                    root.renamed(root.title);
+                    return accept;
+                }
+                reject
+            }
+            LineEdit {
+                height: 26px;
+                text: root.title;
+                placeholder-text: "Name this group";
+                init => {
+                    self.focus();
+                    self.select-all();
+                }
+                accepted(t) => {
+                    root.renamed(t);
+                }
+                changed has-focus => {
+                    if !self.has-focus {
+                        root.renamed(self.text);
+                    }
+                }
+            }
+        }
+    }
+
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: "Rename group";
+                activated => {
+                    root.menu("rename");
+                }
+            }
+
+            Menu {
+                title: "Color";
+
+                MenuItem {
+                    title: "Grey";
+                    activated => {
+                        root.menu("color:#7A7574");
+                    }
+                }
+
+                MenuItem {
+                    title: "Blue";
+                    activated => {
+                        root.menu("color:#0063B1");
+                    }
+                }
+
+                MenuItem {
+                    title: "Red";
+                    activated => {
+                        root.menu("color:#C50F1F");
+                    }
+                }
+
+                MenuItem {
+                    title: "Yellow";
+                    activated => {
+                        root.menu("color:#C19C00");
+                    }
+                }
+
+                MenuItem {
+                    title: "Green";
+                    activated => {
+                        root.menu("color:#13A10E");
+                    }
+                }
+
+                MenuItem {
+                    title: "Pink";
+                    activated => {
+                        root.menu("color:#C239B3");
+                    }
+                }
+
+                MenuItem {
+                    title: "Purple";
+                    activated => {
+                        root.menu("color:#881798");
+                    }
+                }
+
+                MenuItem {
+                    title: "Teal";
+                    activated => {
+                        root.menu("color:#038387");
+                    }
+                }
+
+                MenuItem {
+                    title: "Orange";
+                    activated => {
+                        root.menu("color:#CA5010");
+                    }
+                }
+            }
+
+            MenuItem {
+                title: root.collapsed ? "Expand group" : "Collapse group";
+                activated => {
+                    root.menu("toggle");
+                }
+            }
+
+            MenuSeparator { }
+            MenuItem {
+                title: "Ungroup";
+                activated => {
+                    root.menu("ungroup");
+                }
+            }
+
+            MenuItem {
+                title: "Close group";
+                activated => {
+                    root.menu("close");
+                }
+            }
+        }
+    }
+}
+
 component TabItem inherits Rectangle {
     in property <string> title;
     in property <bool> active;
@@ -162,7 +377,30 @@ component TabItem inherits Rectangle {
     in property <string> icon-text;
     // 0 equal, 1 title length, 2 compact (inactive tabs show only the icon).
     in property <int> width-mode;
+    // In a collapsed group: no width, nothing shown. (Kept, not removed, so
+    // a drag that started on this widget carries on.)
+    in property <bool> hidden;
+    // Its tab group: underlined in the group's colour.
+    in property <bool> in-group;
+    in property <color> group-color;
+    in property <string> group-id;
+    // Every group in the window, for "Add tab to group".
+    in property <[GroupMenuEntry]> groups;
+    // Where its slot starts in the tab strip.
+    in property <length> slot-x;
     property <bool> icon-only: width-mode == 2 && !active;
+    // Start and width within the tab strip, whenever they change.
+    callback geometry(length, length);
+    property <length> strip-x: root.slot-x + self.x;
+    init => {
+        root.geometry(self.strip-x, self.width);
+    }
+    changed strip-x => {
+        root.geometry(self.strip-x, self.width);
+    }
+    changed width => {
+        root.geometry(self.strip-x, self.width);
+    }
     callback clicked;
     callback close;
     callback rename();
@@ -175,12 +413,13 @@ component TabItem inherits Rectangle {
 
     property <bool> dragging;
 
-    min-width: icon-only ? 40px : 90px;
-    preferred-width: icon-only ? 40px : width-mode == 1 ? title-label.preferred-width + 80px : 220px;
-    max-width: icon-only ? 40px : width-mode == 1 ? 400px : 240px;
+    min-width: hidden ? 0px : icon-only ? 40px : 90px;
+    preferred-width: hidden ? 0px : icon-only ? 40px : width-mode == 1 ? title-label.preferred-width + 80px : 220px;
+    max-width: hidden ? 0px : icon-only ? 40px : width-mode == 1 ? 400px : 240px;
+    clip: hidden;
     border-top-left-radius: 8px;
     border-top-right-radius: 8px;
-    opacity: lifted ? 0.45 : 1;
+    opacity: hidden ? 0 : lifted ? 0.45 : 1;
     background: has-color
         ? (active ? tab-color : ta.has-hover ? tab-color.darker(20%) : tab-color.darker(40%))
         : (active ? Colors.terminal : ta.has-hover ? Colors.hover : transparent);
@@ -329,6 +568,15 @@ component TabItem inherits Rectangle {
         }
     }
 
+    // Grouped: a bar in the group's colour along the bottom.
+    if root.in-group: Rectangle {
+        x: 0;
+        y: parent.height - self.height;
+        width: parent.width;
+        height: 2px;
+        background: root.group-color;
+    }
+
     // On top of everything: it only reacts to right-clicks.
     ContextMenuArea {
         Menu {
@@ -347,6 +595,36 @@ component TabItem inherits Rectangle {
                     root.menu("duplicate");
                 }
             }
+
+            MenuSeparator { }
+            MenuItem {
+                title: "Add tab to new group";
+                enabled: !root.is-settings;
+                activated => {
+                    root.menu("group:new");
+                }
+            }
+
+            if root.groups.length > 0 && !root.is-settings: Menu {
+                title: "Add tab to group";
+                for group in root.groups: MenuItem {
+                    title: group.title;
+                    enabled: group.id != root.group-id;
+                    activated => {
+                        root.menu("group:join:" + group.id);
+                    }
+                }
+            }
+
+            MenuItem {
+                title: "Remove from group";
+                enabled: root.in-group;
+                activated => {
+                    root.menu("group:remove");
+                }
+            }
+
+            MenuSeparator { }
 
             Menu {
                 title: "Color";
@@ -530,6 +808,7 @@ export component MainWindow inherits Window {
 
     in property <string> session-title;
     in property <[TabData]> tabs;
+    in property <[GroupMenuEntry]> group-menu-entries;
     in property <[PaneData]> panes;
     in property <[DividerData]> dividers;
     // Shown in the new-tab dropdown; the first entries are the profiles.
@@ -574,9 +853,12 @@ export component MainWindow inherits Window {
     // the layout changes, which left these stale in new windows.)
     out property <length> tabs-left: titlebar.x + tab-row.x + tab-area.x + tab-flick.x + tab-flick.content-x;
     out property <length> tabs-top: titlebar.y + tab-row.y + tab-area.y + tab-flick.y;
+    // (Only used until the tabs have reported where they are.)
     out property <length> tab-pitch: root.tabs.length > 0 ? (min(tabs-layout.width, tabs-layout.preferred-width) + 2px) / root.tabs.length : 0px;
-    // A tab from another window would be inserted before this one (-1: none).
+    // A tab from another window would be inserted before this one (-1: none),
+    // at this x in the strip.
     in property <int> drop-index: -1;
+    in property <length> drop-x;
     // The active tab is being dragged out of this window.
     in property <bool> tab-lifted;
     // Where the empty (draggable) part of the tab row starts, and where the
@@ -622,6 +904,12 @@ export component MainWindow inherits Window {
     // in the window.
     callback tab-drag(int, length, length, length, length);
     callback tab-drag-end();
+    // A tab group's chip: its menu ("toggle" for a click) and rename, by
+    // the index of the group's first tab.
+    callback group-menu(int, string);
+    callback group-renamed(int, string);
+    // Where tab `index` was laid out in the strip (start, width).
+    callback tab-geometry(int, length, length);
     // Scrollbar dragged: pane index, thumb top as a fraction of the track.
     callback pane-scrollbar(int, float);
     // A pane divider is being dragged to this position (content coordinates).
@@ -748,10 +1036,42 @@ export component MainWindow inherits Window {
 
                         tabs-layout := HorizontalLayout {
                             width: tab-flick.content-width;
-                            spacing: 2px;
+                            // Gaps are per tab: hidden tabs take none.
+                            spacing: 0px;
                             alignment: start;
 
-                            for tab[i] in root.tabs: TabItem {
+                            // A group's chip goes before its first tab.
+                            for tab[i] in root.tabs: slot := HorizontalLayout {
+                              padding-right: tab.hidden ? 0px : 2px;
+                              GroupChip {
+                                shown: tab.group-start;
+                                title: tab.group-title;
+                                group-color: tab.group-color;
+                                collapsed: tab.group-collapsed;
+                                renaming: tab.group-renaming;
+                                size: tab.group-size;
+                                toggled => {
+                                    root.group-menu(i, "toggle");
+                                    keys.focus();
+                                }
+                                renamed(t) => {
+                                    root.group-renamed(i, t);
+                                    keys.focus();
+                                }
+                                menu(action) => {
+                                    root.group-menu(i, action);
+                                }
+                              }
+                              TabItem {
+                                hidden: tab.hidden;
+                                in-group: tab.in-group;
+                                group-color: tab.group-color;
+                                group-id: tab.group-id;
+                                groups: root.group-menu-entries;
+                                slot-x: slot.x;
+                                geometry(x, width) => {
+                                    root.tab-geometry(i, x, width);
+                                }
                                 title: tab.title;
                                 active: tab.active;
                                 renaming: tab.renaming;
@@ -783,7 +1103,7 @@ export component MainWindow inherits Window {
                                 }
                                 drag(x, y) => {
                                     // Within the scrolled strip of tabs, and within the window.
-                                    root.tab-drag(i, self.x + x, self.width, root.tabs-left + self.x + x, root.tabs-top + self.y + y);
+                                    root.tab-drag(i, slot.x + self.x + x, self.width, root.tabs-left + slot.x + self.x + x, root.tabs-top + slot.y + self.y + y);
                                 }
                                 drag-end => {
                                     root.tab-drag-end();
@@ -791,6 +1111,7 @@ export component MainWindow inherits Window {
                                 menu(action) => {
                                     root.tab-menu(i, action);
                                 }
+                              }
                             }
                         }
 
@@ -798,7 +1119,7 @@ export component MainWindow inherits Window {
                         if root.drop-index >= 0: Rectangle {
                             // Kept inside the strip, which ends right
                             // after the last tab.
-                            x: max(0px, min(root.drop-index * root.tab-pitch - 2px, parent.width - self.width));
+                            x: max(0px, min(root.drop-x, parent.width - self.width));
                             y: 4px;
                             width: 3px;
                             height: parent.height - 8px;

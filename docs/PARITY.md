@@ -16,6 +16,7 @@
 - [x] New tab button and profile dropdown with shortcuts
 - [x] Rename (double-click / menu), duplicate, close, close others / to the right
 - [x] Drag tabs to reorder
+- [x] Tab groups (beyond WT): title, colour, collapse/expand, group menu, palette actions
 - [x] Close confirmation for multiple tabs
 - [x] Tab color (context menu color picker, `tabColor` per profile)
 - [x] Tabs shrink, then scroll (‹ › buttons) when they overflow the row

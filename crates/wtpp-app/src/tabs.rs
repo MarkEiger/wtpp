@@ -4,12 +4,16 @@
 use slint::ComponentHandle;
 
 use crate::app::{App, TabKind};
+use crate::tab_groups::{self, GroupId, TabGroup};
 
 /// The gap between tabs, in logical pixels.
 const TAB_GAP: f32 = 2.0;
 /// How far below the pointer a dragged window hangs over another window's
 /// tab row, in logical pixels.
 const HANG_BELOW: f32 = 48.0;
+
+/// Each tab's start and width in the strip, once the UI has laid it out.
+pub(crate) type SharedExtents = std::rc::Rc<std::cell::RefCell<Vec<Option<(f32, f32)>>>>;
 
 impl App {
     pub fn tab_menu(&mut self, index: usize, action: &str) {
@@ -55,8 +59,190 @@ impl App {
                 self.tabs[index].color = wtpp_config::Color::parse(&color["color:".len()..]);
                 self.refresh_chrome();
             }
+            group if group.starts_with("group:") => {
+                // Settings isn't a tab you'd keep with others.
+                if !matches!(self.tabs[index].kind, TabKind::Terminal { .. }) {
+                    return;
+                }
+                match &group["group:".len()..] {
+                    "new" => {
+                        let at = self.leave_group(index);
+                        let used: Vec<_> = self.groups.iter().map(|g| g.color).collect();
+                        let mut group = TabGroup::new(tab_groups::next_color(&used));
+                        group.renaming = true;
+                        self.tabs[at].group = Some(group.id);
+                        self.groups.push(group);
+                    }
+                    "remove" => {
+                        self.leave_group(index);
+                    }
+                    join => {
+                        let Some(gid) = join.strip_prefix("join:").and_then(|id| id.parse::<GroupId>().ok()) else {
+                            log::warn!("unknown tab menu action {action}");
+                            return;
+                        };
+                        if self.tabs[index].group == Some(gid) || self.group(gid).is_none() {
+                            return;
+                        }
+                        let at = self.leave_group(index);
+                        // After the group's last tab, keeping it together.
+                        let Some(last) = self.tabs.iter().rposition(|t| t.group == Some(gid)) else { return };
+                        let to = if at < last { last } else { last + 1 };
+                        self.move_tab(at, to);
+                        self.tabs[to].group = Some(gid);
+                    }
+                }
+                self.relayout();
+            }
             other => log::warn!("unknown tab menu action {other}"),
         }
+    }
+
+    /// Take tab `index` out of its group, moving it just past the group's
+    /// other tabs so they stay together. Returns where the tab is now.
+    fn leave_group(&mut self, index: usize) -> usize {
+        let Some(gid) = self.tabs[index].group.take() else { return index };
+        let last = self.tabs.iter().rposition(|t| t.group == Some(gid)).filter(|&last| last > index);
+        match last {
+            Some(last) => {
+                self.move_tab(index, last);
+                last
+            }
+            None => index,
+        }
+    }
+
+    /// Move a tab from `from` to `to`, keeping the active and dragged tabs.
+    pub(crate) fn move_tab(&mut self, from: usize, to: usize) {
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = moved_index(self.active, from, to);
+        self.dragging_tab = self.dragging_tab.map(|i| moved_index(i, from, to));
+    }
+
+    /// Each tab's group, in tab order.
+    pub(crate) fn tab_groups(&self) -> Vec<Option<GroupId>> {
+        self.tabs.iter().map(|t| t.group).collect()
+    }
+
+    pub(crate) fn group(&self, id: GroupId) -> Option<&TabGroup> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    fn group_mut(&mut self, id: GroupId) -> Option<&mut TabGroup> {
+        self.groups.iter_mut().find(|g| g.id == id)
+    }
+
+    /// Which tabs are tucked away in collapsed groups (never `active`).
+    pub(crate) fn hidden_tabs(&self, active: usize) -> Vec<bool> {
+        tab_groups::hidden(&self.tab_groups(), |g| self.group(g).is_some_and(|g| g.collapsed), active)
+    }
+
+    /// Keep tab groups consistent after anything that adds, moves, closes or
+    /// selects tabs: each group's tabs together, no empty groups, and the
+    /// active tab never hidden (selecting a tab in a collapsed group, from a
+    /// shortcut, the palette or a closed neighbour, opens the group).
+    pub(crate) fn tidy_groups(&mut self) {
+        if self.groups.is_empty() && self.tabs.iter().all(|t| t.group.is_none()) {
+            return;
+        }
+        let order = tab_groups::contiguous_order(&self.tab_groups());
+        if order.iter().enumerate().any(|(k, &i)| k != i) {
+            let mut old: Vec<_> = self.tabs.drain(..).map(Some).collect();
+            self.tabs = order.iter().filter_map(|&i| old[i].take()).collect();
+            // Old index → new index.
+            let mut new_index = vec![0; order.len()];
+            for (k, &i) in order.iter().enumerate() {
+                new_index[i] = k;
+            }
+            self.active = new_index.get(self.active).copied().unwrap_or(self.active);
+            self.dragging_tab = self.dragging_tab.map(|i| new_index.get(i).copied().unwrap_or(i));
+        }
+        let tabs = &self.tabs;
+        self.groups.retain(|g| tabs.iter().any(|t| t.group == Some(g.id)));
+        let groups = &self.groups;
+        for tab in &mut self.tabs {
+            if tab.group.is_some_and(|id| !groups.iter().any(|g| g.id == id)) {
+                tab.group = None;
+            }
+        }
+        if let Some(gid) = self.tabs.get(self.active).and_then(|t| t.group)
+            && let Some(group) = self.group_mut(gid)
+        {
+            group.collapsed = false;
+        }
+    }
+
+    /// An action from a group chip's menu (or a click on the chip, which
+    /// toggles), for the group tab `index` is in.
+    pub fn group_menu(&mut self, index: usize, action: &str) {
+        let Some(gid) = self.tabs.get(index).and_then(|t| t.group) else { return };
+        match action {
+            "rename" => {
+                if let Some(group) = self.group_mut(gid) {
+                    group.renaming = true;
+                }
+                self.refresh_chrome();
+            }
+            "toggle" => self.toggle_group(gid),
+            "ungroup" => {
+                for tab in self.tabs.iter_mut().filter(|t| t.group == Some(gid)) {
+                    tab.group = None;
+                }
+                self.relayout();
+            }
+            "close" => {
+                let members: Vec<usize> = (0..self.tabs.len()).filter(|&i| self.tabs[i].group == Some(gid)).collect();
+                for i in members.into_iter().rev() {
+                    self.close_tab(i);
+                }
+            }
+            color if color.starts_with("color:") => {
+                if let (Some(c), Some(group)) = (wtpp_config::Color::parse(&color["color:".len()..]), self.group_mut(gid)) {
+                    group.color = c;
+                }
+                self.refresh_chrome();
+            }
+            other => log::warn!("unknown group menu action {other}"),
+        }
+    }
+
+    /// Collapse or expand a group. Collapsing the group of the active tab
+    /// first selects the nearest tab outside it; with none, it stays open.
+    fn toggle_group(&mut self, gid: GroupId) {
+        let Some(group) = self.group(gid) else { return };
+        if !group.collapsed {
+            let collapsed = |g| self.group(g).is_some_and(|g| g.collapsed);
+            let Some(target) = tab_groups::collapse_target(&self.tab_groups(), gid, collapsed, self.active) else { return };
+            self.active = target;
+            self.tabs[target].bell = false;
+        }
+        if let Some(group) = self.group_mut(gid) {
+            group.collapsed = !group.collapsed;
+        }
+        self.relayout();
+    }
+
+    /// The chip's inline rename finished. An empty title leaves just the
+    /// coloured dot.
+    pub fn group_renamed(&mut self, index: usize, name: &str) {
+        let Some(gid) = self.tabs.get(index).and_then(|t| t.group) else { return };
+        let Some(group) = self.group_mut(gid) else { return };
+        if !group.renaming {
+            return;
+        }
+        group.renaming = false;
+        group.title = name.trim().to_string();
+        self.refresh_chrome();
+    }
+
+    /// Every tab's extent in the strip, once the UI has reported them all.
+    pub(crate) fn extents(&self) -> Option<Vec<(f32, f32)>> {
+        let extents = self.tab_extents.borrow();
+        if extents.len() != self.tabs.len() {
+            return None;
+        }
+        extents.iter().copied().collect()
     }
 
     /// The inline rename finished. An empty name goes back to the shell's
@@ -134,15 +320,41 @@ impl App {
             self.ui().set_tab_lifted(false);
         }
 
-        let slot = (strip_x / (tab_width + TAB_GAP)).floor().clamp(0.0, (n - 1) as f32) as usize;
+        // Where the tab would go among the others, by their real extents
+        // (tabs differ in width, and group chips sit between them).
+        let extents = self.extents();
+        let slot = match &extents {
+            Some(extents) => {
+                let others: Vec<_> = (0..n).filter(|&i| i != current).map(|i| extents[i]).collect();
+                tab_groups::slot_at(&others, strip_x).min(n - 1)
+            }
+            None => (strip_x / (tab_width + TAB_GAP)).floor().clamp(0.0, (n - 1) as f32) as usize,
+        };
         if slot == current {
             return;
         }
-        let tab = self.tabs.remove(current);
-        self.tabs.insert(slot, tab);
         // The dragged tab is the active one (pressing it selected it).
-        self.active = slot;
-        self.dragging_tab = Some(slot);
+        let own = self.tabs[current].group;
+        self.move_tab(current, slot);
+        if let Some(mut extents) = extents {
+            // Until the UI reports the new layout, guess it: the moved
+            // range packed from where it started.
+            let (lo, hi) = (current.min(slot), current.max(slot));
+            let mut x = extents[lo].0;
+            let moved = extents.remove(current);
+            extents.insert(slot, moved);
+            for extent in &mut extents[lo..=hi] {
+                extent.0 = x;
+                if extent.1 > 0.0 {
+                    x += extent.1 + TAB_GAP;
+                }
+            }
+            *self.tab_extents.borrow_mut() = extents.into_iter().map(Some).collect();
+        }
+        // Dragged into a group it joins; dragged away from its own it leaves.
+        let terminal = matches!(self.tabs[slot].kind, TabKind::Terminal { .. });
+        self.tabs[slot].group = terminal.then(|| tab_groups::group_at_insert(&self.tab_groups(), slot, own)).flatten();
+        self.tidy_groups();
         self.refresh_chrome();
     }
 
@@ -237,6 +449,19 @@ impl App {
             y = y.min(bottom - height).max(top);
         }
         crate::Placement::At(slint::PhysicalPosition::new(x, y), size)
+    }
+}
+
+/// Where the tab at `i` ends up when the tab at `from` moves to `to`.
+fn moved_index(i: usize, from: usize, to: usize) -> usize {
+    if i == from {
+        to
+    } else if from < i && i <= to {
+        i - 1
+    } else if to <= i && i < from {
+        i + 1
+    } else {
+        i
     }
 }
 

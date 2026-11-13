@@ -13,6 +13,7 @@ mod palette;
 mod platform;
 mod pane_tree;
 mod settings_ui;
+mod tab_groups;
 mod tabs;
 mod titlebar;
 mod window_state;
@@ -134,9 +135,11 @@ pub(crate) fn client_origin(window: &slint::Window) -> Option<(i32, i32)> {
     window.with_winit_window(|w| w.inner_position().ok().map(|p| (p.x, p.y))).flatten()
 }
 
-/// Where in `ui`'s tab row a tab dropped at `screen` would go: the index
-/// to insert it at, or `None` if `screen` isn't over the tab row.
-fn tab_row_slot(ui: &MainWindow, (sx, sy): (i32, i32)) -> Option<usize> {
+/// Where in a window's tab row a tab dropped at `screen` would go: the
+/// index to insert it at and the strip x of the gap there, or `None` if
+/// `screen` isn't over the tab row.
+fn tab_row_slot(e: &WindowEntry, (sx, sy): (i32, i32)) -> Option<(usize, f32)> {
+    let ui = &e.ui;
     let window = ui.window();
     if !window.is_visible() || window.is_minimized() {
         return None;
@@ -148,10 +151,18 @@ fn tab_row_slot(ui: &MainWindow, (sx, sy): (i32, i32)) -> Option<usize> {
     if x < 0.0 || x > width || y < -8.0 || y > ui.get_titlebar_height() + 8.0 {
         return None;
     }
+    let strip_x = x - ui.get_tabs_left();
+    // By the tabs' real extents. This is never the window the tab is
+    // dragged from, so its App isn't borrowed.
+    if let Some(extents) = e.app.try_borrow().ok().and_then(|app| app.extents()) {
+        let slot = tab_groups::slot_at(&extents, strip_x);
+        let gap = slot.checked_sub(1).map_or(-2.0, |i| extents[i].0 + extents[i].1);
+        return Some((slot, gap));
+    }
     let n = slint::Model::row_count(&ui.get_tabs());
     let pitch = ui.get_tab_pitch();
-    let slot = if pitch > 0.0 { ((x - ui.get_tabs_left()) / pitch).round().clamp(0.0, n as f32) as usize } else { n };
-    Some(slot)
+    let slot = if pitch > 0.0 { (strip_x / pitch).round().clamp(0.0, n as f32) as usize } else { n };
+    Some((slot, slot as f32 * pitch - 2.0))
 }
 
 /// A tab from window `source` is being dragged over `screen`: the window
@@ -166,17 +177,20 @@ pub(crate) fn tab_drop_target(source: WindowId, screen: Option<(i32, i32)>) -> O
         order
             .into_iter()
             .filter(|&id| id != source)
-            .find_map(|id| entry(id).and_then(|e| tab_row_slot(&e.ui, screen)).map(|slot| (id, slot)))
+            .find_map(|id| entry(id).and_then(|e| tab_row_slot(&e, screen)).map(|slot| (id, slot)))
     });
     for id in window_ids() {
         if let Some(e) = entry(id) {
-            e.ui.set_drop_index(match target {
-                Some((t, slot)) if t == id => slot as i32,
-                _ => -1,
-            });
+            match target {
+                Some((t, (slot, x))) if t == id => {
+                    e.ui.set_drop_x(x);
+                    e.ui.set_drop_index(slot as i32);
+                }
+                _ => e.ui.set_drop_index(-1),
+            }
         }
     }
-    target
+    target.map(|(id, (slot, _))| (id, slot))
 }
 
 /// Put a tab dragged from another window into window `target` at `slot`,
@@ -1101,6 +1115,20 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
     });
     ui.on_tab_renamed(move |i, name| {
         with_window(id, |app| app.tab_renamed(i.max(0) as usize, &name));
+    });
+    ui.on_group_menu(move |i, action| {
+        with_window(id, |app| app.group_menu(i.max(0) as usize, &action));
+    });
+    ui.on_group_renamed(move |i, name| {
+        with_window(id, |app| app.group_renamed(i.max(0) as usize, &name));
+    });
+    // Where each tab was laid out (see `App::tab_extents`). No refresh
+    // here: that would lay the strip out again.
+    let extents = with_window(id, |app| app.tab_extents.clone()).unwrap_or_default();
+    ui.on_tab_geometry(move |i, x, width| {
+        if let Some(extent) = extents.borrow_mut().get_mut(i.max(0) as usize) {
+            *extent = Some((x, width));
+        }
     });
     ui.on_tab_drag(move |i, strip_x, width, x, y| {
         with_window(id, |app| app.tab_drag(i.max(0) as usize, strip_x, width, x, y));

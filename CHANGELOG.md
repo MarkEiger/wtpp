@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Tab groups, like a browser's: right-click a tab → Add tab to new group,
+  name the group and it gets a colour of its own; Add tab to group puts
+  more tabs in it. Click the group's chip to collapse it to just the chip
+  (with how many tabs it holds), and again to expand it. Right-click the
+  chip to rename it, change its colour, ungroup or close it. Grouped tabs
+  are underlined in the group's colour and stay together: a tab dragged
+  between two of a group's tabs joins it, one dragged away leaves it, and a
+  collapsed group is passed over as a whole. Switching to a tab in a
+  collapsed group (Alt+number, ⌘number on macOS, the palette) opens the
+  group; closing a tab next to one doesn't. Also in the command palette and
+  bindable:
+  `addTabToNewGroup`, `removeTabFromGroup`, `toggleTabGroupCollapsed`,
+  `openTabGroupRenamer`, `closeTabGroup` (wt++ only: Windows Terminal has no
+  tab groups and would call them unknown).
+- Dragging tabs in the strip and onto another window's strip goes by where
+  the tabs really are, so it lands right with `tabWidthMode` titleLength or
+  compact too.
+
 ## 1.4.0 — 2026-11-13
 
 - Linux and macOS: a profile's command line is read like a shell does (single
