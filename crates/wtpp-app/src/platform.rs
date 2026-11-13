@@ -719,6 +719,35 @@ mod imp {
             }
         }
     }
+
+    /// The standard "Open" dialog for an image file. `owner` is an HWND (0
+    /// for none), passed as a number so it can cross to this thread.
+    pub fn open_image_dialog(owner: isize) -> Option<PathBuf> {
+        use windows_sys::Win32::UI::Controls::Dialogs::{
+            GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        };
+        let filter: Vec<u16> = "Images (*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp)\0*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp\0All files (*.*)\0*.*\0\0"
+            .encode_utf16()
+            .collect();
+        let title: Vec<u16> = "Background image\0".encode_utf16().collect();
+        let mut file = vec![0u16; 4096];
+        // SAFETY: an all-zero OPENFILENAMEW is valid (no optional fields).
+        let mut ofn: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+        ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+        ofn.hwndOwner = owner as HWND;
+        ofn.lpstrFilter = filter.as_ptr();
+        ofn.lpstrFile = file.as_mut_ptr();
+        ofn.nMaxFile = file.len() as u32;
+        ofn.lpstrTitle = title.as_ptr();
+        ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        // SAFETY: every pointer in `ofn` points at a live, NUL-terminated
+        // buffer of the stated size for the whole call.
+        if unsafe { GetOpenFileNameW(&mut ofn) } == 0 {
+            return None;
+        }
+        let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+        (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&file[..len])))
+    }
 }
 
 #[cfg(all(test, windows))]
@@ -732,4 +761,140 @@ mod tests {
         assert!(!super::runs_under(child.id(), "cmd.exe"));
         child.kill().unwrap();
     }
+}
+
+/// Windows: the DX12 swapchain was made through DirectComposition, the only
+/// kind whose alpha reaches the desktop (see `wgpu_configuration`).
+pub static DX12_VISUAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the window can show what's behind it where its content is
+/// see-through (`opacity`): the surface needs a non-opaque alpha mode, which
+/// wgpu's OpenGL backend never offers and X11 only has with a compositor.
+pub fn window_alpha_supported(window: &slint::Window, backend: slint::wgpu_30::wgpu::Backend) -> bool {
+    use slint::wgpu_30::wgpu::Backend;
+    let _ = window;
+    match backend {
+        Backend::Dx12 => cfg!(windows) && DX12_VISUAL.load(std::sync::atomic::Ordering::Relaxed),
+        Backend::Metal => true,
+        #[cfg(all(unix, not(target_os = "macos")))]
+        Backend::Vulkan => {
+            use slint::winit_030::WinitWindowAccessor;
+            use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let x11 = window
+                .with_winit_window(|w| {
+                    w.window_handle().is_ok_and(|h| matches!(h.as_raw(), RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)))
+                })
+                .unwrap_or(false);
+            !x11 || x11_compositor_running()
+        }
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        Backend::Vulkan => !cfg!(windows),
+        _ => false,
+    }
+}
+
+/// A compositing manager owns `_NET_WM_CM_S<screen>` (EWMH): without one,
+/// X11 has nothing to blend a window with.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn x11_compositor_running() -> bool {
+    use x11rb::protocol::xproto::ConnectionExt;
+    let check = || -> Option<bool> {
+        let (conn, screen) = x11rb::connect(None).ok()?;
+        let atom = conn.intern_atom(false, format!("_NET_WM_CM_S{screen}").as_bytes()).ok()?.reply().ok()?.atom;
+        Some(conn.get_selection_owner(atom).ok()?.reply().ok()?.owner != x11rb::NONE)
+    };
+    check().unwrap_or(false)
+}
+
+/// The desktop wallpaper's file (WT's `"backgroundImage": "desktopWallpaper"`).
+/// Windows only; `None` elsewhere or when there is no wallpaper image.
+pub fn desktop_wallpaper() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETDESKWALLPAPER, SystemParametersInfoW};
+        const MAX_PATH: usize = 260;
+        let mut buf = [0u16; MAX_PATH];
+        // SAFETY: the buffer holds MAX_PATH UTF-16 units, as the call is told.
+        let ok = unsafe { SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH as u32, buf.as_mut_ptr().cast(), 0) };
+        let len = buf.iter().position(|&c| c == 0).unwrap_or(MAX_PATH);
+        (ok != 0 && len > 0).then(|| std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+/// Whether [`pick_image`] can show a file dialog here.
+pub fn can_pick_image() -> bool {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        true
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        linux_file_dialog().is_some()
+    }
+}
+
+/// zenity or kdialog, whichever is installed (checked once).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_file_dialog() -> Option<&'static str> {
+    static FOUND: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let path = std::env::var_os("PATH")?;
+        ["zenity", "kdialog"].into_iter().find(|tool| std::env::split_paths(&path).any(|d| d.join(tool).is_file()))
+    })
+}
+
+/// Ask for an image file with the system's file dialog, on a worker thread;
+/// `done` gets the path, or `None` when the dialog was cancelled.
+pub fn pick_image(owner: &slint::Window, done: impl FnOnce(Option<std::path::PathBuf>) + Send + 'static) {
+    #[cfg(windows)]
+    let owner = {
+        use slint::winit_030::WinitWindowAccessor;
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        owner
+            .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(h)) => Some(h.hwnd.get()),
+                _ => None,
+            })
+            .flatten()
+            .unwrap_or(0)
+    };
+    #[cfg(not(windows))]
+    let _ = owner;
+    std::thread::spawn(move || {
+        #[cfg(windows)]
+        let picked = imp::open_image_dialog(owner);
+        #[cfg(target_os = "macos")]
+        let picked = command_output(std::process::Command::new("osascript").args([
+            "-e",
+            r#"POSIX path of (choose file of type {"public.image"} with prompt "Background image")"#,
+        ]));
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let picked = match linux_file_dialog() {
+            Some("zenity") => command_output(std::process::Command::new("zenity").args([
+                "--file-selection",
+                "--title=Background image",
+                "--file-filter=Images | *.png *.jpg *.jpeg *.bmp *.gif *.webp",
+            ])),
+            Some(_) => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                command_output(std::process::Command::new("kdialog").args([
+                    "--getopenfilename",
+                    &home,
+                    "image/png image/jpeg image/bmp image/gif image/webp",
+                ]))
+            }
+            None => None,
+        };
+        done(picked);
+    });
+}
+
+/// A dialog tool's answer: its trimmed output, or `None` if cancelled.
+#[cfg(unix)]
+fn command_output(command: &mut std::process::Command) -> Option<std::path::PathBuf> {
+    let out = command.stderr(std::process::Stdio::null()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !text.is_empty()).then(|| std::path::PathBuf::from(text))
 }

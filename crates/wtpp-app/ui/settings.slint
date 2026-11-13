@@ -1,4 +1,4 @@
-import { Button, LineEdit, SpinBox, Switch, ComboBox, ScrollView, Palette } from "std-widgets.slint";
+import { Button, LineEdit, SpinBox, Switch, ComboBox, ScrollView, Palette, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 export struct ColorRow {
@@ -103,6 +103,21 @@ export global SettingsData {
     in-out property <bool> p-ligatures;
     in-out property <string> p-environment;
     in-out property <string> p-icon;
+    // Background: opacity and image opacity in percent; stretch mode and
+    // alignment as indexes into the lists below.
+    in-out property <float> p-opacity: 100;
+    in-out property <string> p-bg-image;
+    // An image applies (this profile's or one inherited from the defaults).
+    in property <bool> p-bg-image-set;
+    in-out property <float> p-bg-image-opacity: 100;
+    in-out property <int> p-bg-stretch;
+    in property <[string]> bg-stretch-modes;
+    in-out property <int> p-bg-align;
+    in property <[string]> bg-alignments;
+    // Why opacity can't show through here (empty when it can).
+    in property <string> opacity-note;
+    in property <bool> can-browse-image;
+    callback browse-image();
 
     callback set-value(string, string);
     callback save();
@@ -1040,6 +1055,108 @@ component ProfilePage inherits VerticalLayout {
             text <=> SettingsData.p-padding;
             edited(t) => {
                 SettingsData.set-value("p.padding", t);
+            }
+        }
+    }
+
+    Card {
+        title: "Background opacity";
+        description: "Lower values let what's behind the window show through the background. Text stays opaque."
+            + (SettingsData.opacity-note == "" ? "" : " " + SettingsData.opacity-note);
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Slider {
+                width: 220px;
+                minimum: 0;
+                maximum: 100;
+                value <=> SettingsData.p-opacity;
+                changed(v) => {
+                    SettingsData.set-value("p.opacity", round(v));
+                }
+            }
+
+            Text {
+                width: 40px;
+                text: round(SettingsData.p-opacity) + "%";
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    Card {
+        title: "Background image";
+        description: "An image file drawn behind the text" + (SettingsData.is-windows ? "; desktopWallpaper uses your Windows wallpaper" : "") + ". Leave empty for none.";
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                width: SettingsData.can-browse-image ? 210px : 300px;
+                placeholder-text: SettingsData.p-bg-image-set && SettingsData.p-bg-image == "" ? "(from Defaults)" : "";
+                text <=> SettingsData.p-bg-image;
+                edited(t) => {
+                    SettingsData.set-value("p.backgroundImage", t);
+                }
+            }
+
+            if SettingsData.can-browse-image: Button {
+                width: 82px;
+                text: "Browse…";
+                clicked => {
+                    SettingsData.browse-image();
+                }
+            }
+        }
+    }
+
+    Card {
+        title: "Background image opacity";
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Slider {
+                width: 220px;
+                enabled: SettingsData.p-bg-image-set;
+                minimum: 0;
+                maximum: 100;
+                value <=> SettingsData.p-bg-image-opacity;
+                changed(v) => {
+                    SettingsData.set-value("p.backgroundImageOpacity", round(v) / 100);
+                }
+            }
+
+            Text {
+                width: 40px;
+                text: round(SettingsData.p-bg-image-opacity) + "%";
+                color: SettingsData.p-bg-image-set ? Theme.text : Theme.text-dim;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    Card {
+        title: "Background image stretch mode";
+        description: "How the image is sized to the pane.";
+        ComboBox {
+            width: 300px;
+            enabled: SettingsData.p-bg-image-set;
+            model: SettingsData.bg-stretch-modes;
+            current-index <=> SettingsData.p-bg-stretch;
+            selected => {
+                SettingsData.set-value("p.backgroundImageStretchMode", self.current-index);
+            }
+        }
+    }
+
+    Card {
+        title: "Background image alignment";
+        ComboBox {
+            width: 300px;
+            enabled: SettingsData.p-bg-image-set;
+            model: SettingsData.bg-alignments;
+            current-index <=> SettingsData.p-bg-align;
+            selected => {
+                SettingsData.set-value("p.backgroundImageAlignment", self.current-index);
             }
         }
     }

@@ -1,6 +1,6 @@
 //! Window state: tabs, their pane trees, and the sessions behind each pane.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -260,6 +260,11 @@ pub struct App {
     dividers_model: Rc<VecModel<DividerData>>,
     /// Allow the window to close without asking again.
     pub(crate) close_confirmed: bool,
+    /// The window can show what's behind it (see `platform::window_alpha_supported`).
+    pub(crate) window_alpha: bool,
+    pub(crate) gpu_backend: Option<wgpu::Backend>,
+    /// A pane's background is see-through, so the window's is too.
+    see_through: bool,
 }
 
 impl App {
@@ -316,6 +321,9 @@ impl App {
             dividers: Vec::new(),
             dividers_model,
             close_confirmed: false,
+            window_alpha: false,
+            gpu_backend: None,
+            see_through: false,
         };
         app.apply_chrome_settings();
         app
@@ -388,6 +396,11 @@ impl App {
     // ---- startup ------------------------------------------------------------
 
     pub fn on_gpu_ready(&mut self, device: wgpu::Device, queue: wgpu::Queue) {
+        let backend = device.adapter_info().backend;
+        self.window_alpha = crate::platform::window_alpha_supported(self.ui().window(), backend);
+        self.gpu_backend = Some(backend);
+        crate::background::set_max_dimension(device.limits().max_texture_dimension_2d);
+        log_window_alpha(self.window_alpha, backend, self.settings.wants_transparency());
         self.gpu_pending = Some((device, queue));
         self.try_start();
     }
@@ -497,6 +510,7 @@ impl App {
                 pane.theme = theme_for(&self.settings, updated);
             }
         }
+        crate::background::refresh(&self.background_images());
         self.icon_cache.clear();
         for pane in self.panes.values().map(|p| p.profile.clone()).collect::<Vec<_>>() {
             self.ensure_icon(&pane);
@@ -507,6 +521,18 @@ impl App {
         self.apply_chrome_settings();
         self.update_menu();
         self.relayout();
+    }
+
+    /// Every `backgroundImage` in use: the settings' (shared by all
+    /// windows) and this window's panes'.
+    fn background_images(&self) -> HashSet<String> {
+        let s = &self.settings;
+        std::iter::once(&s.profiles.defaults)
+            .chain(&s.profiles.list)
+            .map(|p| s.resolve(p))
+            .chain(self.panes.values().map(|p| p.profile.clone()))
+            .filter_map(|p| p.background_image)
+            .collect()
     }
 
     // ---- tabs & panes ---------------------------------------------------------
@@ -1139,6 +1165,10 @@ impl App {
         }
         self.window_active = active;
         self.ui().set_window_active(active);
+        // Coming back is when an edited image file gets noticed.
+        if active {
+            crate::background::refresh(&self.background_images());
+        }
         if active && let Some(tab) = self.tabs.get_mut(self.active) {
             tab.bell = false;
             self.refresh_chrome();
@@ -1431,6 +1461,7 @@ impl App {
     pub fn render(&mut self) {
         let Some(focused) = self.active_terminal().map(|(_, f)| f) else {
             self.panes_model.set_vec(Vec::new());
+            self.set_see_through(false);
             return;
         };
         let scale = self.scale();
@@ -1466,7 +1497,10 @@ impl App {
             let (texture, ..) = pane.target.as_ref().unwrap();
             let view = texture.create_view(&Default::default());
             let has_focus = id == focused && self.window_active;
-            let (history, offset) = {
+            let alpha = if self.window_alpha { pane.profile.opacity } else { 1.0 };
+            let bg_image = pane.profile.background_image.as_deref().and_then(crate::background::image_for);
+            let transparent = alpha < 1.0 || bg_image.is_some();
+            let (history, offset, bg) = {
                 let term = pane.session.term().lock();
                 let mut highlights = Vec::new();
                 if id == focused {
@@ -1483,11 +1517,17 @@ impl App {
                     focused: has_focus,
                     cursor_visible: self.cursor_on,
                     highlights: &highlights,
+                    transparent,
                 };
                 renderer.render(&gpu.device, &gpu.queue, &view, width, height, &frame);
-                (term.grid().history_size(), term.grid().display_offset())
+                // The default background, as the program may have set it (OSC 11).
+                let bg = term.colors()[ansi::NamedColor::Background].unwrap_or(pane.theme.background);
+                (term.grid().history_size(), term.grid().display_offset(), bg)
             };
-            let bg = pane.theme.background;
+            let (bg_fit, bg_halign, bg_valign) = crate::background::image_layout(
+                pane.profile.background_image_stretch_mode,
+                pane.profile.background_image_alignment,
+            );
             let [left, top, ..] = pane.profile.padding;
             // Re-setting the image (even the same texture) is what tells
             // Slint the pane needs repainting.
@@ -1502,7 +1542,12 @@ impl App {
                 image_height: height as f32 / scale,
                 padding_left: left,
                 padding_top: top,
-                background: slint::Color::from_rgb_u8(bg.r, bg.g, bg.b),
+                background: slint::Color::from_argb_u8((alpha.clamp(0.0, 1.0) * 255.0).round() as u8, bg.r, bg.g, bg.b),
+                bg_image: bg_image.unwrap_or_default(),
+                bg_image_opacity: pane.profile.background_image_opacity,
+                bg_fit,
+                bg_halign,
+                bg_valign,
                 focused: id == focused,
                 flash: self.flashing == Some(id),
                 link_hover: self.hover_link.is_some_and(|(p, ..)| p == id),
@@ -1512,12 +1557,21 @@ impl App {
             });
         }
 
+        self.set_see_through(see_through(rows.iter().map(|r| r.background.alpha())));
         if self.panes_model.row_count() == rows.len() {
             for (i, row) in rows.into_iter().enumerate() {
                 self.panes_model.set_row_data(i, row);
             }
         } else {
             self.panes_model.set_vec(rows);
+        }
+    }
+
+    /// Make the window's own background see-through, or opaque again.
+    fn set_see_through(&mut self, see: bool) {
+        if see != self.see_through {
+            self.see_through = see;
+            self.ui().set_see_through(see);
         }
     }
 
@@ -2315,6 +2369,38 @@ fn tab_color(app: &App, tab: &Tab) -> Option<wtpp_config::Color> {
     })
 }
 
+/// The window shows what's behind it when any pane's background (alpha
+/// values) is translucent.
+fn see_through(alphas: impl IntoIterator<Item = u8>) -> bool {
+    alphas.into_iter().any(|a| a < 255)
+}
+
+/// Why `opacity` can't make the window see-through with this backend.
+pub(crate) fn opacity_unavailable_reason(backend: Option<wgpu::Backend>) -> &'static str {
+    match backend {
+        Some(wgpu::Backend::Gl) => "It isn't supported with OpenGL, so the background stays opaque.",
+        // Without a DirectComposition swapchain, chosen at startup.
+        Some(wgpu::Backend::Dx12) => "Restart wt++ for it to take effect.",
+        Some(wgpu::Backend::Vulkan) if !cfg!(windows) => {
+            "It needs a compositing window manager, so the background stays opaque."
+        }
+        _ => "It isn't supported here, so the background stays opaque.",
+    }
+}
+
+/// Say once whether `opacity` can work, and why not when a profile wants it.
+fn log_window_alpha(available: bool, backend: wgpu::Backend, wanted: bool) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let state = if available { "available" } else { "unavailable" };
+    log::info!("background opacity: window transparency {state} ({backend:?})");
+    if wanted && !available {
+        log::warn!("opacity: {}", opacity_unavailable_reason(Some(backend)));
+    }
+}
+
 /// Renderer colors for a profile's scheme.
 pub(crate) fn theme_for(settings: &Settings, profile: &ResolvedProfile) -> Theme {
     let scheme = settings.scheme(&profile.color_scheme);
@@ -2664,6 +2750,14 @@ fn start_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_goes_see_through_with_a_translucent_pane() {
+        assert!(!see_through([]));
+        assert!(!see_through([255, 255]));
+        assert!(see_through([255, 191]));
+        assert!(see_through([0]));
+    }
 
     #[test]
     fn live_directories_are_taken_literally() {

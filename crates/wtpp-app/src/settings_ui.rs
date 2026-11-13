@@ -8,7 +8,7 @@ use wtpp_config::settings::{
     DiscoveredProfile, FALLBACK_SOURCE, FontWeight, Padding, ProfileSettings, RefreshReport,
     find_windows_terminal_settings, guid_for,
 };
-use wtpp_config::{Action, AppTheme, TabWidthMode, BellStyle, GraphicsApi, Binding, COLOR_NAMES, Chord, CloseOnExit, CursorShape, IntenseTextStyle, KeyEncoding, Keymap, LaunchMode, Settings};
+use wtpp_config::{Action, AppTheme, BackgroundImageAlignment, BackgroundImageStretchMode, TabWidthMode, BellStyle, GraphicsApi, Binding, COLOR_NAMES, Chord, CloseOnExit, CursorShape, IntenseTextStyle, KeyEncoding, Keymap, LaunchMode, Settings};
 use wtpp_input::{Key, Mods};
 
 use crate::app::{App, Tab, TabKind};
@@ -186,6 +186,8 @@ impl App {
         let is_windows = cfg!(windows);
         let can_import = find_windows_terminal_settings().is_some();
         let fonts = self.font_families.clone();
+        let opacity_note =
+            if self.window_alpha { "" } else { crate::app::opacity_unavailable_reason(self.gpu_backend) };
         let ui = self.ui();
         let data = ui.global::<SettingsData>();
         let Some(d) = self.draft.as_mut() else { return };
@@ -329,6 +331,21 @@ impl App {
         data.set_p_weight(FontWeight::NAMES.iter().position(|(_, w)| *w == resolved.font_weight).unwrap_or(4) as i32);
         data.set_p_cell_height(format!("{}", resolved.cell_height).into());
         data.set_p_ligatures(resolved.ligatures);
+        data.set_p_opacity((resolved.opacity * 100.0).round());
+        // As written, like the icon: an inherited image isn't copied in.
+        data.set_p_bg_image(entry.background_image.clone().unwrap_or_default().into());
+        data.set_p_bg_image_opacity((resolved.background_image_opacity * 100.0).round());
+        data.set_p_bg_image_set(resolved.background_image.is_some());
+        data.set_bg_stretch_modes(strings(BackgroundImageStretchMode::ALL.iter().map(|m| m.label().to_string())));
+        data.set_p_bg_stretch(
+            BackgroundImageStretchMode::ALL.iter().position(|m| *m == resolved.background_image_stretch_mode).unwrap_or(3) as i32,
+        );
+        data.set_bg_alignments(strings(BackgroundImageAlignment::ALL.iter().map(|a| a.label().to_string())));
+        data.set_p_bg_align(
+            BackgroundImageAlignment::ALL.iter().position(|a| *a == resolved.background_image_alignment).unwrap_or(0) as i32,
+        );
+        data.set_opacity_note(opacity_note.into());
+        data.set_can_browse_image(crate::platform::can_pick_image());
         data.set_p_close_on_exit(match resolved.close_on_exit {
             CloseOnExit::Graceful => 0,
             CloseOnExit::Always => 1,
@@ -430,6 +447,8 @@ impl App {
                 }
                 _ => {
                     let schemes: Vec<String> = s.all_schemes().into_iter().map(|x| x.name).collect();
+                    let defaults_image = d.profile_index().is_some()
+                        && d.settings.profiles.defaults.background_image.as_deref().is_some_and(|i| !i.trim().is_empty());
                     let p = d.profile_mut();
                     let text = || (!value.trim().is_empty()).then(|| value.to_string());
                     match key {
@@ -457,6 +476,22 @@ impl App {
                         "p.historySize" => p.history_size = Some(int.max(0) as u32),
                         "p.tabTitle" => p.tab_title = text(),
                         "p.icon" => p.icon = text(),
+                        "p.opacity" => {
+                            p.opacity = value.trim().parse::<f32>().ok().map(|v| v.round().clamp(0.0, 100.0));
+                        }
+                        "p.backgroundImage" => {
+                            // Empty turns off an image the defaults would give.
+                            p.background_image = text().or_else(|| defaults_image.then(String::new));
+                        }
+                        "p.backgroundImageOpacity" => {
+                            p.background_image_opacity = value.trim().parse::<f32>().ok().map(|v| v.clamp(0.0, 1.0));
+                        }
+                        "p.backgroundImageStretchMode" => {
+                            p.background_image_stretch_mode = BackgroundImageStretchMode::ALL.get(int as usize).copied();
+                        }
+                        "p.backgroundImageAlignment" => {
+                            p.background_image_alignment = BackgroundImageAlignment::ALL.get(int as usize).copied();
+                        }
                         "p.suppressApplicationTitle" => p.suppress_application_title = Some(flag),
                         "p.environment" => {
                             let vars: std::collections::BTreeMap<String, String> = value
@@ -561,6 +596,19 @@ impl App {
             self.set_status("Reloaded settings.json.", false);
             self.refresh_settings();
         }
+    }
+
+    /// "Browse…" for the background image: the system's file dialog.
+    pub fn settings_browse_image(&mut self) {
+        let id = self.id;
+        crate::platform::pick_image(self.ui().window(), move |path| {
+            let Some(path) = path else { return };
+            let path = path.to_string_lossy().into_owned();
+            slint::invoke_from_event_loop(move || {
+                crate::with_window(id, |app| app.settings_set_value("p.backgroundImage", &path));
+            })
+            .ok();
+        });
     }
 
     pub fn settings_open_json(&mut self) {

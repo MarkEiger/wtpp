@@ -44,7 +44,16 @@ export struct PaneData {
     image-height: length,
     padding-left: length,
     padding-top: length,
+    // The profile's background colour, with its `opacity` as alpha.
     background: color,
+    // Background image (none when empty), drawn over the colour and under
+    // the text: its opacity, fit (0 none, 1 fill, 2 uniform, 3 uniform to
+    // fill) and alignment (-1 left/top, 0 centre, 1 right/bottom).
+    bg-image: image,
+    bg-image-opacity: float,
+    bg-fit: int,
+    bg-halign: int,
+    bg-valign: int,
     focused: bool,
     // Visual bell flash.
     flash: bool,
@@ -526,7 +535,10 @@ export component MainWindow inherits Window {
     // tabs in the title bar grows it by a caption height on Windows.
     min-width: 360px;
     min-height: 200px;
-    background: Colors.terminal;
+    // See-through where a pane's background is (`opacity`); the tab row,
+    // Settings and dialogs keep their own opaque backgrounds.
+    in property <bool> see-through;
+    background: see-through ? transparent : Colors.terminal;
 
     in property <string> session-title;
     in property <[TabData]> tabs;
@@ -939,12 +951,24 @@ export component MainWindow inherits Window {
         }
 
         content := Rectangle {
-            background: root.panes.length > 1 ? Colors.divider : Colors.terminal;
+            background: root.see-through ? transparent : root.panes.length > 1 ? Colors.divider : Colors.terminal;
             changed width => {
                 root.content-resized();
             }
             changed height => {
                 root.content-resized();
+            }
+
+            // With a see-through background the gaps between panes are drawn
+            // on their own (otherwise the content's background shows there).
+            if root.see-through: Rectangle {
+                for d in root.dividers: Rectangle {
+                    x: d.x;
+                    y: d.y;
+                    width: d.width;
+                    height: d.height;
+                    background: Colors.divider;
+                }
             }
 
             for pane[i] in root.panes: Rectangle {
@@ -954,6 +978,16 @@ export component MainWindow inherits Window {
                 height: pane.height;
                 background: pane.background;
                 clip: true;
+
+                if pane.bg-image.width > 0: Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: pane.bg-image;
+                    opacity: pane.bg-image-opacity;
+                    image-fit: pane.bg-fit == 0 ? ImageFit.preserve : pane.bg-fit == 1 ? ImageFit.fill : pane.bg-fit == 2 ? ImageFit.contain : ImageFit.cover;
+                    horizontal-alignment: pane.bg-halign < 0 ? ImageHorizontalAlignment.left : pane.bg-halign > 0 ? ImageHorizontalAlignment.right : ImageHorizontalAlignment.center;
+                    vertical-alignment: pane.bg-valign < 0 ? ImageVerticalAlignment.top : pane.bg-valign > 0 ? ImageVerticalAlignment.bottom : ImageVerticalAlignment.center;
+                }
 
                 Image {
                     x: pane.padding-left;

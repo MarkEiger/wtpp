@@ -14,6 +14,8 @@ path = "src/main.rs"
 anyhow.workspace = true
 arboard.workspace = true
 env_logger.workspace = true
+# Background images; already built for Slint (png, jpeg), plus bmp, gif, webp.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
 log.workspace = true
 notify.workspace = true
 serde.workspace = true
@@ -46,6 +48,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Pipes",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_Controls_Dialogs",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

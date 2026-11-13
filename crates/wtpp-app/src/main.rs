@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod background;
 mod cli;
 mod default_terminal;
 mod file_drop;
@@ -97,7 +98,7 @@ pub fn with_pane<R>(pane: pane_tree::PaneId, f: impl FnOnce(&mut App) -> R) -> O
     with_window(id, f)
 }
 
-fn for_each_window(f: impl Fn(&mut App)) {
+pub(crate) fn for_each_window(f: impl Fn(&mut App)) {
     for id in window_ids() {
         with_window(id, &f);
     }
@@ -355,9 +356,23 @@ fn init_logging() {
 /// (Vulkan, DX12, GL…) costs hundreds of milliseconds at startup.
 /// `api` is the user's `rendering.graphicsAPI`; the WGPU_BACKEND environment
 /// variable still wins, for debugging.
-fn wgpu_configuration(api: wtpp_config::GraphicsApi) -> WGPUConfiguration {
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn wgpu_configuration(user: &wtpp_config::Settings, api: wtpp_config::GraphicsApi) -> WGPUConfiguration {
     use wtpp_config::GraphicsApi;
     let mut settings = WGPUSettings::default();
+    // Only a DirectComposition swapchain lets the desktop show through a
+    // see-through background. It's new to wt++ (resizing, the title bar,
+    // capture tools), so it's used only when some profile asks for opacity:
+    // turning opacity on later takes a restart.
+    #[cfg(windows)]
+    if std::env::var_os("WGPU_DX12_PRESENTATION_SYSTEM").is_none() && user.wants_transparency() {
+        settings.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
+    }
+    #[cfg(windows)]
+    platform::DX12_VISUAL.store(
+        settings.backend_options.dx12.presentation_system == wgpu::Dx12SwapchainKind::DxgiFromVisual,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if std::env::var_os("WGPU_BACKEND").is_some() {
         return WGPUConfiguration::Automatic(settings);
     }
@@ -384,10 +399,9 @@ fn wgpu_configuration(api: wtpp_config::GraphicsApi) -> WGPUConfiguration {
 }
 
 /// Slint's backend, for the user's `rendering.graphicsAPI`.
-#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 fn backend_selector(settings: &wtpp_config::Settings, api: wtpp_config::GraphicsApi) -> slint::BackendSelector {
     #[allow(unused_mut)]
-    let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(api));
+    let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(settings, api));
     // macOS: tabs in the title bar, like Safari and iTerm: the title bar
     // turns transparent and the content extends under it.
     #[cfg(target_os = "macos")]
@@ -664,6 +678,9 @@ fn wire_settings(ui: &MainWindow, id: WindowId) {
     });
     data.on_open_json(move || {
         with_window(id, |app| app.settings_open_json());
+    });
+    data.on_browse_image(move || {
+        with_window(id, |app| app.settings_browse_image());
     });
     data.on_shortcut(move |text, ctrl, alt, shift, meta| {
         // Like on_key_pressed: on macOS, Slint's "control" is ⌘.
