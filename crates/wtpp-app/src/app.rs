@@ -1030,15 +1030,8 @@ impl App {
             crate::close_window(self.id);
             return;
         }
-        if self.active > index {
-            self.active -= 1;
-        } else if self.active == index {
-            // The next tab, or the one before at the end, skipping tabs
-            // in collapsed groups rather than opening one up.
-            let from = index.min(self.tabs.len() - 1);
-            let hidden = self.hidden_tabs(usize::MAX);
-            self.active = tab_groups::nearest_visible(&hidden, from).unwrap_or(from);
-        }
+        let hidden = self.hidden_tabs(usize::MAX);
+        self.active = tab_groups::active_after_close(&hidden, self.active, index);
         self.relayout();
     }
 
@@ -1433,7 +1426,8 @@ impl App {
                 group_end: end,
                 group_title: group.map(|g| g.title.clone()).unwrap_or_default().into(),
                 group_collapsed: group.is_some_and(|g| g.collapsed),
-                group_renaming: group.is_some_and(|g| g.renaming),
+                // Only the chip that's shown: each rename field takes focus.
+                group_renaming: start && group.is_some_and(|g| g.renaming),
                 group_size: t.group.map_or(0, |g| groups.iter().filter(|&&o| o == Some(g)).count() as i32),
                 hidden: hidden[i],
                 title: self.tab_title(t).into(),
@@ -1815,18 +1809,9 @@ impl App {
             Action::NextTab | Action::PrevTab => {
                 let n = self.tabs.len();
                 if n > 1 {
-                    let step = |i: usize| if action == Action::NextTab { (i + 1) % n } else { (i + n - 1) % n };
-                    // Over tabs in collapsed groups; if those are all there
-                    // is, the next tab anyway (which opens its group).
+                    // Over tabs in collapsed groups.
                     let hidden = self.hidden_tabs(self.active);
-                    let mut next = step(self.active);
-                    while hidden[next] && next != self.active {
-                        next = step(next);
-                    }
-                    if next == self.active {
-                        next = step(self.active);
-                    }
-                    self.select_tab(next);
+                    self.select_tab(tab_groups::step_visible(&hidden, self.active, action == Action::NextTab));
                 }
             }
             Action::SwitchToTab(index) => self.select_tab(index),

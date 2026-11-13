@@ -98,6 +98,69 @@ pub fn group_at_insert(groups: &[Option<GroupId>], at: usize, own: Option<GroupI
     None
 }
 
+/// Where the tab at `i` ends up when the tab at `from` moves to `to`.
+pub fn moved_index(i: usize, from: usize, to: usize) -> usize {
+    if i == from {
+        to
+    } else if from < i && i <= to {
+        i - 1
+    } else if to <= i && i < from {
+        i + 1
+    } else {
+        i
+    }
+}
+
+/// A reordering (new position → old index) turned around: old index → new
+/// position.
+pub fn inverse(order: &[usize]) -> Vec<usize> {
+    let mut new_index = vec![0; order.len()];
+    for (k, &i) in order.iter().enumerate() {
+        new_index[i] = k;
+    }
+    new_index
+}
+
+/// Where tab `index` goes on leaving group `gid` (already taken out of it in
+/// `groups`): past the group's last other tab, so the rest stay together.
+pub fn leave_target(groups: &[Option<GroupId>], index: usize, gid: GroupId) -> usize {
+    groups.iter().rposition(|&g| g == Some(gid)).filter(|&last| last > index).unwrap_or(index)
+}
+
+/// Where tab `at` goes on joining group `gid`: just after the group's last
+/// tab (as an index after the move). `None` if the group has no tabs.
+pub fn join_target(groups: &[Option<GroupId>], at: usize, gid: GroupId) -> Option<usize> {
+    let last = groups.iter().rposition(|&g| g == Some(gid))?;
+    Some(if at < last { last } else { last + 1 })
+}
+
+/// The tab next to `active` (right if `forward`, wrapping), over hidden
+/// ones; if those are all there is, the plain next one (which opens its
+/// group). `len` must be at least 2.
+pub fn step_visible(hidden: &[bool], active: usize, forward: bool) -> usize {
+    let n = hidden.len();
+    let step = |i: usize| if forward { (i + 1) % n } else { (i + n - 1) % n };
+    let mut next = step(active);
+    while hidden[next] && next != active {
+        next = step(next);
+    }
+    if next == active { step(active) } else { next }
+}
+
+/// The active tab once tab `closed` is gone (`hidden` is for the tabs
+/// left): the same tab if another closed, else the next shown one, or the
+/// one before at the end, skipping collapsed groups rather than opening one.
+pub fn active_after_close(hidden: &[bool], active: usize, closed: usize) -> usize {
+    if active > closed {
+        return active - 1;
+    }
+    if active < closed {
+        return active;
+    }
+    let from = closed.min(hidden.len().saturating_sub(1));
+    nearest_visible(hidden, from).unwrap_or(from)
+}
+
 /// Which tabs are hidden: those in collapsed groups, except the active one.
 pub fn hidden(groups: &[Option<GroupId>], collapsed: impl Fn(GroupId) -> bool, active: usize) -> Vec<bool> {
     groups.iter().enumerate().map(|(i, g)| i != active && g.is_some_and(&collapsed)).collect()
@@ -236,5 +299,86 @@ mod tests {
         // Nothing else to show.
         assert_eq!(collapse_target(&[A, A], 1, |_| false, 0), None);
         assert_eq!(collapse_target(&[B, A], 1, |g| g == 2, 1), None);
+    }
+
+    #[test]
+    fn moving_indices() {
+        // Tab 1 moved to 3: 2 and 3 shift left, the rest stay.
+        assert_eq!((0..5).map(|i| moved_index(i, 1, 3)).collect::<Vec<_>>(), vec![0, 3, 1, 2, 4]);
+        // Tab 3 moved to 1: 1 and 2 shift right.
+        assert_eq!((0..5).map(|i| moved_index(i, 3, 1)).collect::<Vec<_>>(), vec![0, 2, 3, 1, 4]);
+        assert_eq!((0..3).map(|i| moved_index(i, 2, 2)).collect::<Vec<_>>(), vec![0, 1, 2]);
+        // Agrees with a real remove and insert.
+        for from in 0..5 {
+            for to in 0..5 {
+                let mut v: Vec<usize> = (0..5).collect();
+                let t = v.remove(from);
+                v.insert(to, t);
+                for i in 0..5 {
+                    assert_eq!(v[moved_index(i, from, to)], i);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tidying_keeps_the_active_tab() {
+        let split = [A, N, B, A, B];
+        let order = contiguous_order(&split);
+        let new_index = inverse(&order);
+        // The second A (old 3) is now next to the first; old 1 moved right.
+        assert_eq!(new_index, vec![0, 2, 3, 1, 4]);
+        for (old, &new) in new_index.iter().enumerate() {
+            assert_eq!(order[new], old);
+        }
+        assert!(inverse(&[]).is_empty());
+    }
+
+    #[test]
+    fn leaving_and_joining() {
+        // Leaving from the middle of a group: past its other tabs.
+        assert_eq!(leave_target(&[A, N, A, A, N], 1, 1), 3);
+        // Already its last tab, or the only one: stays.
+        assert_eq!(leave_target(&[A, A, N, N], 2, 1), 2);
+        assert_eq!(leave_target(&[N, N], 1, 1), 1);
+        // Joining from the left: the group shifts left when it's taken out.
+        assert_eq!(join_target(&[N, B, B, N], 0, 2), Some(2));
+        // From the right: just after the group.
+        assert_eq!(join_target(&[B, B, N, N], 3, 2), Some(2));
+        assert_eq!(join_target(&[N, N], 0, 2), None);
+        // Agrees with moving it there: the group's tabs then sit together.
+        for (groups, at) in [(vec![N, B, B, N], 0), (vec![B, B, N, N], 3), (vec![N, B, B, N, N], 4), (vec![N, N, B, B], 0)] {
+            let to = join_target(&groups, at, 2).unwrap();
+            let mut v = groups.clone();
+            v.remove(at);
+            v.insert(to, B);
+            assert_eq!(contiguous_order(&v), (0..v.len()).collect::<Vec<_>>(), "{groups:?} {at}");
+        }
+    }
+
+    #[test]
+    fn stepping_over_hidden_tabs() {
+        let hidden = [false, true, true, false];
+        assert_eq!(step_visible(&hidden, 0, true), 3);
+        assert_eq!(step_visible(&hidden, 3, true), 0);
+        assert_eq!(step_visible(&hidden, 3, false), 0);
+        assert_eq!(step_visible(&hidden, 0, false), 3);
+        // Nothing else shown: the next tab anyway.
+        assert_eq!(step_visible(&[false, true, true], 0, true), 1);
+        assert_eq!(step_visible(&[false, true, true], 0, false), 2);
+        assert_eq!(step_visible(&[false, false], 1, true), 0);
+    }
+
+    #[test]
+    fn closing_picks_a_shown_tab() {
+        // Another tab closed: the active one keeps its place.
+        assert_eq!(active_after_close(&[false; 3], 2, 0), 1);
+        assert_eq!(active_after_close(&[false; 3], 0, 2), 0);
+        // The active one closed: the next shown tab, past a collapsed group.
+        assert_eq!(active_after_close(&[false, true, true, false], 1, 1), 3);
+        // At the end: the one before, skipping hidden ones.
+        assert_eq!(active_after_close(&[false, true, true], 3, 3), 0);
+        // Only hidden tabs left: one of them (its group then opens).
+        assert_eq!(active_after_close(&[true, true], 0, 0), 0);
     }
 }

@@ -86,8 +86,7 @@ impl App {
                         }
                         let at = self.leave_group(index);
                         // After the group's last tab, keeping it together.
-                        let Some(last) = self.tabs.iter().rposition(|t| t.group == Some(gid)) else { return };
-                        let to = if at < last { last } else { last + 1 };
+                        let Some(to) = tab_groups::join_target(&self.tab_groups(), at, gid) else { return };
                         self.move_tab(at, to);
                         self.tabs[to].group = Some(gid);
                     }
@@ -102,22 +101,17 @@ impl App {
     /// other tabs so they stay together. Returns where the tab is now.
     fn leave_group(&mut self, index: usize) -> usize {
         let Some(gid) = self.tabs[index].group.take() else { return index };
-        let last = self.tabs.iter().rposition(|t| t.group == Some(gid)).filter(|&last| last > index);
-        match last {
-            Some(last) => {
-                self.move_tab(index, last);
-                last
-            }
-            None => index,
-        }
+        let to = tab_groups::leave_target(&self.tab_groups(), index, gid);
+        self.move_tab(index, to);
+        to
     }
 
     /// Move a tab from `from` to `to`, keeping the active and dragged tabs.
     pub(crate) fn move_tab(&mut self, from: usize, to: usize) {
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
-        self.active = moved_index(self.active, from, to);
-        self.dragging_tab = self.dragging_tab.map(|i| moved_index(i, from, to));
+        self.active = tab_groups::moved_index(self.active, from, to);
+        self.dragging_tab = self.dragging_tab.map(|i| tab_groups::moved_index(i, from, to));
     }
 
     /// Each tab's group, in tab order.
@@ -150,11 +144,7 @@ impl App {
         if order.iter().enumerate().any(|(k, &i)| k != i) {
             let mut old: Vec<_> = self.tabs.drain(..).map(Some).collect();
             self.tabs = order.iter().filter_map(|&i| old[i].take()).collect();
-            // Old index → new index.
-            let mut new_index = vec![0; order.len()];
-            for (k, &i) in order.iter().enumerate() {
-                new_index[i] = k;
-            }
+            let new_index = tab_groups::inverse(&order);
             self.active = new_index.get(self.active).copied().unwrap_or(self.active);
             self.dragging_tab = self.dragging_tab.map(|i| new_index.get(i).copied().unwrap_or(i));
         }
@@ -449,19 +439,6 @@ impl App {
             y = y.min(bottom - height).max(top);
         }
         crate::Placement::At(slint::PhysicalPosition::new(x, y), size)
-    }
-}
-
-/// Where the tab at `i` ends up when the tab at `from` moves to `to`.
-fn moved_index(i: usize, from: usize, to: usize) -> usize {
-    if i == from {
-        to
-    } else if from < i && i <= to {
-        i - 1
-    } else if to <= i && i < from {
-        i + 1
-    } else {
-        i
     }
 }
 

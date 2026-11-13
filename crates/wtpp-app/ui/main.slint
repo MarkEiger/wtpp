@@ -230,7 +230,8 @@ component GroupChip inherits Rectangle {
             vertical-alignment: center;
         }
 
-        if root.renaming: FocusScope {
+        // Only on the shown chip: a hidden one would steal the focus.
+        if root.shown && root.renaming: FocusScope {
             x: 2px;
             width: parent.width - 4px;
             key-pressed(e) => {
@@ -1048,7 +1049,7 @@ export component MainWindow inherits Window {
                                 title: tab.group-title;
                                 group-color: tab.group-color;
                                 collapsed: tab.group-collapsed;
-                                renaming: tab.group-renaming;
+                                renaming: tab.group-start && tab.group-renaming;
                                 size: tab.group-size;
                                 toggled => {
                                     root.group-menu(i, "toggle");
