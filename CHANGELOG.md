@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- After a Shift+Enter, Enter could keep adding lines (in Claude Code,
-  PowerShell) until Ctrl+Enter, as if Shift were still held. wt++ now goes
-  by the keyboard's real state, so Enter submits again.
+- A modifier wt++ thought was held but the keyboard says is up (a missed
+  Shift release) no longer turns Enter into Shift+Enter, which adds lines in
+  Claude Code and PowerShell. When this happens it's noted in the log, to
+  help track down reports of Enter staying a new line after a Shift+Enter.
 
 ## 1.4.0 — 2026-11-13
 

@@ -61,9 +61,11 @@ pub fn from_slint(text: &str, mut mods: Mods) -> Option<(Key, Mods)> {
 /// The modifiers to act on: Slint's, less any the OS says are up.
 ///
 /// Slint tracks modifiers from its own key events and never re-syncs them,
-/// so one lost Shift release left every later Enter a Shift+Enter: a new
-/// line in Claude Code and PSReadLine until Ctrl+Enter. winit's state
-/// (`os`) comes from the OS on every key. This only ever clears a modifier:
+/// so a Shift release it missed would leave every later Enter a Shift+Enter
+/// (a new line in Claude Code and PSReadLine) until the next Shift press.
+/// A guard, not a proven cause of the reported stuck Shift+Enter: that one
+/// ended with Ctrl+Enter, which doesn't clear Slint's Shift (see
+/// `slint_state`). winit's state (`os`) comes from the OS on every key. This only ever clears a modifier:
 /// Slint drops Ctrl+Alt for AltGr characters, and adding them back would
 /// turn AltGr typing into shortcuts. `None` (no OS state seen yet) trusts
 /// Slint.
@@ -131,8 +133,8 @@ mod tests {
         assert_eq!(reconcile(Mods::NONE, Some(ctrl_alt)), Mods::NONE);
     }
 
-    /// A stale Shift from Slint made Enter a new line; with the OS's state
-    /// it submits again.
+    /// With a Shift Slint thinks is held but the OS says is up, Enter
+    /// submits (a CR, or the plain Enter key event) instead of a new line.
     #[test]
     fn enter_after_a_lost_shift_release_submits() {
         use wtpp_input::{EncodeOptions, KeyStyle, encode};
@@ -142,5 +144,68 @@ mod tests {
         let windows = EncodeOptions { style: KeyStyle::Windows, win32_input: true, ..EncodeOptions::default() };
         assert_eq!(encode(key, mods, &windows), encode(Key::Enter, Mods::NONE, &windows));
         assert_ne!(encode(key, mods, &windows), encode(Key::Enter, Mods::SHIFT, &windows));
+    }
+}
+
+/// What Slint itself reports for a key, through a real (GPU-less) window.
+#[cfg(test)]
+mod slint_state {
+    use slint::platform::software_renderer::MinimalSoftwareWindow;
+    use slint::platform::{Key as SlintKey, Platform, PlatformError, WindowAdapter, WindowEvent};
+    use std::rc::Rc;
+
+    slint::slint! {
+        export component Probe inherits Window {
+            in-out property <string> mods;
+            fs := FocusScope {
+                key-pressed(e) => {
+                    root.mods = (e.modifiers.shift ? "shift " : "") + (e.modifiers.control ? "ctrl" : "");
+                    accept
+                }
+            }
+            init => { fs.focus(); }
+        }
+    }
+
+    struct Headless(Rc<MinimalSoftwareWindow>);
+
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// Slint keeps modifiers from its own key events: a Shift whose release
+    /// it never got stays held for every later key, and only a Shift event
+    /// (or focus loss) clears it. Ctrl, or Ctrl+Enter, doesn't. So a lost
+    /// release alone doesn't explain a stuck Shift+Enter that Ctrl+Enter
+    /// ends; `reconcile` covers this case, whatever the cause of that one.
+    #[test]
+    fn slint_keeps_a_shift_it_never_saw_released() {
+        let window = MinimalSoftwareWindow::new(Default::default());
+        slint::platform::set_platform(Box::new(Headless(window.clone()))).unwrap();
+        let probe = Probe::new().unwrap();
+        probe.show().unwrap();
+        let w = probe.window();
+        let press = |k: SlintKey| w.dispatch_event(WindowEvent::KeyPressed { text: k.into() });
+        let release = |k: SlintKey| w.dispatch_event(WindowEvent::KeyReleased { text: k.into() });
+        let enter = || {
+            press(SlintKey::Return);
+            release(SlintKey::Return);
+            probe.get_mods()
+        };
+        press(SlintKey::Shift);
+        assert_eq!(enter(), "shift ");
+        // The release is lost: Enter stays Shift+Enter.
+        assert_eq!(enter(), "shift ");
+        // Ctrl+Enter is Ctrl+Shift+Enter, and Shift is still held after it.
+        press(SlintKey::Control);
+        assert_eq!(enter(), "shift ctrl");
+        release(SlintKey::Control);
+        assert_eq!(enter(), "shift ");
+        // A Shift press and release clears it.
+        press(SlintKey::Shift);
+        release(SlintKey::Shift);
+        assert_eq!(enter(), "");
     }
 }

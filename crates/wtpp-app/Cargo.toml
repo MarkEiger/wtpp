@@ -52,5 +52,9 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[dev-dependencies]
+# A window without a GPU, to test what Slint itself reports for keys.
+slint = { workspace = true, features = ["renderer-software"] }
+
 [build-dependencies]
 slint-build.workspace = true
