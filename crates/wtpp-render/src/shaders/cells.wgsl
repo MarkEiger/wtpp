@@ -38,14 +38,18 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Instance) -> VsOut {
     return out;
 }
 
+// Output is premultiplied (the pipeline blends with One, OneMinusSrcAlpha),
+// so a see-through frame ends up with correct colour and alpha.
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if in.kind == 0u {
-        return in.color;
+        return vec4<f32>(in.color.rgb * in.color.a, in.color.a);
     }
     let texel = textureSampleLevel(atlas_tex, atlas_sampler, in.uv, 0.0);
     if in.kind == 1u {
-        return vec4<f32>(in.color.rgb, in.color.a * texel.a);
+        let a = in.color.a * texel.a;
+        return vec4<f32>(in.color.rgb * a, a);
     }
-    return texel;
+    // Colour glyph bitmaps are read as straight alpha.
+    return vec4<f32>(texel.rgb * texel.a, texel.a);
 }

@@ -17,7 +17,7 @@ use wtpp_session::alacritty_terminal::Term;
 use wtpp_session::alacritty_terminal::event::EventListener;
 use wtpp_session::alacritty_terminal::term::cell::Flags;
 use wtpp_session::alacritty_terminal::index::Point;
-use wtpp_session::alacritty_terminal::vte::ansi::{CursorShape, Rgb};
+use wtpp_session::alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
 use atlas::{ATLAS_SIZE, Atlas};
 pub use cosmic_text::FontSystem;
@@ -120,6 +120,28 @@ pub struct Renderer {
     ligatures: bool,
     /// A glyph didn't fit: start the atlas over on the next frame.
     atlas_full: bool,
+    /// Turns the premultiplied drawing of a see-through frame into the
+    /// straight alpha Slint expects of a texture.
+    resolve_pipeline: wgpu::RenderPipeline,
+    resolve_layout: wgpu::BindGroupLayout,
+    /// Premultiplied drawing targets of see-through frames, by size (panes of
+    /// different sizes share a renderer).
+    scratch: HashMap<(u32, u32), (wgpu::Texture, wgpu::BindGroup)>,
+}
+
+/// Scratch textures kept before the cache starts over.
+const MAX_SCRATCH: usize = 8;
+
+/// Whether a cell's background gets its own quad. In a see-through frame
+/// only the default background is left out, so a colour the program chose
+/// still covers the image even when it equals the scheme's background (as
+/// in Windows Terminal); an opaque frame was already cleared to that colour.
+fn paints_background(cell_bg: Color, inverse: bool, is_block_cursor: bool, resolved: Rgb, theme_bg: Rgb, transparent: bool) -> bool {
+    if transparent {
+        inverse || is_block_cursor || !matches!(cell_bg, Color::Named(NamedColor::Background))
+    } else {
+        resolved != theme_bg
+    }
 }
 
 /// One glyph of a shaped run, positioned relative to the cell it starts in.
@@ -146,6 +168,9 @@ pub struct Frame<'a, T> {
     pub cursor_visible: bool,
     /// Extra highlighted ranges (find matches, hovered link).
     pub highlights: &'a [Highlight],
+    /// Cells with the default background are left see-through (the pane's
+    /// background colour/image, drawn by the UI, shows instead).
+    pub transparent: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -280,9 +305,53 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // The shader writes premultiplied colour, so a see-through
+                    // frame keeps correct alpha; over an opaque clear this is
+                    // the same as straight alpha blending.
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let resolve_shader = device.create_shader_module(wgpu::include_wgsl!("shaders/resolve.wgsl"));
+        let resolve_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wtpp resolve"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let resolve_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wtpp resolve"),
+            bind_group_layouts: &[Some(&resolve_layout)],
+            immediate_size: 0,
+        });
+        let resolve_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wtpp resolve"),
+            layout: Some(&resolve_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &resolve_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &resolve_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState { format: target_format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
             }),
             multiview_mask: None,
             cache: None,
@@ -309,6 +378,9 @@ impl Renderer {
             ligatures: font.ligatures,
             atlas_full: false,
             fonts,
+            resolve_pipeline,
+            resolve_layout,
+            scratch: HashMap::new(),
         };
         renderer.cell = renderer.measure_cell();
         renderer
@@ -502,34 +574,52 @@ impl Renderer {
 
         let bg = theme.background;
         let mut encoder = device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("wtpp cells"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg.r as f64 / 255.0,
-                            g: bg.g as f64 / 255.0,
-                            b: bg.b as f64 / 255.0,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
+        if frame.transparent {
+            // Draw premultiplied into a scratch texture, then write it out
+            // as straight alpha (how Slint reads the pane's texture).
+            if !self.scratch.contains_key(&(width, height)) && self.scratch.len() >= MAX_SCRATCH {
+                self.scratch.clear();
+            }
+            let layout = &self.resolve_layout;
+            let (scratch, resolve_group) = self.scratch.entry((width, height)).or_insert_with(|| {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("wtpp scratch"),
+                    size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&Default::default());
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("wtpp resolve"),
+                    layout,
+                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }],
+                });
+                (texture, group)
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.instances.slice(..));
-            pass.draw(0..4, 0..instances.len() as u32);
+            let scratch_view = scratch.create_view(&Default::default());
+            let resolve_group = resolve_group.clone();
+            self.draw_cells(&mut encoder, &scratch_view, wgpu::Color::TRANSPARENT, instances.len());
+            let mut pass = begin_pass(&mut encoder, "wtpp resolve", target, wgpu::Color::TRANSPARENT);
+            pass.set_pipeline(&self.resolve_pipeline);
+            pass.set_bind_group(0, &resolve_group, &[]);
+            pass.draw(0..3, 0..1);
+        } else {
+            let clear = wgpu::Color { r: bg.r as f64 / 255.0, g: bg.g as f64 / 255.0, b: bg.b as f64 / 255.0, a: 1.0 };
+            self.draw_cells(&mut encoder, target, clear, instances.len());
         }
         queue.submit([encoder.finish()]);
+    }
+
+    fn draw_cells(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clear: wgpu::Color, count: usize) {
+        let mut pass = begin_pass(encoder, "wtpp cells", target, clear);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.draw(0..4, 0..count as u32);
     }
 
     fn build_instances<T: EventListener>(&mut self, queue: &wgpu::Queue, frame: &Frame<'_, T>) -> Vec<Instance> {
@@ -576,12 +666,14 @@ impl Renderer {
             if cell.flags.contains(Flags::DIM) {
                 fg = theme::dim(fg);
             }
-            if block_cursor && indexed.point == cursor.point {
+            let is_block_cursor = block_cursor && indexed.point == cursor.point;
+            if is_block_cursor {
                 fg = theme.background;
                 bg = theme.cursor;
             }
 
-            if bg != theme.background {
+            let inverse = cell.flags.contains(Flags::INVERSE);
+            if paints_background(cell.bg, inverse, is_block_cursor, bg, theme.background, frame.transparent) {
                 backgrounds.push(Instance::solid(x, y, cw * cols, ch, theme::to_f32(bg, 1.0)));
             }
             if selection.is_some_and(|s| s.contains(indexed.point)) {
@@ -665,6 +757,27 @@ impl Renderer {
         backgrounds.extend(overlays);
         backgrounds
     }
+}
+
+fn begin_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    label: &str,
+    target: &wgpu::TextureView,
+    clear: wgpu::Color,
+) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
 }
 
 fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
@@ -761,4 +874,50 @@ fn pick_family(fonts: &FontSystem, preferred: &str) -> String {
         .find(|name| installed(name))
         .map(|s| s.to_string())
         .unwrap_or_else(|| "monospace".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BG: Rgb = Rgb { r: 12, g: 12, b: 12 };
+    const RED: Rgb = Rgb { r: 200, g: 0, b: 0 };
+
+    #[test]
+    fn default_background_is_left_out() {
+        let default = Color::Named(NamedColor::Background);
+        assert!(!paints_background(default, false, false, BG, BG, true));
+        assert!(!paints_background(default, false, false, BG, BG, false));
+    }
+
+    #[test]
+    fn explicit_background_covers_the_image() {
+        // The scheme's colour, chosen explicitly, still paints when see-through.
+        let same = Color::Spec(BG);
+        assert!(paints_background(same, false, false, BG, BG, true));
+        assert!(!paints_background(same, false, false, BG, BG, false));
+        assert!(paints_background(Color::Spec(RED), false, false, RED, BG, true));
+        assert!(paints_background(Color::Named(NamedColor::Red), false, false, RED, BG, false));
+    }
+
+    #[test]
+    fn shaders_are_valid() {
+        use wgpu::naga;
+        for src in [include_str!("shaders/cells.wgsl"), include_str!("shaders/resolve.wgsl")] {
+            let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(src)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+                .validate(&module)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn inverse_and_cursor_cells_paint() {
+        let default = Color::Named(NamedColor::Background);
+        assert!(paints_background(default, true, false, Rgb { r: 200, g: 200, b: 200 }, BG, true));
+        assert!(paints_background(default, false, true, RED, BG, true));
+        // Opaque mode keeps the colour comparison.
+        assert!(paints_background(default, false, true, RED, BG, false));
+        assert!(!paints_background(default, true, false, BG, BG, false));
+    }
 }
