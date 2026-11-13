@@ -478,7 +478,7 @@ mod tests {
         let shared = format!("ARGS -o ControlMaster=auto -o ControlPath={short}/wtpp-ssh/%C -o ControlPersist=10m");
         let mut shells: Vec<(Vec<String>, String)> = vec![(
             vec!["bash".into(), "--norc".into(), "--noprofile".into(), "-c".into()],
-            format!("eval \"$1\"; "),
+            "eval \"$1\"; ".to_string(),
         )];
         let zsh_rc = dir.join("wtpp-ssh.zsh");
         std::fs::write(&zsh_rc, ZSH_SSH).unwrap();

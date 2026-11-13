@@ -296,7 +296,7 @@ mod windows {
         let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
         // SAFETY: four FILETIMEs to fill.
         let ok = unsafe { GetProcessTimes(process.0, &mut created, &mut exited, &mut kernel, &mut user) };
-        (ok != 0).then(|| (created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64)
+        (ok != 0).then_some((created.dwHighDateTime as u64) << 32 | created.dwLowDateTime as u64)
     }
 
     fn image(pid: u32) -> Option<String> {

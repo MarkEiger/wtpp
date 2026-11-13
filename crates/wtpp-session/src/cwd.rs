@@ -341,7 +341,7 @@ pub(crate) mod windows {
             let string = self.read::<16>(address)?;
             let len = u16::from_le_bytes([string[0], string[1]]) as usize;
             let buffer = usize::from_le_bytes(string[8..16].try_into().ok()?);
-            if len == 0 || len % 2 != 0 {
+            if len == 0 || !len.is_multiple_of(2) {
                 return None;
             }
             let mut bytes = vec![0u8; len];
@@ -351,7 +351,7 @@ pub(crate) mod windows {
             if ok == 0 || read != len {
                 return None;
             }
-            let wide: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let wide: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
             String::from_utf16(&wide).ok()
         }
     }

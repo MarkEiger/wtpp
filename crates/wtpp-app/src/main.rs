@@ -578,6 +578,7 @@ fn watch_file(path: &std::path::Path, changed: impl Fn() + Send + Sync + 'static
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

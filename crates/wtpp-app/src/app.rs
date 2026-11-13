@@ -593,6 +593,7 @@ impl App {
 
     /// Start a pane: the profile's shell, or with `pipes`, a console Windows
     /// handed over (wt++ as the default terminal).
+    #[allow(clippy::too_many_arguments)]
     fn spawn_pane_on(
         &mut self,
         id: PaneId,

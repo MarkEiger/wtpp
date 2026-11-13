@@ -496,7 +496,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let run = |cwd: &std::path::Path, wtpp_cd: &str| {
             let out = std::process::Command::new("bash")
-                .args(["--norc", "--noprofile", "-c", &format!("eval \"$PROMPT_COMMAND\"; echo; echo \"pwd=$(pwd) cd=${{WTPP_CD-unset}}\"")])
+                .args(["--norc", "--noprofile", "-c", "eval \"$PROMPT_COMMAND\"; echo; echo \"pwd=$(pwd) cd=${WTPP_CD-unset}\""])
                 .current_dir(cwd)
                 .env("PROMPT_COMMAND", BASH_PROMPT_COMMAND)
                 .env("WTPP_CD", wtpp_cd)
