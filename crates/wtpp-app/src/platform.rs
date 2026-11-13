@@ -770,26 +770,81 @@ pub static DX12_VISUAL: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// Whether the window can show what's behind it where its content is
 /// see-through (`opacity`): the surface needs a non-opaque alpha mode, which
 /// wgpu's OpenGL backend never offers and X11 only has with a compositor.
-pub fn window_alpha_supported(window: &slint::Window, backend: slint::wgpu_30::wgpu::Backend) -> bool {
+/// Metal always offers one (wgpu's CAMetalLayer surfaces are post-multiplied
+/// capable); DX12 does with a DirectComposition swapchain; Vulkan depends on
+/// the driver and window system, so its surface is asked.
+pub fn window_alpha_supported(
+    window: &slint::Window,
+    instance: &slint::wgpu_30::wgpu::Instance,
+    device: &slint::wgpu_30::wgpu::Device,
+) -> bool {
     use slint::wgpu_30::wgpu::Backend;
-    let _ = window;
+    let backend = device.adapter_info().backend;
+    let _ = (window, instance);
     match backend {
         Backend::Dx12 => cfg!(windows) && DX12_VISUAL.load(std::sync::atomic::Ordering::Relaxed),
         Backend::Metal => true,
-        #[cfg(all(unix, not(target_os = "macos")))]
+        #[cfg(not(windows))]
         Backend::Vulkan => {
-            use slint::winit_030::WinitWindowAccessor;
-            use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            let x11 = window
-                .with_winit_window(|w| {
-                    w.window_handle().is_ok_and(|h| matches!(h.as_raw(), RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)))
-                })
-                .unwrap_or(false);
-            !x11 || x11_compositor_running()
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                use slint::winit_030::WinitWindowAccessor;
+                use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                let x11 = window
+                    .with_winit_window(|w| {
+                        w.window_handle().is_ok_and(|h| matches!(h.as_raw(), RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)))
+                    })
+                    .unwrap_or(false);
+                if x11 && !x11_compositor_running() {
+                    return false;
+                }
+            }
+            surface_alpha_modes(window, instance, device).is_some_and(|modes| translucent_alpha_mode(&modes))
         }
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
-        Backend::Vulkan => !cfg!(windows),
         _ => false,
+    }
+}
+
+/// Whether the surface can keep the scene's alpha: the modes Slint's
+/// renderer looks for, without which it leaves the surface opaque.
+#[cfg(not(windows))]
+fn translucent_alpha_mode(modes: &[slint::wgpu_30::wgpu::CompositeAlphaMode]) -> bool {
+    use slint::wgpu_30::wgpu::CompositeAlphaMode::{PostMultiplied, PreMultiplied};
+    modes.iter().any(|m| matches!(m, PreMultiplied | PostMultiplied))
+}
+
+/// The alpha modes the window's surface offers on `device`'s adapter, from a
+/// throwaway surface: Slint's renderer keeps its own to itself. `None` if
+/// that can't be found out.
+#[cfg(not(windows))]
+fn surface_alpha_modes(
+    window: &slint::Window,
+    instance: &slint::wgpu_30::wgpu::Instance,
+    device: &slint::wgpu_30::wgpu::Device,
+) -> Option<Vec<slint::wgpu_30::wgpu::CompositeAlphaMode>> {
+    use slint::wgpu_30::wgpu;
+    use slint::winit_030::WinitWindowAccessor;
+    let info = device.adapter_info();
+    let adapters = poll_now(instance.enumerate_adapters(wgpu::Backends::from(info.backend)))?;
+    let adapter = adapters.into_iter().find(|a| a.get_info() == info)?;
+    window
+        .with_winit_window(|w| {
+            // SAFETY: the window outlives the surface, dropped before returning.
+            let target = unsafe { wgpu::SurfaceTargetUnsafe::from_display_and_window(w, w) }.ok()?;
+            // SAFETY: as above.
+            let surface = unsafe { instance.create_surface_unsafe(target) }.ok()?;
+            Some(surface.get_capabilities(&adapter).alpha_modes)
+        })
+        .flatten()
+}
+
+/// A future that native wgpu completes at once (adapter enumeration).
+#[cfg(not(windows))]
+fn poll_now<T>(future: impl std::future::Future<Output = T>) -> Option<T> {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match std::pin::pin!(future).poll(&mut cx) {
+        std::task::Poll::Ready(value) => Some(value),
+        std::task::Poll::Pending => None,
     }
 }
 
@@ -897,4 +952,17 @@ fn command_output(command: &mut std::process::Command) -> Option<std::path::Path
     let out = command.stderr(std::process::Stdio::null()).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (out.status.success() && !text.is_empty()).then(|| std::path::PathBuf::from(text))
+}
+
+#[cfg(all(test, not(windows)))]
+mod alpha_tests {
+    use slint::wgpu_30::wgpu::CompositeAlphaMode::{Auto, Inherit, Opaque, PostMultiplied, PreMultiplied};
+
+    #[test]
+    fn only_premultiplied_or_postmultiplied_keep_alpha() {
+        assert!(!super::translucent_alpha_mode(&[]));
+        assert!(!super::translucent_alpha_mode(&[Opaque, Inherit, Auto]));
+        assert!(super::translucent_alpha_mode(&[Opaque, PreMultiplied]));
+        assert!(super::translucent_alpha_mode(&[Opaque, PostMultiplied]));
+    }
 }

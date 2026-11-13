@@ -11,8 +11,9 @@
   their own background colour still cover the image. Images are PNG, JPEG,
   BMP, GIF (first frame) or WebP; a changed file is picked up when you come
   back to the window. The window can't be see-through with OpenGL (as under
-  WSLg) or on X11 without a compositing window manager: there the background
-  stays opaque (images still work), and Settings says why. On Windows,
+  WSLg), on X11 without a compositing window manager, or where the graphics
+  driver offers no see-through surface: there the background stays opaque
+  (images still work), the log and Settings say why. On Windows,
   turning opacity on takes effect after restarting wt++.
 
 ## 1.4.0 — 2026-11-13

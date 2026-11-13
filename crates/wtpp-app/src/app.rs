@@ -395,9 +395,9 @@ impl App {
 
     // ---- startup ------------------------------------------------------------
 
-    pub fn on_gpu_ready(&mut self, device: wgpu::Device, queue: wgpu::Queue) {
+    pub fn on_gpu_ready(&mut self, instance: wgpu::Instance, device: wgpu::Device, queue: wgpu::Queue) {
         let backend = device.adapter_info().backend;
-        self.window_alpha = crate::platform::window_alpha_supported(self.ui().window(), backend);
+        self.window_alpha = crate::platform::window_alpha_supported(self.ui().window(), &instance, &device);
         self.gpu_backend = Some(backend);
         crate::background::set_max_dimension(device.limits().max_texture_dimension_2d);
         log_window_alpha(self.window_alpha, backend, self.settings.wants_transparency());
@@ -510,7 +510,7 @@ impl App {
                 pane.theme = theme_for(&self.settings, updated);
             }
         }
-        crate::background::refresh(&self.background_images());
+        crate::background::refresh(self.id, self.background_images());
         self.icon_cache.clear();
         for pane in self.panes.values().map(|p| p.profile.clone()).collect::<Vec<_>>() {
             self.ensure_icon(&pane);
@@ -1168,7 +1168,7 @@ impl App {
         self.ui().set_window_active(active);
         // Coming back is when an edited image file gets noticed.
         if active {
-            crate::background::refresh(&self.background_images());
+            crate::background::refresh(self.id, self.background_images());
         }
         if active && let Some(tab) = self.tabs.get_mut(self.active) {
             tab.bell = false;
@@ -1499,7 +1499,7 @@ impl App {
             let view = texture.create_view(&Default::default());
             let has_focus = id == focused && self.window_active;
             let alpha = if self.window_alpha { pane.profile.opacity } else { 1.0 };
-            let bg_image = pane.profile.background_image.as_deref().and_then(crate::background::image_for);
+            let bg_image = pane.profile.background_image.as_deref().and_then(|raw| crate::background::image_for(self.id, raw));
             let transparent = alpha < 1.0 || bg_image.is_some();
             let (history, offset, bg) = {
                 let term = pane.session.term().lock();
@@ -2383,7 +2383,7 @@ pub(crate) fn opacity_unavailable_reason(backend: Option<wgpu::Backend>) -> &'st
         // Without a DirectComposition swapchain, chosen at startup.
         Some(wgpu::Backend::Dx12) => "Restart wt++ for it to take effect.",
         Some(wgpu::Backend::Vulkan) if !cfg!(windows) => {
-            "It needs a compositing window manager, so the background stays opaque."
+            "The window system offers no see-through window here (X11 needs a compositing window manager), so the background stays opaque."
         }
         _ => "It isn't supported here, so the background stays opaque.",
     }

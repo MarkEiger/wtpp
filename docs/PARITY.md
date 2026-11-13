@@ -48,7 +48,7 @@
 - [x] Find: highlight all matches, case-sensitive and regex toggles
 - [x] Underline links on Ctrl+hover, hand cursor
 - [x] Terminal right-click menu option (`experimental.rightClickContextMenu`)
-- [~] Background opacity and background image (`opacity`, `backgroundImage` incl. `desktopWallpaper`, image opacity, stretch mode, alignment) — done; acrylic open. Not see-through with OpenGL (WSLg) or X11 without a compositor; on Windows, turning opacity on needs a restart (DirectComposition swapchain)
+- [~] Background opacity and background image (`opacity`, `backgroundImage` incl. `desktopWallpaper`, image opacity, stretch mode, alignment) — done; acrylic open. Not see-through with OpenGL (WSLg), X11 without a compositor, or a Vulkan surface without a translucent alpha mode; on Windows, turning opacity on needs a restart (DirectComposition swapchain)
 - [x] Font weight, line height, intense text style, ligatures (+ toggle); Cascadia Mono/Code bundled like WT
 - [x] OSC 52 clipboard writes (setting-gated); visual bell
 - [x] Mark mode / keyboard selection (Ctrl+Shift+M), select all (Ctrl+Shift+A)

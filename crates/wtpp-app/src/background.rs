@@ -25,6 +25,9 @@ struct Entry {
 thread_local! {
     /// By the setting's value as written (UI thread only).
     static CACHE: RefCell<HashMap<String, Entry>> = RefCell::new(HashMap::new());
+    /// The values each window uses: an image is kept while any window uses
+    /// it (windows share the cache, but each knows only its own panes).
+    static USERS: RefCell<HashMap<crate::WindowId, HashSet<String>>> = RefCell::new(HashMap::new());
     /// Images larger than the GPU's texture limit are scaled down to it.
     static MAX_DIM: Cell<u32> = const { Cell::new(8192) };
 }
@@ -36,7 +39,14 @@ pub fn set_max_dimension(max: u32) {
 
 /// The decoded image for a `backgroundImage` value; `None` while it loads,
 /// or if it can't be read. Starts loading on first use.
-pub fn image_for(raw: &str) -> Option<slint::Image> {
+pub fn image_for(window: crate::WindowId, raw: &str) -> Option<slint::Image> {
+    USERS.with(|u| {
+        let mut users = u.borrow_mut();
+        let set = users.entry(window).or_default();
+        if !set.contains(raw) {
+            set.insert(raw.to_string());
+        }
+    });
     let cached = CACHE.with(|c| c.borrow().get(raw).map(|e| e.image.clone()));
     if let Some(image) = cached {
         return image;
@@ -52,12 +62,17 @@ pub fn image_for(raw: &str) -> Option<slint::Image> {
     None
 }
 
-/// Forget images no profile uses any more, and decode again those whose
-/// file (or, for `desktopWallpaper`, whose path) changed.
-pub fn refresh(in_use: &HashSet<String>) {
+/// Note the images `window` uses now, forget those no window uses any more,
+/// and decode again those whose file (or, for `desktopWallpaper`, whose
+/// path) changed.
+pub fn refresh(window: crate::WindowId, in_use: HashSet<String>) {
+    USERS.with(|u| u.borrow_mut().insert(window, in_use));
     let reload: Vec<(String, PathBuf)> = CACHE.with(|c| {
         let mut cache = c.borrow_mut();
-        cache.retain(|raw, _| in_use.contains(raw));
+        USERS.with(|u| {
+            let users = u.borrow();
+            cache.retain(|raw, _| users.values().any(|set| set.contains(raw)));
+        });
         cache
             .iter_mut()
             .filter(|(_, e)| !e.loading)
@@ -79,6 +94,12 @@ pub fn refresh(in_use: &HashSet<String>) {
     for (raw, path) in reload {
         load(raw, path);
     }
+}
+
+/// A closed window uses no images; they go at the next refresh unless
+/// another window uses them.
+pub fn forget_window(window: crate::WindowId) {
+    USERS.with(|u| u.borrow_mut().remove(&window));
 }
 
 /// The cached decode no longer matches the file.
@@ -198,6 +219,39 @@ mod tests {
 
     fn resolve(raw: &str, windows: bool) -> Option<PathBuf> {
         resolve_path_with(raw, env, || Some(PathBuf::from("C:/wall.jpg")), windows)
+    }
+
+    /// A pending entry: `refresh` leaves it alone apart from pruning.
+    fn cache_loading(raw: &str) {
+        let entry = Entry { path: None, stamp: None, image: None, loading: true };
+        CACHE.with(|c| c.borrow_mut().insert(raw.to_string(), entry));
+    }
+
+    fn cached(raw: &str) -> bool {
+        CACHE.with(|c| c.borrow().contains_key(raw))
+    }
+
+    #[test]
+    fn keeps_images_any_window_uses() {
+        let set = |raw: &str| HashSet::from([raw.to_string()]);
+        cache_loading("a.png");
+        refresh(1, set("a.png"));
+        cache_loading("b.png");
+        refresh(2, set("b.png"));
+        // Window 1 refreshing mustn't drop window 2's image.
+        refresh(1, set("a.png"));
+        assert!(cached("a.png") && cached("b.png"));
+        forget_window(2);
+        refresh(1, set("a.png"));
+        assert!(cached("a.png") && !cached("b.png"));
+    }
+
+    #[test]
+    fn drawing_an_image_counts_as_using_it() {
+        cache_loading("c.png");
+        assert!(image_for(3, "c.png").is_none());
+        refresh(4, HashSet::new());
+        assert!(cached("c.png"));
     }
 
     #[test]

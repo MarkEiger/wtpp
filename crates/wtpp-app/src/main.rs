@@ -195,6 +195,7 @@ pub fn close_window(id: WindowId) {
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         let Some(entry) = WINDOWS.with(|w| w.borrow_mut().get_mut(id).and_then(Option::take)) else { return };
         FOCUS_ORDER.with(|f| f.borrow_mut().retain(|&w| w != id));
+        background::forget_window(id);
         let last = window_ids().is_empty();
         if last && entry.app.try_borrow().is_ok_and(|app| app.settings.remember_window_bounds) {
             window_state::save(entry.ui.window());
@@ -1014,9 +1015,10 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
             })
             .ok();
         }
-        if let (slint::RenderingState::RenderingSetup, slint::GraphicsAPI::WGPU30 { device, queue, .. }) = (state, api)
+        if let (slint::RenderingState::RenderingSetup, slint::GraphicsAPI::WGPU30 { instance, device, queue, .. }) =
+            (state, api)
         {
-            let (device, queue) = (device.clone(), queue.clone());
+            let (instance, device, queue) = (instance.clone(), device.clone(), queue.clone());
             // Defer: the notifier runs mid-render, where touching UI
             // properties (or resizing the frame) isn't allowed.
             slint::invoke_from_event_loop(move || {
@@ -1027,7 +1029,7 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
                     if custom_titlebar {
                         app.install_titlebar();
                     }
-                    app.on_gpu_ready(device, queue);
+                    app.on_gpu_ready(instance, device, queue);
                 });
             })
             .ok();
