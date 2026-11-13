@@ -151,6 +151,96 @@ impl IntenseTextStyle {
     }
 }
 
+/// How a background image is scaled to the pane (WT's `backgroundImageStretchMode`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BackgroundImageStretchMode {
+    /// Natural size.
+    None,
+    /// Stretched to the pane, ignoring the aspect ratio.
+    Fill,
+    /// As large as fits, keeping the aspect ratio.
+    Uniform,
+    /// Covers the pane, keeping the aspect ratio (cropped).
+    #[default]
+    UniformToFill,
+}
+
+impl BackgroundImageStretchMode {
+    pub const ALL: [Self; 4] = [Self::None, Self::Fill, Self::Uniform, Self::UniformToFill];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Fill => "Fill",
+            Self::Uniform => "Uniform",
+            Self::UniformToFill => "Uniform to fill",
+        }
+    }
+}
+
+/// Where a background image sits in the pane (WT's `backgroundImageAlignment`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BackgroundImageAlignment {
+    #[default]
+    Center,
+    Left,
+    Top,
+    Right,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl BackgroundImageAlignment {
+    pub const ALL: [Self; 9] = [
+        Self::Center,
+        Self::Left,
+        Self::Top,
+        Self::Right,
+        Self::Bottom,
+        Self::TopLeft,
+        Self::TopRight,
+        Self::BottomLeft,
+        Self::BottomRight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Center => "Center",
+            Self::Left => "Left",
+            Self::Top => "Top",
+            Self::Right => "Right",
+            Self::Bottom => "Bottom",
+            Self::TopLeft => "Top left",
+            Self::TopRight => "Top right",
+            Self::BottomLeft => "Bottom left",
+            Self::BottomRight => "Bottom right",
+        }
+    }
+
+    /// -1 left, 0 centre, 1 right.
+    pub fn horizontal(self) -> i8 {
+        match self {
+            Self::Left | Self::TopLeft | Self::BottomLeft => -1,
+            Self::Right | Self::TopRight | Self::BottomRight => 1,
+            Self::Center | Self::Top | Self::Bottom => 0,
+        }
+    }
+
+    /// -1 top, 0 centre, 1 bottom.
+    pub fn vertical(self) -> i8 {
+        match self {
+            Self::Top | Self::TopLeft | Self::TopRight => -1,
+            Self::Bottom | Self::BottomLeft | Self::BottomRight => 1,
+            Self::Center | Self::Left | Self::Right => 0,
+        }
+    }
+}
+
 /// How keys are encoded for this profile's shell.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -304,6 +394,19 @@ pub struct ProfileSettings {
     pub bell_style: Option<BellStyle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub intense_text_style: Option<IntenseTextStyle>,
+    /// Background colour opacity, 0–100 (WT writes an integer).
+    #[serde(skip_serializing_if = "Option::is_none", with = "opt_number", default)]
+    pub opacity: Option<f32>,
+    /// Image file drawn behind the text, or "desktopWallpaper".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_image: Option<String>,
+    /// 0.0–1.0.
+    #[serde(skip_serializing_if = "Option::is_none", with = "opt_number", default)]
+    pub background_image_opacity: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_image_stretch_mode: Option<BackgroundImageStretchMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub background_image_alignment: Option<BackgroundImageAlignment>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -432,6 +535,31 @@ mod opt_number_string {
             Value::String(s) => s.trim().parse().ok(),
             _ => None,
         })
+    }
+}
+
+/// `Option<f32>` stored as a JSON number (an integer when whole, as WT
+/// writes `opacity`); numeric strings are accepted when reading.
+mod opt_number {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use serde_json::Value;
+
+    pub fn serialize<S: Serializer>(v: &Option<f32>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) if v.fract() == 0.0 && v.abs() < 1e9 => s.serialize_i64(*v as i64),
+            // Through f64 of the shortest f32 text, so 0.3 stays 0.3, not 0.30000001.
+            Some(v) => s.serialize_f64(v.to_string().parse().unwrap_or(*v as f64)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f32>, D::Error> {
+        let v: Option<f32> = match Value::deserialize(d)? {
+            Value::Number(n) => n.as_f64().map(|v| v as f32),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        };
+        Ok(v.filter(|v| v.is_finite()))
     }
 }
 
@@ -605,6 +733,13 @@ pub struct ResolvedProfile {
     pub cell_height: f32,
     /// False when `font.features` turns off `calt` or `liga`.
     pub ligatures: bool,
+    /// Background colour alpha, 0.0–1.0 (WT's `opacity` / 100).
+    pub opacity: f32,
+    /// As written (a path, possibly with variables, or "desktopWallpaper").
+    pub background_image: Option<String>,
+    pub background_image_opacity: f32,
+    pub background_image_stretch_mode: BackgroundImageStretchMode,
+    pub background_image_alignment: BackgroundImageAlignment,
 }
 
 /// A shell found on this machine.
@@ -908,8 +1043,24 @@ impl Settings {
             font_weight: p.font.as_ref().and_then(|f| f.weight).or(d.font.as_ref().and_then(|f| f.weight)).map_or(400, |w| w.0),
             cell_height: p.font.as_ref().and_then(|f| f.cell_height).or(d.font.as_ref().and_then(|f| f.cell_height)).unwrap_or(DEFAULT_CELL_HEIGHT),
             ligatures: p.font.as_ref().and_then(FontSettings::ligatures).or(d.font.as_ref().and_then(FontSettings::ligatures)).unwrap_or(true),
+            opacity: p.opacity.or(d.opacity).map_or(1.0, |o| o.clamp(0.0, 100.0) / 100.0),
+            background_image: p
+                .background_image
+                .as_ref()
+                .or(d.background_image.as_ref())
+                .map(|i| i.trim().to_string())
+                .filter(|i| !i.is_empty()),
+            background_image_opacity: p.background_image_opacity.or(d.background_image_opacity).map_or(1.0, |o| o.clamp(0.0, 1.0)),
+            background_image_stretch_mode: p.background_image_stretch_mode.or(d.background_image_stretch_mode).unwrap_or_default(),
+            background_image_alignment: p.background_image_alignment.or(d.background_image_alignment).unwrap_or_default(),
             name,
         }
+    }
+
+    /// Whether any profile (or the defaults) asks for a see-through
+    /// background, which on some platforms must be decided at startup.
+    pub fn wants_transparency(&self) -> bool {
+        self.resolve(&self.profiles.defaults).opacity < 1.0 || self.profiles.list.iter().any(|p| self.resolve(p).opacity < 1.0)
     }
 
     /// Profiles shown in the new-tab menu, in order. Never empty: with
@@ -2021,5 +2172,109 @@ mod tests {
         assert_eq!(guid_for("bash"), guid_for("bash"));
         assert_ne!(guid_for("bash"), guid_for("zsh"));
         assert_eq!(guid_for("bash").len(), 38);
+    }
+
+    fn profile(s: &Settings, i: usize) -> ResolvedProfile {
+        s.resolve(&s.profiles.list[i])
+    }
+
+    #[test]
+    fn background_settings_parse_and_resolve() {
+        let s = Settings::parse(
+            r#"{ "profiles": { "list": [ { "name": "A", "opacity": 75, "backgroundImage": " C:/pics/cat.png ",
+                "backgroundImageOpacity": 0.4, "backgroundImageStretchMode": "fill",
+                "backgroundImageAlignment": "bottomRight" } ] } }"#,
+        )
+        .unwrap();
+        let p = profile(&s, 0);
+        assert_eq!(p.opacity, 0.75);
+        assert_eq!(p.background_image.as_deref(), Some("C:/pics/cat.png"));
+        assert_eq!(p.background_image_opacity, 0.4);
+        assert_eq!(p.background_image_stretch_mode, BackgroundImageStretchMode::Fill);
+        assert_eq!(p.background_image_alignment, BackgroundImageAlignment::BottomRight);
+    }
+
+    #[test]
+    fn background_settings_defaults_and_inheritance() {
+        let s = Settings::parse(
+            r#"{ "profiles": { "defaults": { "opacity": 50, "backgroundImage": "desktopWallpaper",
+                "backgroundImageOpacity": 0.3 },
+                "list": [ { "name": "A" }, { "name": "B", "opacity": 90, "backgroundImage": "" } ] } }"#,
+        )
+        .unwrap();
+        let a = profile(&s, 0);
+        assert_eq!(a.opacity, 0.5);
+        assert_eq!(a.background_image.as_deref(), Some("desktopWallpaper"));
+        assert_eq!(a.background_image_opacity, 0.3);
+        let b = profile(&s, 1);
+        assert_eq!(b.opacity, 0.9);
+        // An empty path in the profile turns off the inherited image.
+        assert_eq!(b.background_image, None);
+
+        let plain = Settings::parse(r#"{ "profiles": { "list": [ { "name": "A" } ] } }"#).unwrap();
+        let p = profile(&plain, 0);
+        assert_eq!(p.opacity, 1.0);
+        assert_eq!(p.background_image, None);
+        assert_eq!(p.background_image_opacity, 1.0);
+        assert_eq!(p.background_image_stretch_mode, BackgroundImageStretchMode::UniformToFill);
+        assert_eq!(p.background_image_alignment, BackgroundImageAlignment::Center);
+        assert!(!plain.wants_transparency());
+        assert!(s.wants_transparency());
+        let only_one = Settings::parse(r#"{ "profiles": { "list": [ { "name": "A" }, { "name": "B", "opacity": 99 } ] } }"#).unwrap();
+        assert!(only_one.wants_transparency());
+    }
+
+    #[test]
+    fn background_settings_clamp() {
+        let s = Settings::parse(
+            r#"{ "profiles": { "list": [ { "name": "A", "opacity": 150, "backgroundImageOpacity": 2.0 },
+                { "name": "B", "opacity": -5, "backgroundImageOpacity": "-1" } ] } }"#,
+        )
+        .unwrap();
+        assert_eq!(profile(&s, 0).opacity, 1.0);
+        assert_eq!(profile(&s, 0).background_image_opacity, 1.0);
+        assert_eq!(profile(&s, 1).opacity, 0.0);
+        assert_eq!(profile(&s, 1).background_image_opacity, 0.0);
+    }
+
+    #[test]
+    fn background_settings_round_trip() {
+        let mut s = Settings::default();
+        s.profiles.list.push(ProfileSettings {
+            name: Some("A".into()),
+            opacity: Some(60.0),
+            background_image: Some("~/bg.png".into()),
+            background_image_opacity: Some(0.3),
+            background_image_stretch_mode: Some(BackgroundImageStretchMode::None),
+            background_image_alignment: Some(BackgroundImageAlignment::TopLeft),
+            ..Default::default()
+        });
+        let json = s.to_json();
+        assert!(json.contains("\"opacity\": 60,"), "{json}");
+        assert!(json.contains("\"backgroundImageOpacity\": 0.3,"), "{json}");
+        assert!(json.contains("\"backgroundImageStretchMode\": \"none\""), "{json}");
+        assert!(json.contains("\"backgroundImageAlignment\": \"topLeft\""), "{json}");
+        let back = Settings::parse(&json).unwrap();
+        assert_eq!(back.profiles.list[0], s.profiles.list[0]);
+    }
+
+    #[test]
+    fn background_alignment_axes() {
+        use BackgroundImageAlignment as A;
+        let expect = [
+            (A::Center, 0, 0),
+            (A::Left, -1, 0),
+            (A::Top, 0, -1),
+            (A::Right, 1, 0),
+            (A::Bottom, 0, 1),
+            (A::TopLeft, -1, -1),
+            (A::TopRight, 1, -1),
+            (A::BottomLeft, -1, 1),
+            (A::BottomRight, 1, 1),
+        ];
+        assert_eq!(expect.len(), A::ALL.len());
+        for (a, h, v) in expect {
+            assert_eq!((a.horizontal(), a.vertical()), (h, v), "{a:?}");
+        }
     }
 }

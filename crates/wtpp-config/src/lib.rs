@@ -11,4 +11,4 @@ pub mod settings;
 pub use actions::{Action, Axis, Chord, Direction};
 pub use keymap::{Binding, Keymap};
 pub use schemes::{COLOR_NAMES, Color, Scheme};
-pub use settings::{AppTheme, TabWidthMode, BellStyle, GraphicsApi, CloseOnExit, CursorShape, IntenseTextStyle, KeyEncoding, LaunchMode, ResolvedProfile, Settings};
+pub use settings::{AppTheme, BackgroundImageAlignment, BackgroundImageStretchMode, TabWidthMode, BellStyle, GraphicsApi, CloseOnExit, CursorShape, IntenseTextStyle, KeyEncoding, LaunchMode, ResolvedProfile, Settings};
