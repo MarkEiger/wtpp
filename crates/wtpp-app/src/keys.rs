@@ -58,6 +58,25 @@ pub fn from_slint(text: &str, mut mods: Mods) -> Option<(Key, Mods)> {
     Some((key, mods))
 }
 
+/// The modifiers to act on: Slint's, less any the OS says are up.
+///
+/// Slint tracks modifiers from its own key events and never re-syncs them,
+/// so one lost Shift release left every later Enter a Shift+Enter: a new
+/// line in Claude Code and PSReadLine until Ctrl+Enter. winit's state
+/// (`os`) comes from the OS on every key. This only ever clears a modifier:
+/// Slint drops Ctrl+Alt for AltGr characters, and adding them back would
+/// turn AltGr typing into shortcuts. `None` (no OS state seen yet) trusts
+/// Slint.
+pub fn reconcile(reported: Mods, os: Option<Mods>) -> Mods {
+    let Some(os) = os else { return reported };
+    Mods {
+        shift: reported.shift && os.shift,
+        alt: reported.alt && os.alt,
+        ctrl: reported.ctrl && os.ctrl,
+        meta: reported.meta && os.meta,
+    }
+}
+
 fn function_key(c: char) -> Option<u8> {
     let f1 = char::from(SlintKey::F1) as u32;
     let n = (c as u32).checked_sub(f1)?;
@@ -95,5 +114,33 @@ mod tests {
     #[test]
     fn ctrl_letters() {
         assert_eq!(from_slint("c", Mods::CTRL), Some((Key::Char('c'), Mods::CTRL)));
+    }
+
+    #[test]
+    fn reconcile_clears_what_the_os_says_is_up() {
+        assert_eq!(reconcile(Mods::SHIFT, Some(Mods::NONE)), Mods::NONE);
+        assert_eq!(reconcile(Mods::SHIFT, Some(Mods::SHIFT)), Mods::SHIFT);
+        let ctrl_shift = Mods { ctrl: true, shift: true, ..Mods::NONE };
+        assert_eq!(reconcile(ctrl_shift, Some(Mods::CTRL)), Mods::CTRL);
+        assert_eq!(reconcile(Mods::SHIFT, None), Mods::SHIFT);
+    }
+
+    #[test]
+    fn reconcile_never_adds_altgr_back() {
+        let ctrl_alt = Mods { ctrl: true, alt: true, ..Mods::NONE };
+        assert_eq!(reconcile(Mods::NONE, Some(ctrl_alt)), Mods::NONE);
+    }
+
+    /// A stale Shift from Slint made Enter a new line; with the OS's state
+    /// it submits again.
+    #[test]
+    fn enter_after_a_lost_shift_release_submits() {
+        use wtpp_input::{EncodeOptions, KeyStyle, encode};
+        let (key, mods) = from_slint(&key(SlintKey::Return), reconcile(Mods::SHIFT, Some(Mods::NONE))).unwrap();
+        assert_eq!((key, mods), (Key::Enter, Mods::NONE));
+        assert_eq!(encode(key, mods, &EncodeOptions::default()), Some(b"\r".to_vec()));
+        let windows = EncodeOptions { style: KeyStyle::Windows, win32_input: true, ..EncodeOptions::default() };
+        assert_eq!(encode(key, mods, &windows), encode(Key::Enter, Mods::NONE, &windows));
+        assert_ne!(encode(key, mods, &windows), encode(Key::Enter, Mods::SHIFT, &windows));
     }
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- After a Shift+Enter, Enter could keep adding lines (in Claude Code,
+  PowerShell) until Ctrl+Enter, as if Shift were still held. wt++ now goes
+  by the keyboard's real state, so Enter submits again.
+
 ## 1.4.0 — 2026-11-13
 
 - Linux and macOS: a profile's command line is read like a shell does (single

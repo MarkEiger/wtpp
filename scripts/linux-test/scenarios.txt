@@ -16,3 +16,4 @@ tearoff-merge: keys:ctrl+shift+t|sleep:900|drag:340,22,340,420|sleep:800|windows
 tearoff-plus: keys:ctrl+shift+t|sleep:900|drag:340,22,340,420|sleep:800|windows|plusnew|sleep:800|shot:after
 default-term: keys:ctrl+comma|sleep:1200|click:968,150|sleep:800|shot:made
 default-term-restore: keys:ctrl+comma|sleep:1200|shot:before|click:968,150|sleep:800|shot:restored
+shift-enter-then-enter: type:echo one|keys:shift+Return|keys:Return|sleep:400|type:echo two|keys:Return|sleep:400|shot:submitted

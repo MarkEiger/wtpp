@@ -38,6 +38,8 @@ pub type WindowId = usize;
 struct WindowEntry {
     ui: MainWindow,
     app: RefCell<App>,
+    /// The modifiers the OS says are held, from winit (see `key_mods`).
+    os_mods: Cell<Option<Mods>>,
 }
 
 thread_local! {
@@ -651,6 +653,21 @@ mod tests {
     }
 }
 
+/// A key event's modifiers as Slint reports them, made right: on macOS
+/// Slint reports ⌘ as "control" and Ctrl as "meta" (like Qt), so swap them
+/// back (our `ctrl` is always the Ctrl key, `meta` is ⌘ or the Windows key);
+/// then drop any the OS says are up (see `keys::reconcile`).
+fn key_mods(id: WindowId, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Mods {
+    let (ctrl, meta) = if cfg!(target_os = "macos") { (meta, ctrl) } else { (ctrl, meta) };
+    let reported = Mods { shift, alt, ctrl, meta };
+    let os = entry(id).and_then(|e| e.os_mods.get());
+    let mods = keys::reconcile(reported, os);
+    if mods != reported {
+        log::info!("Slint reported {reported:?} held; the OS says {os:?}");
+    }
+    mods
+}
+
 fn wire_settings(ui: &MainWindow, id: WindowId) {
     let data = ui.global::<SettingsData>();
     data.on_set_value(move |key, value| {
@@ -666,9 +683,8 @@ fn wire_settings(ui: &MainWindow, id: WindowId) {
         with_window(id, |app| app.settings_open_json());
     });
     data.on_shortcut(move |text, ctrl, alt, shift, meta| {
-        // Like on_key_pressed: on macOS, Slint's "control" is ⌘.
-        let (ctrl, meta) = if cfg!(target_os = "macos") { (meta, ctrl) } else { (ctrl, meta) };
-        with_window(id, |app| app.on_shortcut_key(&text, Mods { shift, alt, ctrl, meta })).unwrap_or(false)
+        let mods = key_mods(id, ctrl, alt, shift, meta);
+        with_window(id, |app| app.on_shortcut_key(&text, mods)).unwrap_or(false)
     });
     data.on_set_default_term(move |make_default| {
         with_window(id, |app| app.settings_set_default_term(make_default));
@@ -967,7 +983,7 @@ fn create_window(
     app.startup_args = args;
     app.launch_size = Some(launch_size);
     app.adopt = moved;
-    let entry = Rc::new(WindowEntry { ui: ui.clone_strong(), app: RefCell::new(app) });
+    let entry = Rc::new(WindowEntry { ui: ui.clone_strong(), app: RefCell::new(app), os_mods: Cell::new(None) });
     WINDOWS.with(|w| w.borrow_mut().push(Some(entry)));
     if let Some((fonts, families)) = FONTS.with(|f| f.borrow().clone()) {
         with_window(id, |app| app.on_assets_loaded(fonts, families));
@@ -1052,11 +1068,8 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         with_window(id, |app| app.relayout());
     });
     ui.on_key_pressed(move |text, ctrl, alt, shift, meta| {
-        // Slint reports ⌘ as "control" and Ctrl as "meta" on macOS (like
-        // Qt). The terminal needs the real Ctrl, so swap them back: our
-        // `ctrl` is always the Ctrl key, `meta` is ⌘ (or the Windows key).
-        let (ctrl, meta) = if cfg!(target_os = "macos") { (meta, ctrl) } else { (ctrl, meta) };
-        with_window(id, |app| app.on_key(&text, Mods { shift, alt, ctrl, meta })).unwrap_or(false)
+        let mods = key_mods(id, ctrl, alt, shift, meta);
+        with_window(id, |app| app.on_key(&text, mods)).unwrap_or(false)
     });
     ui.on_select_tab(move |i| {
         with_window(id, |app| app.select_tab(i as usize));
@@ -1074,8 +1087,8 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         with_window(id, |app| app.on_dialog_result(ok));
     });
     ui.on_dialog_key(move |text, ctrl, alt, shift, meta| {
-        let (ctrl, meta) = if cfg!(target_os = "macos") { (meta, ctrl) } else { (ctrl, meta) };
-        with_window(id, |app| app.on_dialog_key(&text, Mods { shift, alt, ctrl, meta }));
+        let mods = key_mods(id, ctrl, alt, shift, meta);
+        with_window(id, |app| app.on_dialog_key(&text, mods));
     });
     ui.on_minimize_window(move || {
         with_window(id, |app| app.ui().window().set_minimized(true));
@@ -1155,8 +1168,22 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
         let dropped: Rc<RefCell<Vec<std::path::PathBuf>>> = Rc::default();
         ui.window().on_winit_window_event(move |window, event| {
             match event {
+                // The OS's own modifier state, sent (on Windows) before the
+                // key event of the same message: see `key_mods`.
+                WindowEvent::ModifiersChanged(m) => {
+                    let m = m.state();
+                    let mods =
+                        Mods { shift: m.shift_key(), alt: m.alt_key(), ctrl: m.control_key(), meta: m.super_key() };
+                    if let Some(e) = entry(id) {
+                        e.os_mods.set(Some(mods));
+                    }
+                }
                 WindowEvent::Focused(active) => {
                     let active = *active;
+                    // Nothing stays held for a window that isn't focused.
+                    if !active && let Some(e) = entry(id) {
+                        e.os_mods.set(Some(Mods::NONE));
+                    }
                     slint::invoke_from_event_loop(move || {
                         if active {
                             window_focused(id);
