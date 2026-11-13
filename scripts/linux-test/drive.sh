@@ -10,6 +10,7 @@
 #   type:TEXT           shot:NAME               (every wt++ window)
 #   click:X,Y           drag:X1,Y1,X2,Y2        sdrag:X1,Y1,X2,Y2 (screen)
 #   hdrag:X,Y           (drag from where the pointer is now)
+#   wheel:X,Y,CLICKS    (mouse wheel at X,Y; positive = up)
 #   windows             launch (start wt++ again: should open a window here)
 #   clip                (print the clipboard)   size:W,H
 #   plusnew             (click + in the other window, e.g. a torn-off one)
@@ -61,6 +62,9 @@ for s in "${list[@]}"; do
         type:*) xdotool type --delay 30 "${s#type:}"; sleep 0.3;;
         click:*) IFS=, read -r x y <<< "${s#click:}"; read -r ox oy <<< "$(origin)"
                  xdotool mousemove $((ox + x)) $((oy + y)) click 1; sleep 0.6;;
+        wheel:*) IFS=, read -r x y n <<< "${s#wheel:}"; read -r ox oy <<< "$(origin)"
+                 button=4; if [ "$n" -lt 0 ]; then button=5; n=$((-n)); fi
+                 xdotool mousemove $((ox + x)) $((oy + y)) click --repeat "$n" --delay 30 $button; sleep 0.5;;
         drag:*) IFS=, read -r x1 y1 x2 y2 <<< "${s#drag:}"; read -r ox oy <<< "$(origin)"
                 pointer_drag $((ox + x1)) $((oy + y1)) $((ox + x2)) $((oy + y2));;
         sdrag:*) IFS=, read -r x1 y1 x2 y2 <<< "${s#sdrag:}"; pointer_drag "$x1" "$y1" "$x2" "$y2";;

@@ -48,7 +48,7 @@
 - [x] Find: highlight all matches, case-sensitive and regex toggles
 - [x] Underline links on Ctrl+hover, hand cursor
 - [x] Terminal right-click menu option (`experimental.rightClickContextMenu`)
-- [ ] Background opacity and acrylic; background image — **blocked**: Slint's wgpu surface is opaque (needs alpha compositing / DirectComposition support in the vendored renderer)
+- [~] Background opacity and background image (`opacity`, `backgroundImage` incl. `desktopWallpaper`, image opacity, stretch mode, alignment) — done; acrylic open. Not see-through with OpenGL (WSLg) or X11 without a compositor; on Windows, turning opacity on needs a restart (DirectComposition swapchain)
 - [x] Font weight, line height, intense text style, ligatures (+ toggle); Cascadia Mono/Code bundled like WT
 - [x] OSC 52 clipboard writes (setting-gated); visual bell
 - [x] Mark mode / keyboard selection (Ctrl+Shift+M), select all (Ctrl+Shift+A)
@@ -66,7 +66,7 @@
 - [x] settings.json in WT format, live reload, Open JSON, import from WT
 - [x] Profiles: name, command line, folder, hidden, scheme, font, size, cursor, padding, history, key encoding
 - [x] Profile icon (dropdown + tab): program icons, image files, emoji
-- [~] Profile: tab title, suppress app title, environment, bell style, close on exit — done; opacity open
+- [x] Profile: tab title, suppress app title, environment, bell style, close on exit, opacity, background image
 - [x] Appearance: theme (dark/light/system), tab width mode (equal/title/compact), always show tabs
 - [x] Rendering page (graphics API incl. software rendering)
 

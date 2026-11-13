@@ -5,6 +5,7 @@ tabs: keys:ctrl+shift+t|sleep:800|keys:ctrl+shift+t|sleep:800|shot:three|keys:ct
 split: keys:ctrl+shift+equal|sleep:800|keys:ctrl+shift+minus|sleep:800|keys:alt+Left|sleep:300|shot:panes
 palette: keys:ctrl+shift+p|sleep:400|type:split|sleep:400|shot:list|keys:Escape
 settings: keys:ctrl+comma|sleep:1200|shot:startup
+settings-background: keys:ctrl+comma|sleep:1200|click:100,349|sleep:600|wheel:600,400,-20|sleep:500|shot:appearance
 find: type:echo hello Hello hello|keys:Return|sleep:400|keys:ctrl+shift+f|sleep:300|type:hello|sleep:400|shot:matches
 copy-paste: type:echo abc|keys:Return|sleep:400|keys:ctrl+shift+a|keys:ctrl+shift+c|clip|keys:ctrl+shift+v|sleep:500|shot:pasted
 escape-selection: type:echo abc|keys:Return|sleep:400|keys:ctrl+shift+a|keys:Escape|type:echo after|keys:Return|sleep:400|shot:clean

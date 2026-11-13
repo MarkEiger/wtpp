@@ -70,6 +70,7 @@ heavy-output: sleep:600|time seq 1 2000000{ENTER}|sleep:12000|shot:done
 link-click: sleep:600|echo https://example.com/wtpp-test{ENTER}|sleep:500|ctrl:down|click:60,71|ctrl:up|sleep:2000|shot:after
 wt-import: sleep:600|^,|sleep:1500|wclick:0,1139,487|sleep:1500|shot:imported
 settings-look: sleep:600|^,|sleep:1500|click:60,104|sleep:500|shot:interaction
+settings-background: sleep:600|^,|sleep:1500|click:100,349|sleep:600|wheel:700,500,-20|sleep:500|shot:appearance
 perf-small: sleep:600|time seq 1 50000 > /dev/null; time seq 1 20000{ENTER}|sleep:25000|shot:done
 perf-measure: sleep:600|seq 1 20000{ENTER}|sleep:10000
 perf-pwsh: sleep:600|^+1|sleep:2500|1..20000{ENTER}|sleep:15000|shot:done

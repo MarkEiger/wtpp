@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Background opacity and background images per profile, with Windows
+  Terminal's settings: `opacity` (0–100), `backgroundImage` (a file, or
+  `desktopWallpaper` for the Windows wallpaper), `backgroundImageOpacity`,
+  `backgroundImageStretchMode` and `backgroundImageAlignment`, also in
+  Settings → a profile (or Defaults) → Appearance, with a Browse… button
+  (zenity or kdialog on Linux). Text stays opaque, and cells a program gave
+  their own background colour still cover the image. Images are PNG, JPEG,
+  BMP, GIF (first frame) or WebP; a changed file is picked up when you come
+  back to the window. The window can't be see-through with OpenGL (as under
+  WSLg) or on X11 without a compositing window manager: there the background
+  stays opaque (images still work), and Settings says why. On Windows,
+  turning opacity on takes effect after restarting wt++.
+
 ## 1.4.0 — 2026-11-13
 
 - Linux and macOS: a profile's command line is read like a shell does (single
