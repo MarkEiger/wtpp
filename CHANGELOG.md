@@ -2,10 +2,12 @@
 
 ## Unreleased
 
-- A modifier wt++ thought was held but the keyboard says is up (a missed
-  Shift release) no longer turns Enter into Shift+Enter, which adds lines in
-  Claude Code and PowerShell. When this happens it's noted in the log, to
-  help track down reports of Enter staying a new line after a Shift+Enter.
+- Windows: after Alt+Tab away from wt++ and back, Alt no longer stays
+  "held": Enter added a line in Claude Code (or went full screen), other
+  keys went wrong, and only Ctrl+Enter submitted. On getting the focus
+  back wt++ asks the keyboard what's held, and any key it handles goes by
+  what the OS says is held, not by an Alt (or Shift, Ctrl, Win) release
+  that never came.
 
 ## 1.4.0 — 2026-11-13
 

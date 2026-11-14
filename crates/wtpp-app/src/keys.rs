@@ -60,15 +60,17 @@ pub fn from_slint(text: &str, mut mods: Mods) -> Option<(Key, Mods)> {
 
 /// The modifiers to act on: Slint's, less any the OS says are up.
 ///
-/// Slint tracks modifiers from its own key events and never re-syncs them,
-/// so a Shift release it missed would leave every later Enter a Shift+Enter
-/// (a new line in Claude Code and PSReadLine) until the next Shift press.
-/// A guard, not a proven cause of the reported stuck Shift+Enter: that one
-/// ended with Ctrl+Enter, which doesn't clear Slint's Shift (see
-/// `slint_state`). winit's state (`os`) comes from the OS on every key. This only ever clears a modifier:
-/// Slint drops Ctrl+Alt for AltGr characters, and adding them back would
-/// turn AltGr typing into shortcuts. `None` (no OS state seen yet) trusts
-/// Slint.
+/// Slint tracks modifiers from its own key events and never re-syncs them.
+/// Alt+Tab away and back on Windows left Alt held for good: winit, on
+/// getting the focus back, reports the keys Windows still lists as down
+/// (Alt, though it's already up) as pressed, and their release never comes.
+/// Then Enter was Alt+Enter (a new line in Claude Code, or full screen),
+/// and Ctrl+Enter, sent as a plain Enter, the only way to submit. winit's
+/// state (`os`) comes from the OS with every key. This only ever clears a
+/// modifier: Slint drops Ctrl+Alt for AltGr characters, and adding them
+/// back would turn AltGr typing into shortcuts. `None` (no OS state seen
+/// yet) trusts Slint. Slint's own state is put right too (see
+/// `slint_releases`); this covers the key that reveals it.
 pub fn reconcile(reported: Mods, os: Option<Mods>) -> Mods {
     let Some(os) = os else { return reported };
     Mods {
@@ -78,6 +80,34 @@ pub fn reconcile(reported: Mods, os: Option<Mods>) -> Mods {
         meta: reported.meta && os.meta,
     }
 }
+
+/// The modifier keys to tell Slint were released, so that its own idea of
+/// what's held (which mouse events and its widgets go by) follows the OS:
+/// each one held in `was` but not in `now`. Slint names keys like Qt on
+/// macOS: the Ctrl key is "meta" there, ⌘ "control".
+pub fn slint_releases(was: Mods, now: Mods) -> Vec<SlintKey> {
+    let up = |was: bool, now: bool| was && !now;
+    let (ctrl, meta) = if cfg!(target_os = "macos") { (SlintKey::Meta, SlintKey::Control) } else { (SlintKey::Control, SlintKey::Meta) };
+    let (ctrl_r, meta_r) =
+        if cfg!(target_os = "macos") { (SlintKey::MetaR, SlintKey::ControlR) } else { (SlintKey::ControlR, SlintKey::MetaR) };
+    let mut keys = Vec::new();
+    if up(was.shift, now.shift) {
+        keys.extend([SlintKey::Shift, SlintKey::ShiftR]);
+    }
+    if up(was.alt, now.alt) {
+        keys.extend([SlintKey::Alt, SlintKey::AltGr]);
+    }
+    if up(was.ctrl, now.ctrl) {
+        keys.extend([ctrl, ctrl_r]);
+    }
+    if up(was.meta, now.meta) {
+        keys.extend([meta, meta_r]);
+    }
+    keys
+}
+
+/// Every modifier, for `slint_releases` when what Slint holds is unknown.
+pub const ALL_MODS: Mods = Mods { shift: true, alt: true, ctrl: true, meta: true };
 
 fn function_key(c: char) -> Option<u8> {
     let f1 = char::from(SlintKey::F1) as u32;
@@ -116,6 +146,18 @@ mod tests {
     #[test]
     fn ctrl_letters() {
         assert_eq!(from_slint("c", Mods::CTRL), Some((Key::Char('c'), Mods::CTRL)));
+    }
+
+    #[test]
+    fn slint_hears_of_released_modifiers() {
+        let alt = Mods { alt: true, ..Mods::NONE };
+        assert_eq!(slint_releases(alt, Mods::NONE), [SlintKey::Alt, SlintKey::AltGr]);
+        // Only what went up: AltGr held (no change winit sees) stays held.
+        assert!(slint_releases(Mods::NONE, Mods::NONE).is_empty());
+        assert!(slint_releases(alt, alt).is_empty());
+        let ctrl = if cfg!(target_os = "macos") { SlintKey::Meta } else { SlintKey::Control };
+        assert_eq!(slint_releases(ALL_MODS, Mods { ctrl: false, ..ALL_MODS })[0], ctrl);
+        assert_eq!(slint_releases(ALL_MODS, Mods::NONE).len(), 8);
     }
 
     #[test]
@@ -159,7 +201,7 @@ mod slint_state {
             in-out property <string> mods;
             fs := FocusScope {
                 key-pressed(e) => {
-                    root.mods = (e.modifiers.shift ? "shift " : "") + (e.modifiers.control ? "ctrl" : "");
+                    root.mods = (e.modifiers.shift ? "shift " : "") + (e.modifiers.control ? "ctrl" : "") + (e.modifiers.alt ? "alt" : "");
                     accept
                 }
             }
@@ -175,13 +217,13 @@ mod slint_state {
         }
     }
 
-    /// Slint keeps modifiers from its own key events: a Shift whose release
-    /// it never got stays held for every later key, and only a Shift event
-    /// (or focus loss) clears it. Ctrl, or Ctrl+Enter, doesn't. So a lost
-    /// release alone doesn't explain a stuck Shift+Enter that Ctrl+Enter
-    /// ends; `reconcile` covers this case, whatever the cause of that one.
+    /// Slint keeps modifiers from its own key events: one whose release it
+    /// never got stays held for every later key, and only that key's own
+    /// event (or focus loss) clears it. The Alt that winit reports pressed on
+    /// getting the focus back from Alt+Tab is such a one; the releases from
+    /// `slint_releases` clear it.
     #[test]
-    fn slint_keeps_a_shift_it_never_saw_released() {
+    fn slint_keeps_a_modifier_it_never_saw_released() {
         let window = MinimalSoftwareWindow::new(Default::default());
         slint::platform::set_platform(Box::new(Headless(window.clone()))).unwrap();
         let probe = Probe::new().unwrap();
@@ -206,6 +248,20 @@ mod slint_state {
         // A Shift press and release clears it.
         press(SlintKey::Shift);
         release(SlintKey::Shift);
+        assert_eq!(enter(), "");
+
+        // Back from Alt+Tab: Alt "pressed", never released. Enter is
+        // Alt+Enter, and Ctrl+Enter Ctrl+Alt+Enter.
+        press(SlintKey::Alt);
+        assert_eq!(enter(), "alt");
+        press(SlintKey::Control);
+        assert_eq!(enter(), "ctrlalt");
+        release(SlintKey::Control);
+        assert_eq!(enter(), "alt");
+        // The keyboard says nothing's held: Slint is told, and Enter is Enter.
+        for key in super::slint_releases(super::ALL_MODS, wtpp_input::Mods::NONE) {
+            release(key);
+        }
         assert_eq!(enter(), "");
     }
 }
