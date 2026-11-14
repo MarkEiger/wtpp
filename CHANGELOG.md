@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 — 2026-11-15
 
 - Ctrl+Backspace and Ctrl+Delete delete a word in WSL started by typing
   `wsl` in a PowerShell or cmd tab; they deleted one character (or nothing)
