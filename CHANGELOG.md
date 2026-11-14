@@ -21,8 +21,10 @@
   (with how many tabs it holds), and again to expand it. Right-click the
   chip to rename it, change its colour, ungroup or close it. Grouped tabs
   are underlined in the group's colour and stay together: a tab dragged
-  between two of a group's tabs joins it, one dragged away leaves it, and a
-  collapsed group is passed over as a whole. Switching to a tab in a
+  between two of a group's tabs joins it, and one dragged past the group's
+  edge (or over its chip) leaves it, with a hint saying letting go takes it
+  out; dragged back, it stays in. A collapsed group is passed over as a
+  whole. A group's name is typed in a field like a tab's. Switching to a tab in a
   collapsed group (Alt+number, ⌘number on macOS, the palette) opens the
   group; closing a tab next to one doesn't. Also in the command palette and
   bindable:
