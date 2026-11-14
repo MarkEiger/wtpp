@@ -13,8 +13,9 @@
   back to the window. The window can't be see-through with OpenGL (as under
   WSLg), on X11 without a compositing window manager, or where the graphics
   driver offers no see-through surface: there the background stays opaque
-  (images still work), the log and Settings say why. On Windows,
-  turning opacity on takes effect after restarting wt++.
+  (images still work), the log and Settings say why. Changes take effect
+  at once, no restart: on Windows wt++ now always draws through
+  DirectComposition, which lets the desktop show through.
 
 ## 1.4.0 — 2026-11-13
 
