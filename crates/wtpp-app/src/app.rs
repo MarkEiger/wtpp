@@ -2456,8 +2456,10 @@ fn see_through(alphas: impl IntoIterator<Item = u8>) -> bool {
 pub(crate) fn opacity_unavailable_reason(backend: Option<wgpu::Backend>) -> &'static str {
     match backend {
         Some(wgpu::Backend::Gl) => "It isn't supported with OpenGL, so the background stays opaque.",
-        // Without a DirectComposition swapchain, chosen at startup.
-        Some(wgpu::Backend::Dx12) => "Restart wt++ for it to take effect.",
+        // Only when WGPU_DX12_PRESENTATION_SYSTEM asked for another swapchain.
+        Some(wgpu::Backend::Dx12) => {
+            "WGPU_DX12_PRESENTATION_SYSTEM picks a swapchain without DirectComposition, so the background stays opaque."
+        }
         Some(wgpu::Backend::Vulkan) if !cfg!(windows) => {
             "The window system offers no see-through window here (X11 needs a compositing window manager), so the background stays opaque."
         }

@@ -373,16 +373,15 @@ fn init_logging() {
 /// (Vulkan, DX12, GL…) costs hundreds of milliseconds at startup.
 /// `api` is the user's `rendering.graphicsAPI`; the WGPU_BACKEND environment
 /// variable still wins, for debugging.
-#[cfg_attr(not(windows), allow(unused_variables))]
-fn wgpu_configuration(user: &wtpp_config::Settings, api: wtpp_config::GraphicsApi) -> WGPUConfiguration {
+fn wgpu_configuration(api: wtpp_config::GraphicsApi) -> WGPUConfiguration {
     use wtpp_config::GraphicsApi;
     let mut settings = WGPUSettings::default();
     // Only a DirectComposition swapchain lets the desktop show through a
-    // see-through background. It's new to wt++ (resizing, the title bar,
-    // capture tools), so it's used only when some profile asks for opacity:
-    // turning opacity on later takes a restart.
+    // see-through background. It's made once, at startup, so it's always
+    // used: then `opacity` takes effect as soon as it's set, no restart.
+    // (WGPU_DX12_PRESENTATION_SYSTEM still picks another, for debugging.)
     #[cfg(windows)]
-    if std::env::var_os("WGPU_DX12_PRESENTATION_SYSTEM").is_none() && user.wants_transparency() {
+    if std::env::var_os("WGPU_DX12_PRESENTATION_SYSTEM").is_none() {
         settings.backend_options.dx12.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual;
     }
     #[cfg(windows)]
@@ -416,9 +415,26 @@ fn wgpu_configuration(user: &wtpp_config::Settings, api: wtpp_config::GraphicsAp
 }
 
 /// Slint's backend, for the user's `rendering.graphicsAPI`.
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 fn backend_selector(settings: &wtpp_config::Settings, api: wtpp_config::GraphicsApi) -> slint::BackendSelector {
     #[allow(unused_mut)]
-    let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(settings, api));
+    let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(api));
+    // Windows, with the DirectComposition swapchain: no GDI redirection
+    // surface under it. That surface is opaque and DWM manages it on its own:
+    // it kept the old size after a resize and, depending on the monitor (GPU)
+    // and the windows behind, covered the see-through background. Only for
+    // DX12: another API's swapchain would have nothing to present into.
+    #[cfg(windows)]
+    if platform::DX12_VISUAL.load(std::sync::atomic::Ordering::Relaxed)
+        && std::env::var_os("WGPU_BACKEND").is_none()
+        && matches!(
+            api,
+            wtpp_config::GraphicsApi::Automatic | wtpp_config::GraphicsApi::Direct3d12 | wtpp_config::GraphicsApi::Software
+        )
+    {
+        use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+        backend = backend.with_winit_window_attributes_hook(|attributes| attributes.with_no_redirection_bitmap(true));
+    }
     // macOS: tabs in the title bar, like Safari and iTerm: the title bar
     // turns transparent and the content extends under it.
     #[cfg(target_os = "macos")]
