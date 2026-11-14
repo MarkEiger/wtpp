@@ -80,3 +80,4 @@ perf-wsl: sleep:600|seq 1 20000{ENTER}|sleep:15000|shot:done
 perf-poke: sleep:600|seq 1 20000{ENTER}|sleep:6000|shot:stalled|x|sleep:4000|shot:poked|setrect:2600,100,1000,500|sleep:4000|shot:resized
 perf-wsl-big: sleep:600|time seq 1 2000000{ENTER}|sleep:30000|shot:done
 powerline: sleep:600|printf '\ue0b0 \ue0b2 \ue0a0 ok\n'{ENTER}|sleep:600|shot:glyphs
+shift-enter-then-enter: sleep:600|echo one+{ENTER}echo two{ENTER}|sleep:600|echo three{ENTER}|sleep:600|shot:submitted
