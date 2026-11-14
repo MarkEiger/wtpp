@@ -22,7 +22,8 @@ use wtpp_session::{GridSize, Session, SessionEvent};
 
 use crate::pane_tree::{self, Direction, Node, PaneId, Rect};
 use crate::settings_ui::Draft;
-use crate::{DividerData, MainWindow, MenuEntry, PaneData, TabData, keys};
+use crate::tab_groups::{self, GroupId, TabGroup};
+use crate::{DividerData, GroupMenuEntry, MainWindow, MenuEntry, PaneData, TabData, keys};
 
 /// Space between split panes, in logical pixels.
 const PANE_GAP: f32 = 2.0;
@@ -186,11 +187,13 @@ pub(crate) struct Tab {
     pub(crate) bell: bool,
     /// Set from the tab menu; overrides the profile's `tabColor`.
     pub(crate) color: Option<wtpp_config::Color>,
+    /// The tab group it's in (one of `App::groups`).
+    pub(crate) group: Option<GroupId>,
 }
 
 impl Tab {
     pub(crate) fn new(kind: TabKind) -> Tab {
-        Tab { kind, title: None, renaming: false, bell: false, color: None }
+        Tab { kind, title: None, renaming: false, bell: false, color: None, group: None }
     }
 }
 
@@ -214,6 +217,15 @@ pub struct App {
     pub(crate) panes: HashMap<PaneId, Pane>,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    /// This window's tab groups. Each group's tabs sit together in `tabs`
+    /// (see `tidy_groups`).
+    pub(crate) groups: Vec<TabGroup>,
+    /// Start and width of each tab in the strip, as the UI last laid them
+    /// out (`None` until it has): tabs vary in width, chips sit between
+    /// them, and collapsed tabs have none. Shared with the UI callback that
+    /// reports them, which can run while the App is borrowed (mid-layout).
+    pub(crate) tab_extents: crate::tabs::SharedExtents,
+    groups_model: Rc<VecModel<GroupMenuEntry>>,
     /// Panes of the active tab, in the order of the UI's pane model.
     pub(crate) visible: Vec<PaneId>,
     /// Ctrl+=/Ctrl+- adjustment applied on top of every profile's font size.
@@ -272,7 +284,9 @@ impl App {
         let tabs_model = Rc::new(VecModel::default());
         let panes_model = Rc::new(VecModel::default());
         let dividers_model = Rc::new(VecModel::default());
+        let groups_model = Rc::new(VecModel::default());
         ui.set_dividers(ModelRc::from(dividers_model.clone()));
+        ui.set_group_menu_entries(ModelRc::from(groups_model.clone()));
         ui.set_tabs(ModelRc::from(tabs_model.clone()));
         ui.set_panes(ModelRc::from(panes_model.clone()));
         let (keymap, warnings) = settings.keymap();
@@ -295,6 +309,9 @@ impl App {
             panes: HashMap::new(),
             tabs: Vec::new(),
             active: 0,
+            groups: Vec::new(),
+            tab_extents: Rc::default(),
+            groups_model,
             visible: Vec::new(),
             font_zoom: 0.0,
             clipboard: arboard::Clipboard::new().map_err(|e| log::warn!("no clipboard: {e}")).ok(),
@@ -1040,9 +1057,8 @@ impl App {
             crate::close_window(self.id);
             return;
         }
-        if self.active > index || self.active >= self.tabs.len() {
-            self.active = self.active.saturating_sub(1);
-        }
+        let hidden = self.hidden_tabs(usize::MAX);
+        self.active = tab_groups::active_after_close(&hidden, self.active, index);
         self.relayout();
     }
 
@@ -1052,7 +1068,9 @@ impl App {
         if index >= self.tabs.len() || !matches!(self.tabs[index].kind, TabKind::Terminal { .. }) {
             return None;
         }
-        let tab = self.tabs.remove(index);
+        let mut tab = self.tabs.remove(index);
+        // Groups belong to a window: a tab moving out leaves its group.
+        tab.group = None;
         let TabKind::Terminal { root, .. } = &tab.kind else { unreachable!() };
         let panes = root
             .panes()
@@ -1087,6 +1105,8 @@ impl App {
         }
         let slot = slot.min(self.tabs.len());
         self.tabs.insert(slot, moved.tab);
+        // Dropped between two tabs of a group, it joins the group.
+        self.tabs[slot].group = tab_groups::group_at_insert(&self.tab_groups(), slot, None);
         self.active = slot;
         self.relayout();
     }
@@ -1268,6 +1288,7 @@ impl App {
     /// Recompute pane rectangles for the active tab, resize their sessions,
     /// and redraw.
     pub fn relayout(&mut self) {
+        self.tidy_groups();
         // Linux, own title bar: the maximize button shows the real state.
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -1415,11 +1436,31 @@ impl App {
 
     /// Update the tab strip and window title.
     pub(crate) fn refresh_chrome(&self) {
+        let hidden = self.hidden_tabs(self.active);
+        let groups = self.tab_groups();
+        let rgb = |c: wtpp_config::Color| slint::Color::from_rgb_u8(c.0, c.1, c.2);
         let tabs: Vec<TabData> = self
             .tabs
             .iter()
             .enumerate()
-            .map(|(i, t)| TabData {
+            .map(|(i, t)| {
+                let group = t.group.and_then(|g| self.group(g));
+                let start = t.group.is_some() && (i == 0 || groups[i - 1] != t.group);
+                let end = t.group.is_some() && groups.get(i + 1).copied().flatten() != t.group;
+                (i, t, group, start, end)
+            })
+            .map(|(i, t, group, start, end)| TabData {
+                group_id: group.map(|g| g.id.to_string()).unwrap_or_default().into(),
+                group_color: group.map_or(slint::Color::default(), |g| rgb(g.color)),
+                in_group: group.is_some(),
+                group_start: start,
+                group_end: end,
+                group_title: group.map(|g| g.title.clone()).unwrap_or_default().into(),
+                group_collapsed: group.is_some_and(|g| g.collapsed),
+                // Only the chip that's shown: each rename field takes focus.
+                group_renaming: start && group.is_some_and(|g| g.renaming),
+                group_size: t.group.map_or(0, |g| groups.iter().filter(|&&o| o == Some(g)).count() as i32),
+                hidden: hidden[i],
                 title: self.tab_title(t).into(),
                 active: i == self.active,
                 is_settings: matches!(t.kind, TabKind::Settings),
@@ -1432,6 +1473,17 @@ impl App {
                 icon_text: tab_profile(self, t).map(|p| self.icon(p).1).unwrap_or_default().into(),
             })
             .collect();
+        let entries: Vec<GroupMenuEntry> = self
+            .groups
+            .iter()
+            .map(|g| GroupMenuEntry {
+                id: g.id.to_string().into(),
+                title: if g.title.is_empty() { "Unnamed group".into() } else { g.title.clone().into() },
+            })
+            .collect();
+        if self.groups_model.iter().ne(entries.iter().cloned()) {
+            self.groups_model.set_vec(entries);
+        }
         // Update rows in place when the count is unchanged: replacing the
         // model would recreate the tab widgets and cancel a drag in progress.
         if self.tabs_model.row_count() == tabs.len() {
@@ -1441,6 +1493,8 @@ impl App {
                 }
             }
         } else {
+            // New tab widgets report where they are once laid out.
+            *self.tab_extents.borrow_mut() = vec![None; tabs.len()];
             self.tabs_model.set_vec(tabs);
         }
         if let Some(tab) = self.tabs.get(self.active) {
@@ -1810,8 +1864,9 @@ impl App {
             Action::NextTab | Action::PrevTab => {
                 let n = self.tabs.len();
                 if n > 1 {
-                    let next = if action == Action::NextTab { (self.active + 1) % n } else { (self.active + n - 1) % n };
-                    self.select_tab(next);
+                    // Over tabs in collapsed groups.
+                    let hidden = self.hidden_tabs(self.active);
+                    self.select_tab(tab_groups::step_visible(&hidden, self.active, action == Action::NextTab));
                 }
             }
             Action::SwitchToTab(index) => self.select_tab(index),
@@ -1877,6 +1932,23 @@ impl App {
             Action::CommandPalette => self.open_palette(),
             Action::Find => self.open_find(),
             Action::RenameTab => self.tab_menu(self.active, "rename"),
+            Action::AddTabToNewGroup => {
+                if !matches!(self.tabs.get(self.active), Some(Tab { kind: TabKind::Terminal { .. }, .. })) {
+                    return false;
+                }
+                self.tab_menu(self.active, "group:new");
+            }
+            Action::RemoveTabFromGroup | Action::ToggleTabGroup | Action::RenameTabGroup | Action::CloseTabGroup => {
+                if self.tabs.get(self.active).and_then(|t| t.group).is_none() {
+                    return false;
+                }
+                match action {
+                    Action::RemoveTabFromGroup => self.tab_menu(self.active, "group:remove"),
+                    Action::ToggleTabGroup => self.group_menu(self.active, "toggle"),
+                    Action::RenameTabGroup => self.group_menu(self.active, "rename"),
+                    _ => self.group_menu(self.active, "close"),
+                }
+            }
             Action::SendInput(text) => match self.focused_pane() {
                 Some(pane) => pane.session.write(text.into_bytes()),
                 None => return false,

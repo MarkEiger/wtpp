@@ -85,6 +85,12 @@ pub enum Action {
     CommandPalette,
     Find,
     RenameTab,
+    // Tab groups: wt++ extensions (WT has no tab groups).
+    AddTabToNewGroup,
+    RemoveTabFromGroup,
+    ToggleTabGroup,
+    RenameTabGroup,
+    CloseTabGroup,
     /// Keyboard selection (WT's `markMode`).
     MarkMode,
     SelectAll,
@@ -134,6 +140,11 @@ impl Action {
             CommandPalette => json!("commandPalette"),
             Find => json!("find"),
             RenameTab => json!("openTabRenamer"),
+            AddTabToNewGroup => json!("addTabToNewGroup"),
+            RemoveTabFromGroup => json!("removeTabFromGroup"),
+            ToggleTabGroup => json!("toggleTabGroupCollapsed"),
+            RenameTabGroup => json!("openTabGroupRenamer"),
+            CloseTabGroup => json!("closeTabGroup"),
             MarkMode => json!("markMode"),
             SelectAll => json!("selectAll"),
             SendInput(text) => json!({ "action": "sendInput", "input": text }),
@@ -196,6 +207,11 @@ impl Action {
             "commandPalette" | "toggleCommandPalette" => CommandPalette,
             "find" => Find,
             "openTabRenamer" => RenameTab,
+            "addTabToNewGroup" => AddTabToNewGroup,
+            "removeTabFromGroup" => RemoveTabFromGroup,
+            "toggleTabGroupCollapsed" => ToggleTabGroup,
+            "openTabGroupRenamer" => RenameTabGroup,
+            "closeTabGroup" => CloseTabGroup,
             "markMode" => MarkMode,
             "selectAll" => SelectAll,
             "sendInput" => SendInput(args.get("input").and_then(Value::as_str).unwrap_or_default().to_string()),
@@ -255,6 +271,11 @@ impl Action {
             CommandPalette => "Command palette".into(),
             Find => "Find".into(),
             RenameTab => "Rename tab".into(),
+            AddTabToNewGroup => "Add tab to new group".into(),
+            RemoveTabFromGroup => "Remove tab from group".into(),
+            ToggleTabGroup => "Collapse or expand tab group".into(),
+            RenameTabGroup => "Rename tab group".into(),
+            CloseTabGroup => "Close tab group".into(),
             MarkMode => "Toggle mark mode".into(),
             SelectAll => "Select all".into(),
             SendInput(text) => format!("Send input: {}", escape_input(text)),
@@ -267,6 +288,7 @@ impl Action {
         let mut all = vec![NewTab(None), NewWindow];
         all.extend((0..profile_count).map(|i| NewTab(Some(i))));
         all.extend([DuplicateTab, CloseTab, CloseOtherTabs, ClosePane, NextTab, PrevTab, RenameTab]);
+        all.extend([AddTabToNewGroup, RemoveTabFromGroup, ToggleTabGroup, RenameTabGroup, CloseTabGroup]);
         all.extend((0..9).map(SwitchToTab));
         for side in [None, Some(Direction::Right), Some(Direction::Down), Some(Direction::Left), Some(Direction::Up)] {
             all.push(SplitPane { side, duplicate: true });
@@ -625,6 +647,15 @@ mod tests {
         let split = |duplicate| Action::SplitPane { side: Some(Direction::Right), duplicate }.label(&[]);
         assert_eq!(split(true), "Split pane (right)");
         assert_eq!(split(false), "Split pane (right), default profile");
+    }
+
+    #[test]
+    fn tab_group_actions() {
+        let parse = |s: &str| Action::from_json(&json!(s)).unwrap();
+        assert_eq!(parse("addTabToNewGroup"), Some(Action::AddTabToNewGroup));
+        assert_eq!(parse("toggleTabGroupCollapsed"), Some(Action::ToggleTabGroup));
+        assert_eq!(Action::ToggleTabGroup.label(&[]), "Collapse or expand tab group");
+        assert_eq!(Action::CloseTabGroup.to_json(), json!("closeTabGroup"));
     }
 
     #[test]
