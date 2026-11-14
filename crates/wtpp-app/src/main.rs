@@ -403,6 +403,22 @@ fn wgpu_configuration(user: &wtpp_config::Settings, api: wtpp_config::GraphicsAp
 fn backend_selector(settings: &wtpp_config::Settings, api: wtpp_config::GraphicsApi) -> slint::BackendSelector {
     #[allow(unused_mut)]
     let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(settings, api));
+    // Windows, with the DirectComposition swapchain: no GDI redirection
+    // surface under it. That surface is opaque and DWM manages it on its own:
+    // it kept the old size after a resize and, depending on the monitor (GPU)
+    // and the windows behind, covered the see-through background. Only for
+    // DX12: another API's swapchain would have nothing to present into.
+    #[cfg(windows)]
+    if platform::DX12_VISUAL.load(std::sync::atomic::Ordering::Relaxed)
+        && std::env::var_os("WGPU_BACKEND").is_none()
+        && matches!(
+            api,
+            wtpp_config::GraphicsApi::Automatic | wtpp_config::GraphicsApi::Direct3d12 | wtpp_config::GraphicsApi::Software
+        )
+    {
+        use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
+        backend = backend.with_winit_window_attributes_hook(|attributes| attributes.with_no_redirection_bitmap(true));
+    }
     // macOS: tabs in the title bar, like Safari and iTerm: the title bar
     // turns transparent and the content extends under it.
     #[cfg(target_os = "macos")]
