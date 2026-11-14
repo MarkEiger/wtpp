@@ -199,6 +199,28 @@ pub fn has_children(pid: u32) -> bool {
     }
 }
 
+/// The modifier keys physically held right now, from the keyboard itself
+/// rather than any window's messages (which after Alt+Tab can still show
+/// Alt down). Windows only; elsewhere `None`.
+pub fn held_modifiers() -> Option<wtpp_input::Mods> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        };
+        // SAFETY: GetAsyncKeyState has no preconditions.
+        let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) } < 0;
+        Some(wtpp_input::Mods {
+            shift: down(VK_SHIFT),
+            alt: down(VK_MENU),
+            ctrl: down(VK_CONTROL),
+            meta: down(VK_LWIN) || down(VK_RWIN),
+        })
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 /// The mouse pointer in screen coordinates (physical pixels, as `window`'s
 /// position is measured), where the OS tells us: not on Wayland, where
 /// callers work it out from the window position.

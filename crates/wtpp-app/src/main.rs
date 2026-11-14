@@ -714,6 +714,23 @@ fn key_mods(id: WindowId, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Mod
     mods
 }
 
+/// Tell Slint the modifiers held in `was` but not in `now` were released,
+/// so its own state (mouse events, its widgets) is right too. Afterwards,
+/// not from inside winit's event (`key_mods` already covers that key).
+fn release_in_slint(id: WindowId, was: Mods, now: Mods) {
+    let released = keys::slint_releases(was, now);
+    if released.is_empty() {
+        return;
+    }
+    slint::invoke_from_event_loop(move || {
+        let Some(e) = entry(id) else { return };
+        for key in &released {
+            e.ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text: (*key).into() });
+        }
+    })
+    .ok();
+}
+
 fn wire_settings(ui: &MainWindow, id: WindowId) {
     let data = ui.global::<SettingsData>();
     data.on_set_value(move |key, value| {
@@ -1239,7 +1256,8 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
                     let mods =
                         Mods { shift: m.shift_key(), alt: m.alt_key(), ctrl: m.control_key(), meta: m.super_key() };
                     if let Some(e) = entry(id) {
-                        e.os_mods.set(Some(mods));
+                        let was = e.os_mods.replace(Some(mods)).unwrap_or(keys::ALL_MODS);
+                        release_in_slint(id, was, mods);
                     }
                 }
                 WindowEvent::Focused(active) => {
@@ -1250,6 +1268,14 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
                     }
                     slint::invoke_from_event_loop(move || {
                         if active {
+                            // Back from Alt+Tab, Slint was just told Alt is
+                            // down (see `keys::reconcile`): ask the keyboard.
+                            if let Some(held) = platform::held_modifiers()
+                                && let Some(e) = entry(id)
+                            {
+                                e.os_mods.set(Some(held));
+                                release_in_slint(id, keys::ALL_MODS, held);
+                            }
                             window_focused(id);
                             #[cfg(target_os = "macos")]
                             if let Some(e) = entry(id).filter(|e| e.ui.get_terminal_focused()) {
