@@ -5,6 +5,8 @@ tab-dropdown: sleep:600|^+ |sleep:600|shot:menu|{ESC}
 profiles: sleep:600|^+2|sleep:1500|ver{ENTER}|^+3|sleep:3000|uname -a{ENTER}|sleep:800|shot:three-tabs
 keys-pwsh: sleep:600|one two three|^{BACKSPACE}|{HOME}|^{DELETE}|sleep:400|shot:line
 keys-cmd: sleep:600|^+2|sleep:1500|one two three|^{BACKSPACE}|{HOME}|^{DELETE}|sleep:400|shot:line
+keys-wsl-in-pwsh: sleep:600|^+1|sleep:1500|wsl{ENTER}|sleep:3000|one two three|^{BACKSPACE}|{HOME}|^{DELETE}|sleep:400|shot:line
+keys-wsl-in-cmd: sleep:600|^+2|sleep:1500|wsl{ENTER}|sleep:3000|one two three|^{BACKSPACE}|{HOME}|^{DELETE}|sleep:400|shot:line
 split: sleep:600|^+=|sleep:1000|^+-|sleep:1000|%{LEFT}|^+{RIGHT}^+{RIGHT}^+{RIGHT}|sleep:600|shot:panes
 zoom: sleep:600|^+=|sleep:1000|^+p|zoom|{ENTER}|sleep:600|shot:zoomed
 scrollback: sleep:600|foreach {(}$i in 1..80{)} {{}"line $i"{}}{ENTER}|sleep:800|^+{PGUP}|sleep:300|shot:paged

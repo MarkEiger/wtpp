@@ -1742,6 +1742,21 @@ impl App {
             self.word_edit(id, WordEdit::DeleteNext);
             return true;
         }
+        // `wsl` started from a cmd or PowerShell tab runs a Linux shell, which
+        // wants the Unix bytes for word editing (^W, ESC d); the Windows ones
+        // reach bash as a plain Backspace or an unbound key.
+        if let Some((k @ (Key::Backspace | Key::Delete), m)) = key
+            && m == Mods::CTRL
+            && pane.session.profile().key_style == KeyStyle::Windows
+            && pane.session.pid().is_some_and(|pid| crate::platform::runs_under(pid, "wsl.exe"))
+        {
+            let unix = wtpp_input::EncodeOptions { style: KeyStyle::Unix, ..Default::default() };
+            if let Some(bytes) = wtpp_input::encode(k, m, &unix) {
+                self.send_keys(id, bytes);
+                self.wake_cursor();
+                return true;
+            }
+        }
         // Without key events (inbox conhost) Ctrl+Backspace is only a plain
         // Backspace. At the shell's own prompt, get the same result some other
         // way (see `backward_kill_word`).

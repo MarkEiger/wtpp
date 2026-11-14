@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Ctrl+Backspace and Ctrl+Delete delete a word in WSL started by typing
+  `wsl` in a PowerShell or cmd tab; they deleted one character (or nothing)
+  there, as the tab still sent PowerShell's keys.
 - Background opacity and background images per profile, with Windows
   Terminal's settings: `opacity` (0–100), `backgroundImage` (a file, or
   `desktopWallpaper` for the Windows wallpaper), `backgroundImageOpacity`,

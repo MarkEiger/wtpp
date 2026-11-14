@@ -9,6 +9,9 @@ win_temp="$(wslpath "$(cmd.exe /c 'echo %TEMP%' 2>/dev/null | tr -d '\r')")/wtpp
 mkdir -p "$win_temp"
 cp drive.ps1 montage.ps1 "$win_temp/"
 win_script="$(wslpath -w "$win_temp/drive.ps1")"
+# WTPP_EXE (a Windows path) picks another build; WSL only passes it on when
+# WSLENV lists it.
+[[ -n "${WTPP_EXE:-}" ]] && export WSLENV="${WSLENV:+$WSLENV:}WTPP_EXE"
 montage="$(wslpath -w "$win_temp/montage.ps1")"
 (cd /mnt/c && powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$montage" -Clean < /dev/null)
 
