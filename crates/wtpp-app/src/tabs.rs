@@ -254,6 +254,9 @@ impl App {
     /// lifts off, to be dropped on another window's tab row or anywhere else
     /// for a new window; the only tab in a window carries the window along.
     pub fn tab_drag(&mut self, index: usize, strip_x: f32, tab_width: f32, x: f32, y: f32) {
+        if self.dragging_tab.is_none() {
+            self.drag_origin = self.tabs.get(index).and_then(|t| t.group);
+        }
         let current = *self.dragging_tab.get_or_insert(index);
         let n = self.tabs.len();
         if current >= n {
@@ -272,6 +275,7 @@ impl App {
             self.ui().set_tab_lifted(n > 1);
         }
         if self.tab_lift.is_some() {
+            self.ui().set_drag_hint("".into());
             let screen = crate::platform::cursor_pos(self.ui().window()).or_else(|| window_to_screen(self.ui().window(), x, y));
             let Some(lift) = self.tab_lift.as_mut() else { return };
             lift.screen = screen;
@@ -321,6 +325,7 @@ impl App {
             None => (strip_x / (tab_width + TAB_GAP)).floor().clamp(0.0, (n - 1) as f32) as usize,
         };
         if slot == current {
+            self.drag_over_group_edge(current, strip_x);
             return;
         }
         // The dragged tab is the active one (pressing it selected it).
@@ -346,10 +351,53 @@ impl App {
         self.tabs[slot].group = terminal.then(|| tab_groups::group_at_insert(&self.tab_groups(), slot, own)).flatten();
         self.tidy_groups();
         self.refresh_chrome();
+        if let Some(current) = self.dragging_tab {
+            self.show_drag_hint(current);
+        }
+    }
+
+    /// The dragged tab at its group's edge: pulled far enough past it, it
+    /// leaves the group (its colour goes, and a hint says letting go takes
+    /// it out); back in, it rejoins. Nothing is final until the drop.
+    fn drag_over_group_edge(&mut self, current: usize, x: f32) {
+        if let Some(origin) = self.drag_origin.filter(|&g| self.group(g).is_some())
+            && matches!(self.tabs[current].kind, TabKind::Terminal { .. })
+            && let Some(extents) = self.extents()
+            && let Some(group) = tab_groups::edge_group(&self.tab_groups(), &extents, current, origin, x, TAB_GAP)
+            && group != self.tabs[current].group
+        {
+            self.tabs[current].group = group;
+            self.tidy_groups();
+            self.refresh_chrome();
+        }
+        if let Some(current) = self.dragging_tab {
+            self.show_drag_hint(current);
+        }
+    }
+
+    /// Under the dragged tab: "Release to remove from <group>" while it's
+    /// out of the group it started in but still next to it.
+    fn show_drag_hint(&self, current: usize) {
+        let groups = self.tab_groups();
+        let hint = self
+            .drag_origin
+            .filter(|&g| groups.get(current) == Some(&None) && tab_groups::next_to(&groups, current, g))
+            .and_then(|g| self.group(g))
+            .map(|g| match g.title.trim() {
+                "" => "Release to remove from group".to_string(),
+                title => format!("Release to remove from \u{201c}{title}\u{201d}"),
+            })
+            .unwrap_or_default();
+        let x = self.extents().and_then(|e| e.get(current).map(|&(start, _)| start)).unwrap_or(0.0);
+        let ui = self.ui();
+        ui.set_drag_hint_x(x);
+        ui.set_drag_hint(hint.into());
     }
 
     pub fn tab_drag_end(&mut self) {
         let index = self.dragging_tab.take();
+        self.drag_origin = None;
+        self.ui().set_drag_hint("".into());
         let Some(lift) = self.tab_lift.take() else { return };
         self.ui().set_tab_lifted(false);
         let Some(index) = index else { return };

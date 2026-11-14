@@ -241,6 +241,9 @@ pub struct App {
     pub(crate) cursor_on: bool,
     /// Index of the tab being dragged in the tab row.
     pub(crate) dragging_tab: Option<usize>,
+    /// The group the dragged tab was in when the drag started: dragged
+    /// over its edge it can leave it, and come back in (see tabs.rs).
+    pub(crate) drag_origin: Option<crate::tab_groups::GroupId>,
     /// The dragged tab left the tab row (see tabs.rs).
     pub(crate) tab_lift: Option<crate::tabs::TabLift>,
     /// Command palette entries currently listed.
@@ -316,6 +319,7 @@ impl App {
             draft: None,
             cursor_on: true,
             dragging_tab: None,
+            drag_origin: None,
             tab_lift: None,
             palette: Vec::new(),
             find: Default::default(),
