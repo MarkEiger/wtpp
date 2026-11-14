@@ -356,15 +356,13 @@ impl App {
         }
     }
 
-    /// The dragged tab at its group's edge: pulled far enough past it, it
-    /// leaves the group (its colour goes, and a hint says letting go takes
-    /// it out); back in, it rejoins. Nothing is final until the drop.
+    /// The dragged tab at a group's edge: pulled far enough past it, it
+    /// leaves the group; pulled into the group's end tab, it joins. A hint
+    /// says what letting go does. Nothing is final until the drop.
     fn drag_over_group_edge(&mut self, current: usize, x: f32) {
-        if let Some(origin) = self.drag_origin.filter(|&g| self.group(g).is_some())
-            && matches!(self.tabs[current].kind, TabKind::Terminal { .. })
+        if matches!(self.tabs[current].kind, TabKind::Terminal { .. })
             && let Some(extents) = self.extents()
-            && let Some(group) = tab_groups::edge_group(&self.tab_groups(), &extents, current, origin, x, TAB_GAP)
-            && group != self.tabs[current].group
+            && let Some(group) = tab_groups::edge_group(&self.tab_groups(), &extents, current, x, TAB_GAP)
         {
             self.tabs[current].group = group;
             self.tidy_groups();
@@ -375,23 +373,25 @@ impl App {
         }
     }
 
-    /// Under the dragged tab: "Release to remove from <group>" while it's
-    /// out of the group it started in but still next to it.
+    /// Under the dragged tab, when it's in another group than it started
+    /// in: "Release to add to <group>", or "Release to remove from <group>".
     fn show_drag_hint(&self, current: usize) {
-        let groups = self.tab_groups();
-        let hint = self
-            .drag_origin
-            .filter(|&g| groups.get(current) == Some(&None) && tab_groups::next_to(&groups, current, g))
-            .and_then(|g| self.group(g))
-            .map(|g| match g.title.trim() {
-                "" => "Release to remove from group".to_string(),
-                title => format!("Release to remove from \u{201c}{title}\u{201d}"),
-            })
-            .unwrap_or_default();
+        let name = |g: &TabGroup, empty: &str| match g.title.trim() {
+            "" => empty.to_string(),
+            title => format!("\u{201c}{title}\u{201d}"),
+        };
+        let now = self.tabs.get(current).and_then(|t| t.group);
+        let hint = if now == self.drag_origin {
+            None
+        } else if let Some(g) = now.and_then(|g| self.group(g)) {
+            Some(format!("Release to add to {}", name(g, "this group")))
+        } else {
+            self.drag_origin.and_then(|g| self.group(g)).map(|g| format!("Release to remove from {}", name(g, "its group")))
+        };
         let x = self.extents().and_then(|e| e.get(current).map(|&(start, _)| start)).unwrap_or(0.0);
         let ui = self.ui();
         ui.set_drag_hint_x(x);
-        ui.set_drag_hint(hint.into());
+        ui.set_drag_hint(hint.unwrap_or_default().into());
     }
 
     pub fn tab_drag_end(&mut self) {

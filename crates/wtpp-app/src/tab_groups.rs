@@ -98,46 +98,51 @@ pub fn group_at_insert(groups: &[Option<GroupId>], at: usize, own: Option<GroupI
     None
 }
 
-/// How far past its group's edge a dragged tab's pointer goes before the
-/// tab leaves the group.
-pub const DETACH_DISTANCE: f32 = 16.0;
+/// How far a dragged tab's pointer goes past a group's edge to take the tab
+/// out of the group, or into the group's end tab to put it in.
+pub const EDGE_DISTANCE: f32 = 16.0;
 
-/// A tab of group `origin`, dragged at its group's edge (the group on one
-/// side of it only): whether the pointer at strip x `x` has pulled it out
-/// (`Some(None)`) or it's still in (`Some(Some(origin))`). Measured from
-/// the neighbouring tab of the group, which doesn't move when the tab
-/// leaves, so going in and out doesn't flicker. `None` where this doesn't
-/// apply (inside the group, or nowhere near it): the usual rules do.
+/// The tab at `at`, dragged at a group's edge (the group on one side of it
+/// only): the group it should now be in, if that changes. In the group, it
+/// leaves when the pointer at strip x `x` goes past its outer edge (over
+/// the chip, on the left); out of any group, it joins when the pointer goes
+/// into the group's end tab. In between, it stays as it is, so it doesn't
+/// flicker. Measured from the group's neighbouring tab, which doesn't move
+/// as the tab goes in and out. A tab alone in its group takes the group
+/// along instead; a collapsed group isn't joined this way.
 pub fn edge_group(
     groups: &[Option<GroupId>],
     extents: &[(f32, f32)],
     at: usize,
-    origin: GroupId,
     x: f32,
     gap: f32,
 ) -> Option<Option<GroupId>> {
-    let left = at.checked_sub(1).and_then(|i| groups.get(i).copied().flatten()) == Some(origin);
-    let right = groups.get(at + 1).copied().flatten() == Some(origin);
-    let width = extents.get(at)?.1;
-    let out = match (left, right) {
-        // First in the group (or just left of it): out past its left edge,
-        // over the group's chip.
-        (false, true) => x < extents.get(at + 1)?.0 - gap - width - DETACH_DISTANCE,
-        // Last in the group (or just right of it): out past its right edge.
-        (true, false) => {
-            let (start, w) = *extents.get(at - 1)?;
-            x > start + w + gap + width + DETACH_DISTANCE
-        }
-        _ => return None,
-    };
-    Some((!out).then_some(origin))
-}
-
-/// Whether a tab of group `gid` sits right next to the tab at `at`.
-pub fn next_to(groups: &[Option<GroupId>], at: usize, gid: GroupId) -> bool {
+    let own = groups.get(at).copied().flatten();
     let left = at.checked_sub(1).and_then(|i| groups.get(i).copied().flatten());
     let right = groups.get(at + 1).copied().flatten();
-    left == Some(gid) || right == Some(gid)
+    let width = extents.get(at)?.1;
+    match own {
+        Some(_) if left == own && right == own => None,
+        // First in its group: out past its left edge.
+        Some(_) if right == own => (x < extents.get(at + 1)?.0 - gap - width - EDGE_DISTANCE).then_some(None),
+        // Last in its group: out past its right edge.
+        Some(_) if left == own => {
+            let (start, w) = *extents.get(at - 1)?;
+            (x > start + w + gap + width + EDGE_DISTANCE).then_some(None)
+        }
+        Some(_) => None,
+        None => {
+            // Into the last tab of a group on the left, or the first of one
+            // on the right.
+            let into_left = left.zip(at.checked_sub(1).and_then(|i| extents.get(i))).and_then(|(g, &(start, w))| {
+                (w > 0.0 && x < start + w - EDGE_DISTANCE).then_some(g)
+            });
+            let into_right = right.zip(extents.get(at + 1)).and_then(|(g, &(start, w))| {
+                (w > 0.0 && x > start + EDGE_DISTANCE).then_some(g)
+            });
+            into_left.or(into_right).map(Some)
+        }
+    }
 }
 
 /// Where the tab at `i` ends up when the tab at `from` moves to `to`.
@@ -247,29 +252,36 @@ mod tests {
     const N: Option<GroupId> = None;
 
     #[test]
-    fn dragging_out_over_the_edge() {
+    fn dragging_over_a_group_edge() {
         // Tabs 100 wide, 2 apart: [A 0..100] [A 102..202] [N 204..304].
         let extents = [(0.0, 100.0), (102.0, 100.0), (204.0, 100.0)];
-        let groups = [A, A, N];
         // The last tab of A, dragged right: in until 16 past its own edge.
-        assert_eq!(edge_group(&groups, &extents, 1, 1, 210.0, 2.0), Some(A));
-        assert_eq!(edge_group(&groups, &extents, 1, 1, 220.0, 2.0), Some(N));
-        // Out already (A's tab is still on its left): the same boundary
-        // brings it back in.
-        assert_eq!(edge_group(&[A, N, N], &extents, 1, 1, 210.0, 2.0), Some(A));
+        assert_eq!(edge_group(&[A, A, N], &extents, 1, 210.0, 2.0), None);
+        assert_eq!(edge_group(&[A, A, N], &extents, 1, 220.0, 2.0), Some(N));
+        // Out, next to A: it stays out until it's pulled 16 into A's last tab.
+        assert_eq!(edge_group(&[A, N, N], &extents, 1, 150.0, 2.0), None);
+        assert_eq!(edge_group(&[A, N, N], &extents, 1, 80.0, 2.0), Some(A));
         // The first tab of A, dragged left over the chip.
         let extents = [(30.0, 100.0), (132.0, 100.0)];
-        assert_eq!(edge_group(&[A, A], &extents, 0, 1, 20.0, 2.0), Some(A));
-        assert_eq!(edge_group(&[A, A], &extents, 0, 1, 10.0, 2.0), Some(N));
-        // Out on the left, the chip moved right of it: same boundary.
+        assert_eq!(edge_group(&[A, A], &extents, 0, 20.0, 2.0), None);
+        assert_eq!(edge_group(&[A, A], &extents, 0, 10.0, 2.0), Some(N));
+        // Out on the left (the chip moved right of it): in again 16 into
+        // A's first tab.
         let extents = [(0.0, 100.0), (132.0, 100.0)];
-        assert_eq!(edge_group(&[N, A], &extents, 0, 1, 10.0, 2.0), Some(N));
-        assert_eq!(edge_group(&[N, A], &extents, 0, 1, 50.0, 2.0), Some(A));
-        // In the middle of its group, or away from it: not an edge.
-        assert_eq!(edge_group(&[A, A, A], &[(0.0, 100.0); 3], 1, 1, 500.0, 2.0), None);
-        assert_eq!(edge_group(&[A, N, N], &[(0.0, 100.0); 3], 2, 1, 500.0, 2.0), None);
+        assert_eq!(edge_group(&[N, A], &extents, 0, 100.0, 2.0), None);
+        assert_eq!(edge_group(&[N, A], &extents, 0, 150.0, 2.0), Some(A));
+        // Between two groups, the one it's pulled into.
+        let extents = [(0.0, 100.0), (102.0, 100.0), (204.0, 100.0)];
+        assert_eq!(edge_group(&[A, N, B], &extents, 1, 80.0, 2.0), Some(A));
+        assert_eq!(edge_group(&[A, N, B], &extents, 1, 230.0, 2.0), Some(B));
+        assert_eq!(edge_group(&[A, N, B], &extents, 1, 150.0, 2.0), None);
+        // In the middle of its group, or away from any: nothing to do.
+        assert_eq!(edge_group(&[A, A, A], &[(0.0, 100.0); 3], 1, 500.0, 2.0), None);
+        assert_eq!(edge_group(&[A, N, N], &[(0.0, 100.0); 3], 2, 500.0, 2.0), None);
         // Alone in its group: the group goes with it.
-        assert_eq!(edge_group(&[N, A, N], &[(0.0, 100.0); 3], 1, 1, 500.0, 2.0), None);
+        assert_eq!(edge_group(&[N, A, N], &[(0.0, 100.0); 3], 1, 500.0, 2.0), None);
+        // A collapsed group's hidden tabs have no width: not joined.
+        assert_eq!(edge_group(&[A, N], &[(20.0, 0.0), (22.0, 100.0)], 1, 0.0, 2.0), None);
     }
 
     fn apply<T: Copy>(order: &[usize], v: &[T]) -> Vec<T> {
