@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 — 2026-11-22
 
 - Tabs show what their programs say they're doing: a spinner while working
   (a filling ring when it says how far along), an amber `!` while waiting
