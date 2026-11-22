@@ -44,6 +44,7 @@ export global SettingsData {
     in-out property <bool> focus-follow-mouse;
     in-out property <bool> inherit-cwd;
     in-out property <bool> split-ssh;
+    in-out property <bool> command-status;
     in-out property <bool> allow-osc52;
     in-out property <bool> reload-env;
     in-out property <bool> remember-bounds;
@@ -406,6 +407,17 @@ component InteractionPage inherits VerticalLayout {
             checked <=> SettingsData.split-ssh;
             toggled => {
                 SettingsData.set-value("splitDuplicatesSsh", self.checked ? "true" : "false");
+            }
+        }
+    }
+
+    Card {
+        title: "Tabs show running commands";
+        description: "A tab shows a spinner while a command runs, then a check when it's done or a cross when it failed. Shells say when a command ends; new tabs and panes only.";
+        Switch {
+            checked <=> SettingsData.command-status;
+            toggled => {
+                SettingsData.set-value("tabCommandStatus", self.checked ? "true" : "false");
             }
         }
     }

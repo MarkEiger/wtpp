@@ -19,3 +19,4 @@ default-term: keys:ctrl+comma|sleep:1200|click:968,150|sleep:800|shot:made
 default-term-restore: keys:ctrl+comma|sleep:1200|shot:before|click:968,150|sleep:800|shot:restored
 tab-group: keys:ctrl+shift+t|sleep:800|keys:ctrl+shift+p|sleep:300|type:add tab to new group|keys:Return|sleep:400|type:Work|keys:Return|sleep:300|shot:grouped|keys:ctrl+shift+p|sleep:300|type:collapse or expand|keys:Return|sleep:400|shot:collapsed
 shift-enter-then-enter: type:echo one|keys:shift+Return|keys:Return|sleep:400|type:echo two|keys:Return|sleep:400|shot:submitted
+tab-status: type:printf '\e]7501;state=working\a'|keys:Return|keys:ctrl+shift+t|sleep:800|type:printf '\e]7501;state=blocked\a'|keys:Return|keys:ctrl+shift+t|sleep:800|type:printf '\e]9;4;1;60\a'|keys:Return|keys:ctrl+shift+t|sleep:800|type:sleep 2; printf '\e]7501;state=done\a'|keys:Return|keys:ctrl+shift+t|sleep:3000|shot:states

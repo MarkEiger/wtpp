@@ -205,7 +205,7 @@ impl App {
             let collapsed = |g| self.group(g).is_some_and(|g| g.collapsed);
             let Some(target) = tab_groups::collapse_target(&self.tab_groups(), gid, collapsed, self.active) else { return };
             self.active = target;
-            self.tabs[target].bell = false;
+            self.tabs[target].seen();
         }
         if let Some(group) = self.group_mut(gid) {
             group.collapsed = !group.collapsed;

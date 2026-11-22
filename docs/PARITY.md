@@ -25,7 +25,8 @@
 - [x] Drag tabs between windows (drop marker), tear off into a new window, drag a lone tab to move/merge its window
 - [x] New windows cascade from the current one, on its monitor
 - [x] Unfocused window look (dimmed tab row)
-- [~] Bell indicator on tab — done; progress indicator (OSC 9;4) **blocked**: alacritty_terminal's parser drops OSC 9 (needs a vendored patch)
+- [x] Bell indicator on tab; progress indicator (OSC 9;4)
+- [x] Program status on tab (beyond WT): working / waiting for you / done / idle / error, OSC 7501 (Claude Code's), marked while unseen
 - [x] Launch position (`initialPosition`) and window size/position persisted
 
 ## Panes

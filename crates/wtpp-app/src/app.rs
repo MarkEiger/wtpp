@@ -18,6 +18,7 @@ use wtpp_session::alacritty_terminal::index::{Column, Point, Side};
 use wtpp_session::alacritty_terminal::selection::{Selection, SelectionType};
 use wtpp_session::alacritty_terminal::term::{TermMode, viewport_to_point};
 use wtpp_session::alacritty_terminal::vte::ansi::{self, CursorShape as TermCursor};
+use wtpp_session::status::{State as ProgramState, Status as ProgramStatus};
 use wtpp_session::{GridSize, Session, SessionEvent};
 
 use crate::pane_tree::{self, Direction, Node, PaneId, Rect};
@@ -67,6 +68,10 @@ pub(crate) struct Pane {
     waiting: std::collections::VecDeque<Waiting>,
     /// Why its program couldn't be started, shown again after a resize.
     failure: Option<String>,
+    /// What its program last said it's doing (see `on_status`).
+    pub(crate) status: Option<ProgramStatus>,
+    /// What its title's status prefix says (see `title_status`).
+    title_status: Option<ProgramState>,
 }
 
 /// Input for a pane waiting its turn (see `App::word_edit`).
@@ -185,6 +190,9 @@ pub(crate) struct Tab {
     pub(crate) renaming: bool,
     /// A bell rang in this tab while it wasn't being looked at.
     pub(crate) bell: bool,
+    /// A program in it finished, failed or started waiting for you while
+    /// the tab wasn't being looked at (see `App::on_status`).
+    pub(crate) attention: bool,
     /// Set from the tab menu; overrides the profile's `tabColor`.
     pub(crate) color: Option<wtpp_config::Color>,
     /// The tab group it's in (one of `App::groups`).
@@ -193,7 +201,13 @@ pub(crate) struct Tab {
 
 impl Tab {
     pub(crate) fn new(kind: TabKind) -> Tab {
-        Tab { kind, title: None, renaming: false, bell: false, color: None, group: None }
+        Tab { kind, title: None, renaming: false, bell: false, attention: false, color: None, group: None }
+    }
+
+    /// It's being looked at: what happened in it while it wasn't is seen.
+    pub(crate) fn seen(&mut self) {
+        self.bell = false;
+        self.attention = false;
     }
 }
 
@@ -665,6 +679,12 @@ impl App {
                 })
                 .ok();
             }
+            SessionEvent::Status => {
+                slint::invoke_from_event_loop(move || {
+                    crate::with_pane(id, |app| app.on_status(id));
+                })
+                .ok();
+            }
             SessionEvent::ClipboardStore(text) => {
                 slint::invoke_from_event_loop(move || {
                     crate::with_pane(id, |app| app.on_osc52(text));
@@ -709,6 +729,8 @@ impl App {
                         last_key: None,
                         waiting: Default::default(),
                         failure: None,
+                        status: None,
+                        title_status: None,
                     },
                 );
                 true
@@ -744,6 +766,8 @@ impl App {
                         last_key: None,
                         waiting: Default::default(),
                         failure: Some(failure),
+                        status: None,
+                        title_status: None,
                     },
                 );
                 true
@@ -862,6 +886,8 @@ impl App {
         // bash and zsh get the ssh function (see `wtpp_config::ssh`), each as
         // its setting says.
         let cwd = self.settings.inherit_working_directory;
+        // Shells mark where each command ends (see `wtpp_session::status`).
+        let status = self.settings.command_status;
         let token = self.settings.split_duplicates_ssh.then(wtpp_config::ssh::new_token);
         let ssh = ssh.filter(|_| self.settings.split_duplicates_ssh);
         // Found on the running ssh (not reported by the function), its
@@ -870,10 +896,11 @@ impl App {
         let ssh_env = token.as_deref().map(|t| wtpp_config::ssh::shell_env(t, ssh.map(|s| (&s.args[..], run(s))))).unwrap_or_default();
         let mut ssh_runs = false;
         if is_powershell(&program) {
-            use wtpp_config::cwd::{POWERSHELL_PROMPT_HOOK, powershell_args_with_command};
+            use wtpp_config::cwd::{powershell_args_with_command, powershell_prompt_hook};
             // Windows' ssh.exe: run after the profile (and the hook).
             let run = ssh.and_then(|s| Some((s.program.clone()?, &s.args))).filter(|(_, args)| wtpp_config::ssh::fits_powershell(args));
-            let command = [cwd.then_some(POWERSHELL_PROMPT_HOOK), run.as_ref().map(|_| wtpp_config::ssh::POWERSHELL_SSH_RUN)];
+            let hook = powershell_prompt_hook(cwd, status);
+            let command = [hook.as_deref(), run.as_ref().map(|_| wtpp_config::ssh::POWERSHELL_SSH_RUN)];
             let command = command.into_iter().flatten().collect::<Vec<_>>().join("; ");
             if !command.is_empty()
                 && let Some(args) = powershell_args_with_command(&program, &profile.args, &command)
@@ -886,6 +913,10 @@ impl App {
                 }
             }
         } else if is_cmd(&program) {
+            let sets_prompt = profile.env.keys().any(|k| k.eq_ignore_ascii_case("PROMPT"));
+            if status && !sets_prompt {
+                profile.env.insert("PROMPT".into(), wtpp_config::cwd::cmd_prompt(var("PROMPT").as_deref()));
+            }
             if let Some(args) = ssh.filter(|_| profile.args.is_empty()).and_then(|s| wtpp_config::ssh::cmd_args(s.program.as_deref()?, &s.args)) {
                 profile.args = args;
                 ssh_runs = true;
@@ -894,14 +925,14 @@ impl App {
             let get = |name: &str| profile.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.clone());
             let wslenv = get("WSLENV").or_else(|| var("WSLENV"));
             let shown = start_in.and_then(|s| s.shown.as_deref());
-            let env = wtpp_config::cwd::wsl_prompt_env(get("PROMPT_COMMAND").is_some(), wslenv.as_deref(), shown, cwd, &ssh_env);
+            let env = wtpp_config::cwd::wsl_prompt_env(get("PROMPT_COMMAND").is_some(), wslenv.as_deref(), shown, cwd, status, &ssh_env);
             if !env.is_empty() {
                 profile.env.retain(|k, _| !k.eq_ignore_ascii_case("WSLENV"));
             }
             profile.env.extend(env);
         } else if cfg!(unix) {
             let get = |name: &str| profile.env.get(name).cloned().or_else(|| var(name));
-            let env = wtpp_config::cwd::unix_prompt_env(&program, zsh_integration().as_deref(), get, cwd, &ssh_env);
+            let env = wtpp_config::cwd::unix_prompt_env(&program, zsh_integration().as_deref(), get, cwd, status, &ssh_env);
             profile.env.extend(env);
         }
         // The shell has the token, and the ssh to run if it was given it.
@@ -1136,7 +1167,7 @@ impl App {
     pub fn select_tab(&mut self, index: usize) {
         if index < self.tabs.len() && index != self.active {
             self.active = index;
-            self.tabs[index].bell = false;
+            self.tabs[index].seen();
             self.relayout();
         }
     }
@@ -1170,6 +1201,49 @@ impl App {
         });
     }
 
+    /// A pane's program said what it's doing (see `wtpp_session::status`).
+    /// Its tab shows it; one that isn't being looked at is also marked when
+    /// the program finishes, fails or starts waiting for you, until it is.
+    pub fn on_status(&mut self, id: PaneId) {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        // What a program says outright (OSC 7501, 9;4), over what its title
+        // says (Claude Code's prefix), over what the shell says of the
+        // command it runs.
+        let (command, recheck) = pane.session.command_status();
+        let new = pane
+            .session
+            .status()
+            .or_else(|| pane.title_status.map(ProgramStatus::of))
+            .or_else(|| command.map(ProgramStatus::of));
+        if let Some(after) = recheck {
+            slint::Timer::single_shot(after + Duration::from_millis(20), move || {
+                crate::with_pane(id, |app| app.on_status(id));
+            });
+        }
+        let old = std::mem::replace(&mut pane.status, new.clone());
+        let (old, new) = (old.map(|s| s.state), new.map(|s| s.state));
+        if old == new && new != Some(ProgramState::Working) {
+            return;
+        }
+        let tab = self.tabs.iter().position(|t| matches!(&t.kind, TabKind::Terminal { root, .. } if root.contains(id)));
+        if let Some(tab) = tab
+            && (tab != self.active || !self.window_active)
+            && status_needs_look(old, new)
+        {
+            self.tabs[tab].attention = true;
+        }
+        self.refresh_chrome();
+    }
+
+    /// The working tabs' spinners turn (every window's, on a timer).
+    pub fn on_spin(&mut self) {
+        let working = self.panes.values().any(|p| p.status.as_ref().is_some_and(|s| s.state == ProgramState::Working));
+        if working {
+            let ui = self.ui();
+            ui.set_spin_phase((ui.get_spin_phase() + 1) % 8);
+        }
+    }
+
     /// An app asked to set the clipboard (OSC 52).
     pub fn on_osc52(&mut self, text: String) {
         if !self.settings.allow_osc52 {
@@ -1195,7 +1269,7 @@ impl App {
             crate::background::refresh(self.id, self.background_images());
         }
         if active && let Some(tab) = self.tabs.get_mut(self.active) {
-            tab.bell = false;
+            tab.seen();
             self.refresh_chrome();
         }
         self.render();
@@ -1234,6 +1308,11 @@ impl App {
             return;
         }
         pane.exited = true;
+        // Nothing is going on in it any more, whatever its program last said.
+        pane.session.clear_status();
+        pane.title_status = None;
+        self.on_status(id);
+        let Some(pane) = self.panes.get_mut(&id) else { return };
         let success = code.is_none_or(|c| c == 0);
         let close = match pane.profile.close_on_exit {
             CloseOnExit::Always => true,
@@ -1261,11 +1340,22 @@ impl App {
     }
 
     pub fn on_title(&mut self, id: PaneId, title: Option<String>) {
-        if let Some(pane) = self.panes.get_mut(&id)
-            && !pane.profile.suppress_application_title
-        {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        let (status, title) = match title {
+            Some(title) => {
+                let (status, rest) = title_status(&title, pane.title_status);
+                (status, Some(rest.to_owned()))
+            }
+            None => (None, None),
+        };
+        let status_changed = pane.title_status != status;
+        pane.title_status = status;
+        if !pane.profile.suppress_application_title {
             pane.title = title;
             self.refresh_chrome();
+        }
+        if status_changed {
+            self.on_status(id);
         }
     }
 
@@ -1293,6 +1383,13 @@ impl App {
     /// and redraw.
     pub fn relayout(&mut self) {
         self.tidy_groups();
+        // Whatever made it the tab shown (picked, the one before closed,
+        // a group collapsed), what happened in it is seen now.
+        if self.window_active
+            && let Some(tab) = self.tabs.get_mut(self.active)
+        {
+            tab.seen();
+        }
         // Linux, own title bar: the maximize button shows the real state.
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -1453,7 +1550,17 @@ impl App {
                 let end = t.group.is_some() && groups.get(i + 1).copied().flatten() != t.group;
                 (i, t, group, start, end)
             })
-            .map(|(i, t, group, start, end)| TabData {
+            .map(|(i, t, group, start, end)| {
+                let status = match &t.kind {
+                    TabKind::Terminal { root, .. } => {
+                        let panes = root.panes();
+                        tab_status(panes.iter().filter_map(|id| self.panes.get(id)?.status.as_ref()), t.attention)
+                    }
+                    TabKind::Settings => (0, -1),
+                };
+                (i, t, group, start, end, status)
+            })
+            .map(|(i, t, group, start, end, status)| TabData {
                 group_id: group.map(|g| g.id.to_string()).unwrap_or_default().into(),
                 group_color: group.map_or(slint::Color::default(), |g| rgb(g.color)),
                 in_group: group.is_some(),
@@ -1473,6 +1580,9 @@ impl App {
                 color: tab_color(self, t).map_or(slint::Color::default(), |c| slint::Color::from_rgb_u8(c.0, c.1, c.2)),
                 has_color: tab_color(self, t).is_some(),
                 bell: t.bell,
+                attention: t.attention,
+                status: status.0,
+                progress: status.1,
                 icon: tab_profile(self, t).map(|p| self.icon(p).0).unwrap_or_default(),
                 icon_text: tab_profile(self, t).map(|p| self.icon(p).1).unwrap_or_default().into(),
             })
@@ -1781,6 +1891,11 @@ impl App {
             self.send_keys(id, newline);
             return true;
         }
+        // Enter at the shell's prompt runs a command: its tab shows it running.
+        if key == Some((Key::Enter, Mods::NONE)) && pane.session.entered() {
+            self.on_status(id);
+        }
+        let Some(pane) = self.panes.get(&id) else { return false };
         let bytes = match key {
             Some((k, m)) if cfg!(target_os = "macos") && let Some(b) = mac_option_edit(k, m) => Some(b.to_vec()),
             // macOS: Option types characters (⌥A → å), as in Terminal.
@@ -2708,6 +2823,54 @@ fn home_dir() -> PathBuf {
     std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// The status a title's prefix shows, and the title without it. Claude Code
+/// puts its state there when it can't tell the terminal outright (its OSC
+/// 7501 query gets no answer through Windows' ConPTY): `◐`/`◑` (turning)
+/// while working, `✳` otherwise, which after work means it's done.
+fn title_status(title: &str, was: Option<ProgramState>) -> (Option<ProgramState>, &str) {
+    let mut chars = title.chars();
+    let state = match chars.next() {
+        Some('◐' | '◑') => ProgramState::Working,
+        Some('✳') if matches!(was, Some(ProgramState::Working | ProgramState::Done)) => ProgramState::Done,
+        Some('✳') => ProgramState::Idle,
+        _ => return (None, title),
+    };
+    match chars.as_str().strip_prefix(' ') {
+        Some(rest) => (Some(state), rest),
+        None => (None, title),
+    }
+}
+
+/// A program's status went from `old` to `new`: is that worth marking its
+/// tab for? Finishing, failing and waiting for you are; so is work ending
+/// without a word (a progress bar taken away, a program stopped).
+fn status_needs_look(old: Option<ProgramState>, new: Option<ProgramState>) -> bool {
+    match new {
+        _ if old == new => false,
+        Some(ProgramState::Blocked | ProgramState::Error | ProgramState::Done) => true,
+        None | Some(ProgramState::Idle) => old == Some(ProgramState::Working),
+        Some(ProgramState::Working) => false,
+    }
+}
+
+/// What a tab shows of its panes' statuses: the most pressing one, as the
+/// UI's `TabData.status` (0 none, then `ProgramState`'s order) and
+/// `progress` (-1 when not said). How something ended (done, failed) only
+/// shows until the tab has been seen (`attention`); what's going on (working,
+/// waiting for you, idle) shows as long as it lasts.
+fn tab_status<'a>(statuses: impl Iterator<Item = &'a ProgramStatus>, attention: bool) -> (i32, i32) {
+    let ended = |s: &&ProgramStatus| matches!(s.state, ProgramState::Done | ProgramState::Error);
+    let Some(status) = statuses.filter(|s| attention || !ended(s)).max_by_key(|s| s.state) else { return (0, -1) };
+    let state = match status.state {
+        ProgramState::Idle => 1,
+        ProgramState::Done => 2,
+        ProgramState::Working => 3,
+        ProgramState::Error => 4,
+        ProgramState::Blocked => 5,
+    };
+    (state, status.progress.map_or(-1, i32::from))
+}
+
 fn is_exe_path(title: &str) -> bool {
     let lower = title.to_ascii_lowercase();
     lower.ends_with(".exe") && (lower.contains('\\') || lower.contains('/'))
@@ -2844,6 +3007,55 @@ fn start_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_title_prefix() {
+        use ProgramState::*;
+        assert_eq!(title_status("✳ Claude Code", None), (Some(Idle), "Claude Code"));
+        assert_eq!(title_status("◐ Fix the build", Some(Idle)), (Some(Working), "Fix the build"));
+        assert_eq!(title_status("◑ Fix the build", Some(Working)), (Some(Working), "Fix the build"));
+        assert_eq!(title_status("✳ Fix the build", Some(Working)), (Some(Done), "Fix the build"));
+        assert_eq!(title_status("✳ Fix the build", Some(Done)), (Some(Done), "Fix the build"));
+        // Anything else is just a title.
+        assert_eq!(title_status("mark@pc: ~", Some(Working)), (None, "mark@pc: ~"));
+        assert_eq!(title_status("✳", None), (None, "✳"));
+        assert_eq!(title_status("◐x", None), (None, "◐x"));
+        assert_eq!(title_status("", None), (None, ""));
+    }
+
+    #[test]
+    fn tab_marked_when_work_ends_or_needs_you() {
+        use ProgramState::*;
+        // Finishing, failing, asking: yes, once.
+        assert!(status_needs_look(Some(Working), Some(Done)));
+        assert!(status_needs_look(Some(Working), Some(Blocked)));
+        assert!(status_needs_look(Some(Working), Some(Error)));
+        assert!(status_needs_look(None, Some(Done)));
+        assert!(!status_needs_look(Some(Done), Some(Done)));
+        // Work ending without a word: a progress bar taken away, a stop.
+        assert!(status_needs_look(Some(Working), None));
+        assert!(status_needs_look(Some(Working), Some(Idle)));
+        // Starting work, or going idle from anything else, is nothing to see.
+        assert!(!status_needs_look(Some(Done), Some(Working)));
+        assert!(!status_needs_look(None, Some(Working)));
+        assert!(!status_needs_look(None, Some(Idle)));
+        assert!(!status_needs_look(Some(Done), Some(Idle)));
+        assert!(!status_needs_look(Some(Done), None));
+    }
+
+    #[test]
+    fn tab_shows_most_pressing_pane() {
+        let st = |state, progress| ProgramStatus { state, progress, kind: None, app: None };
+        assert_eq!(tab_status([].iter(), false), (0, -1));
+        assert_eq!(tab_status([st(ProgramState::Idle, None)].iter(), false), (1, -1));
+        assert_eq!(tab_status([st(ProgramState::Done, None), st(ProgramState::Working, Some(30))].iter(), true), (3, 30));
+        assert_eq!(tab_status([st(ProgramState::Working, None), st(ProgramState::Blocked, None)].iter(), false), (5, -1));
+        // Done and failed show until seen; then what's left, or nothing.
+        assert_eq!(tab_status([st(ProgramState::Done, None)].iter(), true), (2, -1));
+        assert_eq!(tab_status([st(ProgramState::Done, None)].iter(), false), (0, -1));
+        assert_eq!(tab_status([st(ProgramState::Error, None), st(ProgramState::Idle, None)].iter(), true), (4, -1));
+        assert_eq!(tab_status([st(ProgramState::Error, None), st(ProgramState::Idle, None)].iter(), false), (1, -1));
+    }
 
     #[test]
     fn window_goes_see_through_with_a_translucent_pane() {

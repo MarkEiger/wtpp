@@ -107,6 +107,54 @@ arguments as they were, never a command line, and only options about where
 and how to connect: one with an option that runs something locally (such as
 `ProxyCommand`) opens a plain shell.
 
+## Tab status
+
+A tab shows what's going on in it, so you can tell which tabs are busy,
+finished or need you without opening each one:
+
+| Icon | State |
+|---|---|
+| turning ring (or one filling up) | working |
+| amber `!` | waiting for you (a question, a permission prompt) |
+| check | done |
+| `z` | idle |
+| red cross | error |
+
+Any command you run shows: `sleep 30`, `zip`, a build. Once it has run half
+a second the tab's spinner turns; when it ends, a check (or a red cross for
+a non-zero exit code) shows until you've seen the tab: in the tab you're
+looking at, it's gone at once. Ctrl+C leaves no mark. That works in PowerShell, cmd, bash (WSL, Linux, macOS) and zsh:
+wt++'s prompt hooks mark each prompt with the last command's exit code
+(OSC 133;D; cmd's has no code), and a command starts when you press Enter
+at the prompt (zsh, and shells with their own OSC 133 like fish 4, say so
+themselves). A program run from the prompt shows as running until it exits
+(an editor, `ssh`, `wsl` from PowerShell), unless it says something else
+itself, like Claude Code. Settings → Interaction → **Tabs show running
+commands** (`"wtpp.tabCommandStatus"`) turns the hooks off.
+
+When a tab you aren't looking at finishes, fails or starts waiting for you,
+its title brightens and the check or cross stays until you switch to it;
+then it's cleared. What's still going on (working, waiting, idle) stays. The
+same tab keeps its status when you rename it.
+
+Claude Code does this by itself. On Windows, where the console layer
+(ConPTY) keeps wt++'s answer from reaching it, Claude shows its state at the
+start of the title instead; wt++ reads that as the status (working, then
+done; waiting for you looks the same as done there) and leaves it out of the
+title. Any other program or script can too, by
+printing OSC 7501 (fields separated by `:`; `id=` keeps several statuses
+apart, the most pressing one shows):
+
+```sh
+printf '\e]7501;state=working\a'     # also blocked, done, idle, error; progress=40
+printf '\e]7501;state=done\a'
+printf '\e]7501;state=clear\a'       # no status
+```
+
+or Windows Terminal's progress, OSC 9;4 (`9;4;1;50`: 50%, `9;4;3`: working,
+`9;4;2`: error, `9;4;0`: done). A status goes away when the program's pane
+exits.
+
 ## Environment variables (Windows)
 
 New tabs and panes get the environment Windows has now, as Windows Terminal

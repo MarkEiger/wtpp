@@ -486,7 +486,7 @@ mod tests {
             let modules = std::env::var("WTPP_TEST_ZSH_MODULES").map(|m| format!("module_path=({m}); ")).unwrap_or_default();
             shells.push((vec![zsh, "-f".into(), "-c".into()], format!("{modules}source {}; ", zsh_rc.display())));
         }
-        let pc = crate::cwd::bash_prompt_command(false, false, true).unwrap();
+        let pc = crate::cwd::bash_prompt_command(false, false, true, false).unwrap();
         for (shell, setup) in &shells {
             let go = |runtime: &str, line: &str| {
                 let mut c = std::process::Command::new(&shell[0]);

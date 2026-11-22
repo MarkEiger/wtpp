@@ -83,3 +83,4 @@ perf-poke: sleep:600|seq 1 20000{ENTER}|sleep:6000|shot:stalled|x|sleep:4000|sho
 perf-wsl-big: sleep:600|time seq 1 2000000{ENTER}|sleep:30000|shot:done
 powerline: sleep:600|printf '\ue0b0 \ue0b2 \ue0a0 ok\n'{ENTER}|sleep:600|shot:glyphs
 shift-enter-then-enter: sleep:600|echo one+{ENTER}echo two{ENTER}|sleep:600|echo three{ENTER}|sleep:600|shot:submitted
+tab-status: sleep:600|Write-Host -NoNewline "${(}[char]27{)}]7501;state=working${(}[char]7{)}"{ENTER}|^+t|sleep:900|Write-Host -NoNewline "${(}[char]27{)}]7501;state=blocked${(}[char]7{)}"{ENTER}|^+t|sleep:900|Write-Host -NoNewline "${(}[char]27{)}]9;4;1;60${(}[char]7{)}"{ENTER}|^+t|sleep:900|Start-Sleep 2; Write-Host -NoNewline "${(}[char]27{)}]7501;state=done${(}[char]7{)}"{ENTER}|^+t|sleep:3000|shot:states|dclick:120,22|sleep:400|renamed{ENTER}|sleep:300|shot:renamed

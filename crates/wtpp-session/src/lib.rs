@@ -8,6 +8,7 @@ pub mod cwd;
 pub mod env;
 pub mod profiles;
 pub mod ssh;
+pub mod status;
 
 use std::borrow::Cow;
 use std::fs::File;
@@ -69,6 +70,8 @@ pub enum SessionEvent {
     Wakeup,
     Title(Option<String>),
     Bell,
+    /// What the program says it's doing changed (see [`Session::status`]).
+    Status,
     ClipboardStore(String),
     /// The shell ended, with its exit code when known.
     Exited(Option<i32>),
@@ -162,6 +165,10 @@ pub struct Listener {
     /// The arguments of the ssh the shell reported running, until it reports
     /// it's done (see `wtpp_config::ssh`).
     reported_ssh: Arc<Mutex<Option<Vec<String>>>>,
+    /// What programs said they're doing (see [`status`]).
+    statuses: Arc<Mutex<status::Statuses>>,
+    /// What the shell's commands are doing (see [`status::Commands`]).
+    commands: Arc<Mutex<status::Commands>>,
 }
 
 impl Listener {
@@ -183,7 +190,17 @@ impl Listener {
         }
         let found = self.cwd_scanner.lock().map(|mut scanner| scanner.feed_osc(bytes)).unwrap_or_default();
         for osc in found {
-            if let Some((kind, dir)) = cwd::parse_cwd_report(&osc) {
+            if let Some(report) = status::parse(&osc) {
+                if report == status::Report::Query {
+                    self.reply(status::QUERY_REPLY.into());
+                } else if self.statuses.lock().is_ok_and(|mut s| s.apply(report)) {
+                    (self.callback)(SessionEvent::Status);
+                }
+            } else if let Some(mark) = status::parse_mark(&osc) {
+                if self.commands.lock().is_ok_and(|mut c| c.apply(mark, Instant::now())) {
+                    (self.callback)(SessionEvent::Status);
+                }
+            } else if let Some((kind, dir)) = cwd::parse_cwd_report(&osc) {
                 if let Ok(mut reported) = self.reported_cwd.lock() {
                     reported.record(kind, dir);
                 }
@@ -248,6 +265,10 @@ pub struct Session {
     last_output: Arc<Mutex<Option<Instant>>>,
     /// See [`Listener::reported_ssh`].
     reported_ssh: Arc<Mutex<Option<Vec<String>>>>,
+    /// See [`Listener::statuses`].
+    statuses: Arc<Mutex<status::Statuses>>,
+    /// See [`Listener::commands`].
+    commands: Arc<Mutex<status::Commands>>,
     /// For a handed-over console (see [`Pipes::keep_alive`]).
     _keep_alive: Vec<File>,
 }
@@ -269,6 +290,8 @@ impl Session {
             last_output: Default::default(),
             ssh_token: profile.ssh_token.as_deref().filter(|t| !t.is_empty()).map(Arc::from),
             reported_ssh: Default::default(),
+            statuses: Default::default(),
+            commands: Default::default(),
         };
 
         let config = Config {
@@ -341,7 +364,7 @@ impl Session {
 
         let reported_cwd = listener.reported_cwd.clone();
         let reported_ssh = listener.reported_ssh.clone();
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh, _keep_alive: Vec::new() })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh, statuses: listener.statuses.clone(), commands: listener.commands.clone(), _keep_alive: Vec::new() })
     }
 
     /// A session on a console Windows handed over (see [`Pipes`]): a thread
@@ -402,7 +425,7 @@ impl Session {
         // The console host starts at its own default size.
         io.resize(size);
         let reported_cwd = listener.reported_cwd.clone();
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh: listener.reported_ssh.clone(), _keep_alive: keep_alive })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh: listener.reported_ssh.clone(), statuses: listener.statuses.clone(), commands: listener.commands.clone(), _keep_alive: keep_alive })
     }
 
     /// A session for a program that couldn't be started: a terminal to say
@@ -411,7 +434,35 @@ impl Session {
         let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
         let reported_cwd = listener.reported_cwd.clone();
         let last_output = listener.last_output.clone();
-        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, last_output, reported_ssh: listener.reported_ssh.clone(), _keep_alive: Vec::new() }
+        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, last_output, reported_ssh: listener.reported_ssh.clone(), statuses: listener.statuses.clone(), commands: listener.commands.clone(), _keep_alive: Vec::new() }
+    }
+
+    /// What the program says it's doing, its most pressing status if it
+    /// reported several (see [`status`]).
+    pub fn status(&self) -> Option<status::Status> {
+        self.statuses.lock().ok().and_then(|s| s.current())
+    }
+
+    /// Forget every status: the program that reported them is gone.
+    pub fn clear_status(&self) {
+        if let Ok(mut s) = self.statuses.lock() {
+            s.apply(status::Report::Clear(None));
+        }
+        if let Ok(mut c) = self.commands.lock() {
+            c.clear();
+        }
+    }
+
+    /// What the shell's commands are doing, and when to ask again (see
+    /// [`status::Commands::current`]).
+    pub fn command_status(&self) -> (Option<status::State>, Option<Duration>) {
+        self.commands.lock().map(|c| c.current(Instant::now())).unwrap_or_default()
+    }
+
+    /// Enter was pressed in the pane: true if that ran a command at the
+    /// shell's prompt.
+    pub fn entered(&self) -> bool {
+        self.commands.lock().is_ok_and(|mut c| c.entered(Instant::now()))
     }
 
     /// When the program's output last arrived, if it has printed anything.
@@ -643,7 +694,7 @@ mod win32_input_tests {
         shells[1].args = wtpp_config::cwd::powershell_args_with_hook("powershell.exe", &shells[1].args).unwrap();
         if let Ok(distro) = std::env::var("WTPP_TEST_WSL_DISTRO") {
             let mut wsl = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
-            wsl.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, &[]));
+            wsl.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, false, &[]));
             shells.push(wsl);
         }
         for mut profile in shells {
@@ -957,7 +1008,7 @@ mod shown_name_tests {
                 p.env.insert("HOME".into(), home_text.clone());
                 p.env.remove("ZDOTDIR");
                 let var = |n: &str| (n == "HOME").then(|| home_text.clone());
-                p.env.extend(wtpp_config::cwd::unix_prompt_env("zsh", Some(&integration.to_string_lossy()), var, true, &[]));
+                p.env.extend(wtpp_config::cwd::unix_prompt_env("zsh", Some(&integration.to_string_lossy()), var, true, false, &[]));
                 p.cwd = Some("/".into());
                 p
             };
@@ -982,7 +1033,7 @@ mod shown_name_tests {
         let Ok(distro) = std::env::var("WTPP_TEST_WSL_DISTRO") else { return };
         let commandline = format!("wsl.exe ~ -d {distro}");
         let mut parent = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
-        parent.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, &[]));
+        parent.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, false, &[]));
         let session = Session::spawn(&parent, SIZE, |_| {}).unwrap();
         assert!(wait(|| session.reported_cwd().is_some()));
         type_line(&session, "cd /bin");
@@ -996,7 +1047,7 @@ mod shown_name_tests {
         let mut child = Profile::new("wsl", &program, &[]);
         child.args = args;
         child.cwd = Some(dir.into());
-        child.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, reported.logical.as_deref(), true, &[]));
+        child.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, reported.logical.as_deref(), true, false, &[]));
         let new = Session::spawn(&child, SIZE, |_| {}).unwrap();
         assert!(wait(|| new.reported_cwd().is_some()));
         type_line(&new, "pwd");
@@ -1071,7 +1122,7 @@ mod ssh_tests {
         let home_text = home.to_string_lossy().into_owned();
         let var = |n: &str| (n == "HOME").then(|| home_text.clone());
         let file = program.rsplit('/').next().unwrap();
-        p.env.extend(wtpp_config::cwd::unix_prompt_env(file, zsh_dir, var, true, &wtpp_config::ssh::shell_env(&token, ssh.map(|a| (a, wtpp_config::ssh::Run::Function)))));
+        p.env.extend(wtpp_config::cwd::unix_prompt_env(file, zsh_dir, var, true, false, &wtpp_config::ssh::shell_env(&token, ssh.map(|a| (a, wtpp_config::ssh::Run::Function)))));
         p.ssh_token = Some(token);
         p.cwd = Some(dir.to_path_buf());
         p
@@ -1325,7 +1376,7 @@ mod ssh_tests {
         let pane = |ssh: Option<&[String]>| {
             let mut p = Profile::new("wsl", "wsl.exe", &["~", "-d", &distro]);
             let token = wtpp_config::ssh::new_token();
-            p.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, &wtpp_config::ssh::shell_env(&token, ssh.map(|a| (a, wtpp_config::ssh::Run::Function)))));
+            p.env.extend(wtpp_config::cwd::wsl_prompt_env(false, None, None, true, false, &wtpp_config::ssh::shell_env(&token, ssh.map(|a| (a, wtpp_config::ssh::Run::Function)))));
             p.ssh_token = Some(token);
             Session::spawn(&p, SIZE, |_| {}).unwrap()
         };
@@ -1413,5 +1464,41 @@ mod ssh_tests {
         type_line(&session, "echo \"k=$(type -t ssh)\"");
         assert!(wait(10, || shows(&session, "k=alias")), "{:?}", screen(&session));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    /// A program asking whether statuses are shown gets its answer; what it
+    /// reports reaches the UI and the session, wherever the output splits.
+    #[test]
+    fn statuses_answered_and_reported() {
+        let events = Arc::new(Mutex::new(0));
+        let counter = events.clone();
+        let profile = Profile::new("test", "none", &[]);
+        let size = GridSize { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
+        let (_term, listener, _) = Session::new_term(&profile, size, move |e| {
+            if matches!(e, SessionEvent::Status) {
+                *counter.lock().unwrap() += 1;
+            }
+        });
+        let (tx, rx) = mpsc::channel();
+        let _ = listener.pty.set(Io::Pipes { input: tx, signal: Arc::new(Mutex::new(None)) });
+        let output = b"\x1b]7501;?\x1b\\hi\x1b]7501;state=working:app=claude-code\x07\x1b]7501;state=blocked:id=s:kind=question\x1b\\";
+        let (a, b) = output.split_at(9);
+        listener.scan_output(a);
+        listener.scan_output(b);
+        assert_eq!(rx.try_recv().unwrap().unwrap().as_ref(), status::QUERY_REPLY.as_bytes());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(*events.lock().unwrap(), 2);
+        assert_eq!(listener.statuses.lock().unwrap().current().unwrap().state, status::State::Blocked);
+        // The same again is no news.
+        listener.scan_output(b"\x1b]7501;state=working:app=claude-code\x07");
+        assert_eq!(*events.lock().unwrap(), 2);
+        listener.scan_output(b"\x1b]7501;state=clear\x1b\\");
+        assert_eq!(*events.lock().unwrap(), 3);
+        assert_eq!(listener.statuses.lock().unwrap().current(), None);
     }
 }

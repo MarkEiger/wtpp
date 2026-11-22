@@ -11,6 +11,13 @@ export struct TabData {
     has-color: bool,
     // A bell rang in this tab while it wasn't being looked at.
     bell: bool,
+    // What its programs say they're doing (OSC 7501, OSC 9;4): 0 nothing,
+    // 1 idle, 2 done, 3 working, 4 error, 5 waiting for you; `progress`
+    // 0-100, or -1 when not said.
+    status: int,
+    progress: int,
+    // That changed while the tab wasn't being looked at.
+    attention: bool,
     icon: image,
     icon-text: string,
     active: bool,
@@ -380,6 +387,101 @@ component GroupChip inherits Rectangle {
     }
 }
 
+// A tab's status icon (see `TabData.status`), 12px square.
+component StatusIcon inherits Rectangle {
+    in property <int> status;
+    in property <int> progress;
+    in property <bool> attention;
+    // Steps of the working spinner, 0-7.
+    in property <int> spin;
+    property <color> green: Colors.light ? #1a7f37 : #3fb950;
+    property <color> amber: Colors.light ? #bf8700 : #d29922;
+    property <color> red: Colors.light ? #cf222e : #f85149;
+    width: 12px;
+    height: 12px;
+
+    // Working, no percentage: a turning three-quarter ring.
+    if root.status == 3 && root.progress < 0: Path {
+        property <angle> start: root.spin * 45deg;
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: Colors.accent;
+        stroke-width: 1.6px;
+        commands: "M " + (6 + 4.5 * Math.sin(self.start)) + " " + (6 - 4.5 * Math.cos(self.start))
+            + " A 4.5 4.5 0 1 1 " + (6 + 4.5 * Math.sin(self.start + 270deg)) + " " + (6 - 4.5 * Math.cos(self.start + 270deg));
+    }
+    // Working, n%: a ring filling clockwise from the top.
+    if root.status == 3 && root.progress >= 0: Rectangle {
+        Path {
+            width: 12px;
+            height: 12px;
+            viewbox-width: 12;
+            viewbox-height: 12;
+            stroke: Colors.text-dim.transparentize(60%);
+            stroke-width: 1.6px;
+            commands: "M 6 1.5 A 4.5 4.5 0 1 1 5.99 1.5";
+        }
+        Path {
+            property <angle> end: min(root.progress, 99.9) * 3.6deg;
+            width: 12px;
+            height: 12px;
+            viewbox-width: 12;
+            viewbox-height: 12;
+            stroke: Colors.accent;
+            stroke-width: 1.6px;
+            commands: "M 6 1.5 A 4.5 4.5 0 " + (root.progress > 50 ? "1" : "0") + " 1 " + (6 + 4.5 * Math.sin(self.end)) + " " + (6 - 4.5 * Math.cos(self.end));
+        }
+    }
+    // Waiting for you: an amber dot with a bar of "!".
+    if root.status == 5: Rectangle {
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: root.amber;
+        Path {
+            width: 10px;
+            height: 10px;
+            viewbox-width: 10;
+            viewbox-height: 10;
+            stroke: Colors.light ? #ffffff : #000000;
+            stroke-width: 1.4px;
+            commands: "M 5 2.4 L 5 5.6 M 5 7 L 5 7.8";
+        }
+    }
+    // Done: a check mark, green until seen.
+    if root.status == 2: Path {
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: root.attention ? root.green : Colors.text-dim;
+        stroke-width: 1.6px;
+        commands: "M 2 6.5 L 5 9.5 L 10.5 2.5";
+    }
+    // Error: a cross.
+    if root.status == 4: Path {
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: root.red;
+        stroke-width: 1.6px;
+        commands: "M 2.5 2.5 L 9.5 9.5 M 9.5 2.5 L 2.5 9.5";
+    }
+    // Idle (asleep): a "z".
+    if root.status == 1: Path {
+        width: 12px;
+        height: 12px;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: root.attention ? Colors.text : Colors.text-dim;
+        stroke-width: 1.3px;
+        commands: "M 3 3.5 L 9 3.5 L 3 9.5 L 9 9.5";
+    }
+}
+
 component TabItem inherits Rectangle {
     in property <string> title;
     in property <bool> active;
@@ -389,6 +491,10 @@ component TabItem inherits Rectangle {
     in property <color> tab-color;
     in property <bool> has-color;
     in property <bool> bell;
+    in property <int> status;
+    in property <int> progress;
+    in property <bool> attention;
+    in property <int> spin;
     in property <bool> window-active: true;
     // Dragged out of the tab row, on its way to another window.
     in property <bool> lifted;
@@ -493,6 +599,17 @@ component TabItem inherits Rectangle {
             color: Colors.text;
         }
 
+        // What its programs say they're doing.
+        if root.status > 0: VerticalLayout {
+            alignment: center;
+            StatusIcon {
+                status: root.status;
+                progress: root.progress;
+                attention: root.attention;
+                spin: root.spin;
+            }
+        }
+
         // Bell rang while the tab wasn't visible.
         if root.bell: VerticalLayout {
             alignment: center;
@@ -524,7 +641,7 @@ component TabItem inherits Rectangle {
             max-width: root.icon-only ? 0px : 10000px;
             text: (root.is-settings ? "⚙  " : "") + root.title;
             // Colored tabs are dark enough for white text either way.
-            color: (root.active && root.window-active) || root.has-color ? Colors.text : Colors.text-dim;
+            color: (root.active && root.window-active) || root.has-color || root.attention ? Colors.text : Colors.text-dim;
             font-size: 12px;
             vertical-alignment: center;
             overflow: elide;
@@ -866,6 +983,8 @@ export component MainWindow inherits Window {
     in property <bool> terminal-menu;
     in property <bool> max-hovered;
     in property <bool> window-maximized;
+    // Step of the working tabs' spinners (see `App::on_spin`).
+    in-out property <int> spin-phase;
     in property <bool> window-active: true;
     out property <length> titlebar-height: titlebar.height;
     // Where the first tab starts (window coordinates, scrolling included) and
@@ -1106,6 +1225,10 @@ export component MainWindow inherits Window {
                                 tab-color: tab.color;
                                 has-color: tab.has-color;
                                 bell: tab.bell;
+                                status: tab.status;
+                                progress: tab.progress;
+                                attention: tab.attention;
+                                spin: root.spin-phase;
                                 icon: tab.icon;
                                 icon-text: tab.icon-text;
                                 window-active: root.window-active;

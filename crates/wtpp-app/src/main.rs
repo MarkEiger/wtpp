@@ -885,6 +885,11 @@ fn main() -> anyhow::Result<()> {
     blink.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(530), || {
         for_each_window(|app| app.on_blink());
     });
+    // Spinners of tabs whose programs are working.
+    let spin = slint::Timer::default();
+    spin.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(120), || {
+        for_each_window(|app| app.on_spin());
+    });
 
     // Windows come and go; `close_window` quits after the last one.
     slint::run_event_loop_until_quit()?;

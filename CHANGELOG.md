@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Tabs show what their programs say they're doing: a spinner while working
+  (a filling ring when it says how far along), an amber `!` while waiting
+  for you, a check when done, `z` when idle, a red cross on an error. A tab
+  you aren't looking at is marked when its program finishes, fails or
+  starts waiting for you: the check or cross and a bright title stay until
+  you look, then they're cleared. Programs say it with OSC 7501, which Claude Code uses on its
+  own once wt++ answers its query. Where the answer can't reach it (WSL and
+  other programs behind Windows' ConPTY), wt++ reads the status Claude puts
+  at the start of the title instead (`◐`/`◑` working, `✳` done or idle) and
+  shows it as the icon, so renaming a tab no longer hides it. Windows
+  Terminal's OSC 9;4 progress shows too.
+- Any command shows on its tab: a spinner while it runs (`sleep`, `zip`, a
+  build), then a check when it's done or a red cross when it failed, in
+  PowerShell, cmd, bash and zsh, through wt++'s prompt hooks (OSC 133).
+  Settings → Interaction → Tabs show running commands turns it off.
+
 ## 1.5.0 — 2026-11-15
 
 - Ctrl+Backspace and Ctrl+Delete delete a word in WSL started by typing

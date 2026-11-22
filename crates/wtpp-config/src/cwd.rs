@@ -93,6 +93,38 @@ pub const POWERSHELL_PROMPT_HOOK: &str = "$global:__wtpp_prompt = $function:prom
      $l = $executionContext.SessionState.Path.CurrentLocation; \
      if ($l.Provider.Name -eq 'FileSystem') { $e = [string][char]27; $e + ']9;9;' + $l.ProviderPath + $e + '\\' + $p } else { $p } }";
 
+/// [`POWERSHELL_PROMPT_HOOK`] for what's turned on: reporting the directory
+/// (`cwd`) and how each command ended (`status`, OSC 133;D with its exit
+/// code, see `wtpp_session::status::Commands`). `$?` is read first and put
+/// back (a failed `Write-Error` is how to set it) for the user's prompt.
+pub fn powershell_prompt_hook(cwd: bool, status: bool) -> Option<String> {
+    if !status {
+        return cwd.then(|| POWERSHELL_PROMPT_HOOK.to_string());
+    }
+    let report = if cwd {
+        "$l = $executionContext.SessionState.Path.CurrentLocation; \
+         if ($l.Provider.Name -eq 'FileSystem') { $m += $e + ']9;9;' + $l.ProviderPath + $e + '\\' }; "
+    } else {
+        ""
+    };
+    Some(format!(
+        "$global:__wtpp_prompt = $function:prompt; \
+         function global:prompt {{ \
+         $s = $?; $c = $global:LASTEXITCODE; \
+         $d = if ($s) {{ 0 }} elseif ($c) {{ $c }} else {{ 1 }}; \
+         if (-not $s) {{ Write-Error '' -ErrorAction Ignore }}; \
+         $p = if ($global:__wtpp_prompt) {{ (& $global:__wtpp_prompt) -join '' }} else {{ 'PS> ' }}; \
+         $e = [string][char]27; $m = $e + ']133;D;' + $d + $e + '\\'; \
+         {report}$m + $p }}"
+    ))
+}
+
+/// cmd's PROMPT with OSC 133;D (no exit code: cmd's prompt can't show one)
+/// ahead of `theirs` (or cmd's default).
+pub fn cmd_prompt(theirs: Option<&str>) -> String {
+    format!("$e]133;D$e\\{}", theirs.filter(|t| !t.is_empty()).unwrap_or("$P$G"))
+}
+
 /// `args` for `powershell`/`pwsh` with the prompt hook added, when they're
 /// arguments it can be added to: none that run a command or a script, or
 /// that would change what `-NoExit -Command` means. `None` otherwise.
@@ -130,6 +162,14 @@ pub const BASH_PROMPT_COMMAND: &str = concat!(
     r#"printf '\033]9;9;%s\033\\\033]7;file://%s\033\\' "$(pwd -P 2>/dev/null || printf %s "$PWD")" "${PWD//\%/%25}""#,
 );
 
+/// bash: how the last command ended (OSC 133;D with its exit code; see
+/// `wtpp_session::status::Commands`).
+pub const BASH_COMMAND_STATUS: &str = r#"__wtpp_s=$?; printf '\033]133;D;%s\033\\' "$__wtpp_s""#;
+
+/// After [`BASH_COMMAND_STATUS`], ahead of a PROMPT_COMMAND of the user's:
+/// gives it `$?` back.
+const BASH_RESTORE_STATUS: &str = "(exit $__wtpp_s)";
+
 /// bash on Linux and macOS: OSC 7 with the name the prompt shows (wt++ can
 /// read the directory without symbolic links from the process itself).
 pub const UNIX_BASH_PROMPT_COMMAND: &str = r#"printf '\033]7;file://%s\033\\' "${PWD//\%/%25}""#;
@@ -139,9 +179,17 @@ pub const UNIX_BASH_PROMPT_COMMAND: &str = r#"printf '\033]7;file://%s\033\\' "$
 /// and the ssh function ([`crate::ssh::BASH_SSH_INIT`], before the report)
 /// with the run of a given ssh ([`crate::ssh::BASH_SSH_RUN`], after it, so
 /// the directory is known while it runs). `None` for neither.
-pub fn bash_prompt_command(wsl: bool, cwd: bool, ssh: bool) -> Option<String> {
+///
+/// With `status`, first [`BASH_COMMAND_STATUS`], while `$?` is still the
+/// last command's.
+pub fn bash_prompt_command(wsl: bool, cwd: bool, ssh: bool, status: bool) -> Option<String> {
     let report = if wsl { BASH_PROMPT_COMMAND } else { UNIX_BASH_PROMPT_COMMAND };
-    let parts = [ssh.then_some(crate::ssh::BASH_SSH_INIT), cwd.then_some(report), ssh.then_some(crate::ssh::BASH_SSH_RUN)];
+    let parts = [
+        status.then_some(BASH_COMMAND_STATUS),
+        ssh.then_some(crate::ssh::BASH_SSH_INIT),
+        cwd.then_some(report),
+        ssh.then_some(crate::ssh::BASH_SSH_RUN),
+    ];
     let parts: Vec<&str> = parts.into_iter().flatten().collect();
     (!parts.is_empty()).then(|| parts.join("; "))
 }
@@ -151,7 +199,8 @@ pub fn bash_prompt_command(wsl: bool, cwd: bool, ssh: bool) -> Option<String> {
 /// their .zshenv may move it), with ZDOTDIR set to that while it runs. The
 /// last file read puts ZDOTDIR back as it was, so nothing started later sees
 /// wt++'s. The .zshrc adds a precmd function reporting the directory (OSC 7)
-/// if WTPP_REPORT_CWD says to, and with a WTPP_TOKEN, the ssh function (the
+/// if WTPP_REPORT_CWD says to, ones marking each command's start and end
+/// (OSC 133) if WTPP_COMMAND_STATUS does, and with a WTPP_TOKEN, the ssh function (the
 /// last file, see [`crate::ssh::ZSH_SSH`]).
 pub const ZSH_FILES: [(&str, &str); 5] = [
     (
@@ -193,9 +242,22 @@ __wtpp_report_cwd() {
   builtin emulate -L zsh
   builtin printf '\e]7;file://%s\e\\' "${PWD//\%/%25}"
 }
-builtin typeset -ga precmd_functions
+builtin typeset -ga precmd_functions preexec_functions
 [[ -n $WTPP_REPORT_CWD ]] && precmd_functions+=(__wtpp_report_cwd)
 builtin unset WTPP_REPORT_CWD
+__wtpp_command_ended() {
+  builtin local s=$?
+  builtin printf '\e]133;D;%s\e\\' $s
+  builtin return $s
+}
+__wtpp_command_started() {
+  builtin printf '\e]133;C\e\\'
+}
+if [[ -n $WTPP_COMMAND_STATUS ]]; then
+  precmd_functions=(__wtpp_command_ended $precmd_functions)
+  preexec_functions+=(__wtpp_command_started)
+fi
+builtin unset WTPP_COMMAND_STATUS
 [[ -n $WTPP_TOKEN ]] && builtin source -- "$ZDOTDIR/wtpp-ssh.zsh"
 [[ -o login ]] || __wtpp_restore
 "#,
@@ -233,21 +295,29 @@ pub fn unix_prompt_env(
     zsh_dir: Option<&str>,
     var: impl Fn(&str) -> Option<String>,
     cwd: bool,
+    status: bool,
     ssh_env: &[(String, String)],
 ) -> Vec<(String, String)> {
     let file = program.rsplit('/').next().unwrap_or(program);
     let mut env = match file {
         "bash" => {
-            let Some(ours) = bash_prompt_command(false, cwd, !ssh_env.is_empty()) else { return Vec::new() };
+            let Some(ours) = bash_prompt_command(false, cwd, !ssh_env.is_empty(), status) else { return Vec::new() };
             match var("PROMPT_COMMAND").filter(|p| !p.trim().is_empty()) {
                 Some(theirs) if theirs.contains(&ours) => Vec::new(),
+                // The status first, while `$?` is the command's; then theirs,
+                // with `$?` given back.
+                Some(theirs) if status => {
+                    let rest = bash_prompt_command(false, cwd, !ssh_env.is_empty(), false);
+                    let all = [Some(BASH_COMMAND_STATUS), Some(BASH_RESTORE_STATUS), Some(&theirs), rest.as_deref()];
+                    vec![("PROMPT_COMMAND".into(), all.into_iter().flatten().collect::<Vec<_>>().join("; "))]
+                }
                 Some(theirs) => vec![("PROMPT_COMMAND".into(), format!("{theirs}; {ours}"))],
                 None => vec![("PROMPT_COMMAND".into(), ours)],
             }
         }
         "zsh" => {
             let Some(dir) = zsh_dir else { return Vec::new() };
-            if !cwd && ssh_env.is_empty() {
+            if !cwd && !status && ssh_env.is_empty() {
                 return Vec::new();
             }
             let theirs = var("ZDOTDIR").filter(|z| !z.is_empty());
@@ -263,6 +333,9 @@ pub fn unix_prompt_env(
             }
             if cwd {
                 env.push(("WTPP_REPORT_CWD".into(), "1".into()));
+            }
+            if status {
+                env.push(("WTPP_COMMAND_STATUS".into(), "1".into()));
             }
             env
         }
@@ -283,9 +356,10 @@ pub fn wsl_prompt_env(
     wslenv: Option<&str>,
     logical_dir: Option<&str>,
     cwd: bool,
+    status: bool,
     ssh_env: &[(String, String)],
 ) -> Vec<(String, String)> {
-    let Some(prompt_command) = bash_prompt_command(true, cwd, !ssh_env.is_empty()).filter(|_| !profile_sets_prompt_command) else {
+    let Some(prompt_command) = bash_prompt_command(true, cwd, !ssh_env.is_empty(), status).filter(|_| !profile_sets_prompt_command) else {
         return Vec::new();
     };
     let mut wslenv = wslenv.unwrap_or("").trim_matches(':').to_string();
@@ -398,7 +472,7 @@ mod tests {
 
     #[test]
     fn wsl_env() {
-        let env = |sets, wslenv| wsl_prompt_env(sets, wslenv, None, true, &[]);
+        let env = |sets, wslenv| wsl_prompt_env(sets, wslenv, None, true, false, &[]);
         assert_eq!(env(false, None)[1], ("WSLENV".into(), "PROMPT_COMMAND/u".into()));
         assert_eq!(env(false, None)[0], ("PROMPT_COMMAND".into(), BASH_PROMPT_COMMAND.into()));
         assert_eq!(env(false, Some("USERPROFILE/p:FOO"))[1].1, "USERPROFILE/p:FOO:PROMPT_COMMAND/u");
@@ -410,39 +484,39 @@ mod tests {
         // Windows can't start a program in a Linux symbolic link.
         assert!(BASH_PROMPT_COMMAND.contains("pwd -P"));
         // With the name the prompt shows.
-        let with = wsl_prompt_env(false, Some("FOO"), Some("/bin"), true, &[]);
+        let with = wsl_prompt_env(false, Some("FOO"), Some("/bin"), true, false, &[]);
         assert_eq!(with[1], ("WTPP_CD".into(), "/bin".into()));
         assert_eq!(with[2], ("WSLENV".into(), "FOO:PROMPT_COMMAND/u:WTPP_CD/u".into()));
-        assert!(wsl_prompt_env(true, None, Some("/bin"), true, &[]).is_empty());
+        assert!(wsl_prompt_env(true, None, Some("/bin"), true, false, &[]).is_empty());
         // The ssh function, with or without the directory.
         let ssh = crate::ssh::shell_env("tok", Some((&["-p".to_string(), "22".to_string(), "h".to_string()], crate::ssh::Run::Function)));
-        let with = wsl_prompt_env(false, None, Some("/bin"), true, &ssh);
-        assert_eq!(with[0].1, bash_prompt_command(true, true, true).unwrap());
+        let with = wsl_prompt_env(false, None, Some("/bin"), true, false, &ssh);
+        assert_eq!(with[0].1, bash_prompt_command(true, true, true, false).unwrap());
         assert_eq!(with[2], ("WTPP_TOKEN".into(), "tok".into()));
         assert_eq!(with[3], ("WTPP_SSH".into(), "-p\n22\nh".into()));
         assert_eq!(with[4], ("WSLENV".into(), "PROMPT_COMMAND/u:WTPP_CD/u:WTPP_TOKEN/u:WTPP_SSH/u".into()));
-        let only_ssh = wsl_prompt_env(false, None, Some("/bin"), false, &ssh[..1]);
-        assert_eq!(only_ssh[0].1, bash_prompt_command(true, false, true).unwrap());
+        let only_ssh = wsl_prompt_env(false, None, Some("/bin"), false, false, &ssh[..1]);
+        assert_eq!(only_ssh[0].1, bash_prompt_command(true, false, true, false).unwrap());
         assert!(!only_ssh[0].1.contains("WTPP_CD") && !only_ssh[0].1.contains("]9;9;"));
         assert_eq!(only_ssh[2], ("WSLENV".into(), "PROMPT_COMMAND/u:WTPP_TOKEN/u".into()));
-        assert!(wsl_prompt_env(false, None, None, false, &[]).is_empty());
-        assert!(wsl_prompt_env(true, None, None, true, &ssh).is_empty());
+        assert!(wsl_prompt_env(false, None, None, false, false, &[]).is_empty());
+        assert!(wsl_prompt_env(true, None, None, true, false, &ssh).is_empty());
     }
 
     #[test]
     fn prompt_commands() {
-        assert_eq!(bash_prompt_command(false, true, false).as_deref(), Some(UNIX_BASH_PROMPT_COMMAND));
-        assert_eq!(bash_prompt_command(true, true, false).as_deref(), Some(BASH_PROMPT_COMMAND));
-        assert_eq!(bash_prompt_command(true, false, false), None);
-        let both = bash_prompt_command(false, true, true).unwrap();
+        assert_eq!(bash_prompt_command(false, true, false, false).as_deref(), Some(UNIX_BASH_PROMPT_COMMAND));
+        assert_eq!(bash_prompt_command(true, true, false, false).as_deref(), Some(BASH_PROMPT_COMMAND));
+        assert_eq!(bash_prompt_command(true, false, false, false), None);
+        let both = bash_prompt_command(false, true, true, false).unwrap();
         assert_eq!(both, format!("{}; {UNIX_BASH_PROMPT_COMMAND}; {}", crate::ssh::BASH_SSH_INIT, crate::ssh::BASH_SSH_RUN));
-        assert!(!bash_prompt_command(false, false, true).unwrap().contains("]7;"));
+        assert!(!bash_prompt_command(false, false, true, false).unwrap().contains("]7;"));
     }
 
     #[test]
     fn unix_shells() {
         let none = |_: &str| None;
-        let cwd_only = |program: &str, zsh: Option<&str>, var: &dyn Fn(&str) -> Option<String>| unix_prompt_env(program, zsh, var, true, &[]);
+        let cwd_only = |program: &str, zsh: Option<&str>, var: &dyn Fn(&str) -> Option<String>| unix_prompt_env(program, zsh, var, true, false, &[]);
         assert_eq!(cwd_only("/bin/bash", None, &none), [("PROMPT_COMMAND".to_string(), UNIX_BASH_PROMPT_COMMAND.to_string())]);
         let theirs = |n: &str| (n == "PROMPT_COMMAND").then(|| "history -a".to_string());
         assert_eq!(cwd_only("bash", None, &theirs)[0].1, format!("history -a; {UNIX_BASH_PROMPT_COMMAND}"));
@@ -472,14 +546,14 @@ mod tests {
         }
         // The ssh function alone, or with the directory reports; nothing for neither.
         let ssh = crate::ssh::shell_env("tok", None);
-        let bash = unix_prompt_env("bash", None, none, false, &ssh);
-        assert_eq!(bash, [("PROMPT_COMMAND".to_string(), bash_prompt_command(false, false, true).unwrap()), ssh[0].clone()]);
-        let zsh = unix_prompt_env("zsh", Some("/wt/zsh"), home, false, &ssh);
+        let bash = unix_prompt_env("bash", None, none, false, false, &ssh);
+        assert_eq!(bash, [("PROMPT_COMMAND".to_string(), bash_prompt_command(false, false, true, false).unwrap()), ssh[0].clone()]);
+        let zsh = unix_prompt_env("zsh", Some("/wt/zsh"), home, false, false, &ssh);
         assert_eq!(zsh.last(), Some(&ssh[0]));
         assert!(!zsh.iter().any(|(k, _)| k == "WTPP_REPORT_CWD"));
-        assert!(unix_prompt_env("bash", None, none, false, &[]).is_empty());
-        assert!(unix_prompt_env("zsh", Some("/wt/zsh"), home, false, &[]).is_empty());
-        assert!(unix_prompt_env("fish", None, none, true, &ssh).is_empty());
+        assert!(unix_prompt_env("bash", None, none, false, false, &[]).is_empty());
+        assert!(unix_prompt_env("zsh", Some("/wt/zsh"), home, false, false, &[]).is_empty());
+        assert!(unix_prompt_env("fish", None, none, true, false, &ssh).is_empty());
     }
 
     /// The hook in a real bash: the first prompt goes to WTPP_CD if it's the
@@ -516,5 +590,73 @@ mod tests {
         let out = run(&real, &base.join("gone").to_string_lossy());
         assert!(out.ends_with(&format!("\npwd={real_text} cd=unset\n")), "{out}");
         std::fs::remove_dir_all(&base).ok();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod status_hook_tests {
+    use super::*;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// What an interactive bash prints running `input` with `env`.
+    fn bash(env: &[(String, String)], input: &str) -> Option<String> {
+        let mut child = Command::new("bash")
+            .args(["--norc", "--noprofile", "-i"])
+            .env_remove("PROMPT_COMMAND")
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .env("PS1", "")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+        Some(String::from_utf8_lossy(&child.wait_with_output().ok()?.stdout).into_owned())
+    }
+
+    /// bash marks each prompt with the last command's exit code, and a
+    /// PROMPT_COMMAND of the user's still sees that code.
+    #[test]
+    fn bash_marks_command_ends() {
+        let env = unix_prompt_env("bash", None, |_| None, false, true, &[]);
+        let Some(out) = bash(&env, "true\n(exit 3)\nfalse\n") else { return };
+        // The first prompt, then one per command.
+        assert_eq!(out, "\x1b]133;D;0\x1b\\\x1b]133;D;0\x1b\\\x1b]133;D;3\x1b\\\x1b]133;D;1\x1b\\");
+        let theirs = |name: &str| (name == "PROMPT_COMMAND").then(|| "echo theirs=$?".to_string());
+        let env = unix_prompt_env("bash", None, theirs, true, true, &[]);
+        let out = bash(&env, "(exit 4)\n").unwrap();
+        assert!(out.contains("\x1b]133;D;4\x1b\\theirs=4\n\x1b]7;file://"), "{out:?}");
+        // Both off: nothing.
+        assert!(unix_prompt_env("bash", None, |_| None, false, false, &[]).is_empty());
+    }
+
+    /// zsh, through wt++'s startup files: the end with its code, and the start.
+    #[test]
+    fn zsh_marks_commands() {
+        let Ok(dir) = std::env::temp_dir().join(format!("wtpp-zsh-{}", std::process::id())).canonicalize().or_else(|_| {
+            let d = std::env::temp_dir().join(format!("wtpp-zsh-{}", std::process::id()));
+            std::fs::create_dir_all(&d).map(|_| d)
+        }) else { return };
+        write_zsh_integration(&dir).unwrap();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let env = unix_prompt_env("zsh", dir.to_str(), |k| (k == "HOME").then(|| home.to_string_lossy().into_owned()), false, true, &[]);
+        let child = Command::new("zsh")
+            .args(["-i"])
+            .env_clear()
+            .env("HOME", &home)
+            .env("PS1", "")
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else { return };
+        child.stdin.take().unwrap().write_all(b"(exit 5)\ntrue\n").unwrap();
+        let out = String::from_utf8_lossy(&child.wait_with_output().unwrap().stdout).into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.contains("\x1b]133;C\x1b\\\x1b]133;D;5\x1b\\"), "{out:?}");
+        assert!(out.contains("\x1b]133;C\x1b\\\x1b]133;D;0\x1b\\"), "{out:?}");
     }
 }

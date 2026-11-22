@@ -647,6 +647,10 @@ pub struct Settings {
     /// the connection (wt++ addition, see `ssh`).
     #[serde(rename = "wtpp.splitDuplicatesSsh")]
     pub split_duplicates_ssh: bool,
+    /// Shells say when a command ends (their prompt hooks), so its tab shows
+    /// it running, done or failed (wt++ addition, see `cwd::command_status`).
+    #[serde(rename = "wtpp.tabCommandStatus")]
+    pub command_status: bool,
     pub multi_line_paste_warning: bool,
     pub large_paste_warning: bool,
     pub show_tabs_in_titlebar: bool,
@@ -688,6 +692,7 @@ impl Default for Settings {
             profiles_discovered: false,
             inherit_working_directory: true,
             split_duplicates_ssh: true,
+            command_status: true,
             multi_line_paste_warning: true,
             large_paste_warning: true,
             show_tabs_in_titlebar: true,
@@ -1944,6 +1949,10 @@ mod tests {
         assert!(!off.split_duplicates_ssh && off.inherit_working_directory);
         assert!(off.to_json().contains("\"wtpp.splitDuplicatesSsh\": false"));
         assert_eq!(Settings::parse(&off.to_json()).unwrap(), off);
+        assert!(off.command_status);
+        let off = Settings::parse(r#"{ "wtpp.tabCommandStatus": false }"#).unwrap();
+        assert!(!off.command_status && off.inherit_working_directory);
+        assert!(off.to_json().contains("\"wtpp.tabCommandStatus\": false"));
     }
 
     #[test]
