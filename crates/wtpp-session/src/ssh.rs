@@ -35,21 +35,7 @@ fn is_ssh(name: &str) -> bool {
 /// process group (`foreground`, where known), not started by another ssh
 /// (a `ProxyJump`'s), the newest if there are several.
 fn pick(shell: u32, foreground: Option<u32>, procs: &[Proc]) -> Option<u32> {
-    let mut descendants: Vec<&Proc> = Vec::new();
-    let mut parents = vec![procs.iter().find(|p| p.pid == shell)?];
-    while let Some(parent) = parents.pop() {
-        // A parent id can be a reused one (Windows): only children that
-        // started after the parent are its.
-        for child in procs.iter().filter(|p| p.ppid == parent.pid && p.pid != parent.pid && p.start >= parent.start) {
-            if descendants.len() > 4096 {
-                return None;
-            }
-            if !descendants.iter().any(|d| d.pid == child.pid) {
-                descendants.push(child);
-                parents.push(child);
-            }
-        }
-    }
+    let descendants = descendants(shell, procs);
     let ssh_parent = |p: &Proc| descendants.iter().any(|d| d.pid == p.ppid && is_ssh(&d.name));
     descendants
         .iter()
@@ -59,25 +45,61 @@ fn pick(shell: u32, foreground: Option<u32>, procs: &[Proc]) -> Option<u32> {
         .map(|p| p.pid)
 }
 
-/// The ssh `shell` runs in the foreground, if any.
-pub fn foreground_ssh(shell: u32) -> Option<Found> {
-    #[cfg(target_os = "linux")]
-    {
-        linux::foreground_ssh(shell)
+/// `shell`'s descendants (none if it isn't there).
+fn descendants(shell: u32, procs: &[Proc]) -> Vec<&Proc> {
+    let mut descendants: Vec<&Proc> = Vec::new();
+    let Some(shell) = procs.iter().find(|p| p.pid == shell) else { return descendants };
+    let mut parents = vec![shell];
+    while let Some(parent) = parents.pop() {
+        // A parent id can be a reused one (Windows): only children that
+        // started after the parent are its.
+        for child in procs.iter().filter(|p| p.ppid == parent.pid && p.pid != parent.pid && p.start >= parent.start) {
+            if descendants.len() > 4096 {
+                return Vec::new();
+            }
+            if !descendants.iter().any(|d| d.pid == child.pid) {
+                descendants.push(child);
+                parents.push(child);
+            }
+        }
     }
-    #[cfg(target_os = "macos")]
-    {
-        macos::foreground_ssh(shell)
-    }
-    #[cfg(all(windows, target_pointer_width = "64"))]
-    {
-        windows::foreground_ssh(shell)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", all(windows, target_pointer_width = "64"))))]
-    {
-        let _ = shell;
+    descendants
+}
+
+#[cfg(target_os = "linux")]
+use linux as platform;
+#[cfg(target_os = "macos")]
+use macos as platform;
+#[cfg(all(windows, target_pointer_width = "64"))]
+use windows as platform;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", all(windows, target_pointer_width = "64"))))]
+mod platform {
+    use super::Proc;
+    pub fn processes(_: u32) -> Option<(Vec<Proc>, Option<u32>)> {
         None
     }
+    pub fn argv(_: u32) -> Option<(std::path::PathBuf, Vec<String>)> {
+        None
+    }
+}
+
+/// The ssh `shell` runs in the foreground, if any.
+pub fn foreground_ssh(shell: u32) -> Option<Found> {
+    let (procs, foreground) = platform::processes(shell)?;
+    let pid = pick(shell, foreground, &procs)?;
+    let (program, argv) = platform::argv(pid)?;
+    (!argv.is_empty()).then(|| Found { program, args: argv[1..].to_vec() })
+}
+
+/// The command lines (program first) of what `shell` runs in the
+/// foreground: its descendants (in the terminal's foreground process group,
+/// where the system says), the newest first. Not the shell itself.
+pub fn foreground_programs(shell: u32) -> Vec<Vec<String>> {
+    let Some((procs, foreground)) = platform::processes(shell) else { return Vec::new() };
+    let mut running: Vec<&Proc> = descendants(shell, &procs).into_iter().filter(|p| foreground.is_none() || p.pgrp == foreground).collect();
+    running.sort_by_key(|p| std::cmp::Reverse(p.start));
+    running.iter().take(16).filter_map(|p| platform::argv(p.pid)).map(|(_, argv)| argv).filter(|a| !a.is_empty()).collect()
 }
 
 /// A Windows command line as the C runtime splits it into arguments
@@ -147,7 +169,7 @@ pub fn split_windows_commandline(line: &str) -> Vec<String> {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{Found, Proc, pick};
+    use super::Proc;
 
     /// From `/proc/<pid>/stat`: the process, and its terminal's foreground
     /// process group.
@@ -163,7 +185,9 @@ mod linux {
         Some((proc, tpgid))
     }
 
-    pub fn foreground_ssh(shell: u32) -> Option<Found> {
+    /// Every process, and the foreground process group of `shell`'s
+    /// terminal; none without one.
+    pub fn processes(shell: u32) -> Option<(Vec<Proc>, Option<u32>)> {
         let (_, foreground) = stat(shell)?;
         let procs: Vec<Proc> = std::fs::read_dir("/proc")
             .ok()?
@@ -171,20 +195,24 @@ mod linux {
             .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
             .filter_map(|pid| stat(pid).map(|(p, _)| p))
             .collect();
-        let pid = pick(shell, Some(foreground?), &procs)?;
+        Some((procs, Some(foreground?)))
+    }
+
+    /// A process's program, and its arguments (the program's first).
+    pub fn argv(pid: u32) -> Option<(std::path::PathBuf, Vec<String>)> {
         let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
         let mut argv = cmdline.split(|&b| b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect::<Vec<_>>();
         if argv.last().is_some_and(String::is_empty) {
             argv.pop();
         }
         let program = std::fs::read_link(format!("/proc/{pid}/exe")).ok().unwrap_or_else(|| argv.first().cloned().unwrap_or_default().into());
-        (!argv.is_empty()).then(|| Found { program, args: argv[1..].to_vec() })
+        Some((program, argv))
     }
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{Found, Proc, pick};
+    use super::Proc;
     use std::ffi::c_void;
 
     const PROC_PIDTBSDINFO: i32 = 3;
@@ -238,7 +266,7 @@ mod macos {
 
     /// The process's arguments (KERN_PROCARGS2: argc, the executable's path,
     /// padding, then the arguments).
-    fn argv(pid: u32) -> Option<(String, Vec<String>)> {
+    fn exe_and_args(pid: u32) -> Option<(String, Vec<String>)> {
         let mut argmax: i32 = 0;
         let mut size = size_of::<i32>();
         let mut mib = [CTL_KERN, KERN_ARGMAX];
@@ -261,7 +289,14 @@ mod macos {
         (args.len() == argc && argc > 0).then_some((exe, args))
     }
 
-    pub fn foreground_ssh(shell: u32) -> Option<Found> {
+    /// A process's program, and its arguments (the program's first).
+    pub fn argv(pid: u32) -> Option<(std::path::PathBuf, Vec<String>)> {
+        exe_and_args(pid).map(|(exe, args)| (exe.into(), args))
+    }
+
+    /// `shell` and its descendants, and its terminal's foreground process
+    /// group.
+    pub fn processes(shell: u32) -> Option<(Vec<Proc>, Option<u32>)> {
         let (me, foreground) = info(shell)?;
         let mut procs = vec![me];
         let mut next = vec![shell];
@@ -276,15 +311,13 @@ mod macos {
                 }
             }
         }
-        let pid = pick(shell, Some(foreground).filter(|&f| f > 0), &procs)?;
-        let (exe, argv) = argv(pid)?;
-        Some(Found { program: exe.into(), args: argv[1..].to_vec() })
+        Some((procs, Some(foreground).filter(|&f| f > 0)))
     }
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]
 mod windows {
-    use super::{Found, Proc, pick, split_windows_commandline};
+    use super::{Proc, split_windows_commandline};
     use crate::cwd::windows::{Process, process_commandline};
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
@@ -308,7 +341,23 @@ mod windows {
         (ok != 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
     }
 
-    pub fn foreground_ssh(shell: u32) -> Option<Found> {
+    /// A process's program, and its arguments (the program's first, as
+    /// its command line has it).
+    pub fn argv(pid: u32) -> Option<(std::path::PathBuf, Vec<String>)> {
+        let line = process_commandline(pid)?;
+        let program = image(pid)?;
+        // The program as the command line names it, then the arguments.
+        let first = line.trim_start();
+        let first = match first.strip_prefix('"') {
+            Some(rest) => rest.split('"').next().unwrap_or_default(),
+            None => first.split([' ', '\t']).next().unwrap_or_default(),
+        };
+        let argv = std::iter::once(first.to_string()).chain(split_windows_commandline(&line)).collect();
+        Some((program.into(), argv))
+    }
+
+    /// `shell` and its descendants (Windows has no foreground group).
+    pub fn processes(shell: u32) -> Option<(Vec<Proc>, Option<u32>)> {
         // SAFETY: plain call; closed below.
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
         if snapshot == INVALID_HANDLE_VALUE {
@@ -339,9 +388,7 @@ mod windows {
             procs.push(Proc { pid, ppid: *ppid, pgrp: None, name: name.clone(), start });
             next.extend(all.iter().filter(|(p, parent, _)| *parent == pid && *p != pid).map(|(p, ..)| *p));
         }
-        let pid = pick(shell, None, &procs)?;
-        let line = process_commandline(pid)?;
-        Some(Found { program: image(pid)?.into(), args: split_windows_commandline(&line) })
+        Some((procs, None))
     }
 }
 

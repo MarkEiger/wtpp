@@ -4,6 +4,7 @@
 //! event loop, or ours for a console handed over by Windows; see [`Pipes`]). The UI thread locks [`Session::term`] to read the grid when it
 //! renders, and receives [`SessionEvent`]s through the callback it supplied.
 
+pub mod agents;
 pub mod cwd;
 pub mod env;
 pub mod profiles;
@@ -169,6 +170,9 @@ pub struct Listener {
     statuses: Arc<Mutex<status::Statuses>>,
     /// What the shell's commands are doing (see [`status::Commands`]).
     commands: Arc<Mutex<status::Commands>>,
+    /// The last OSC 9 report's text after `9;` (progress: `4;1;50`), for
+    /// agents' rules (see [`agents`]).
+    progress: Arc<Mutex<String>>,
 }
 
 impl Listener {
@@ -190,6 +194,11 @@ impl Listener {
         }
         let found = self.cwd_scanner.lock().map(|mut scanner| scanner.feed_osc(bytes)).unwrap_or_default();
         for osc in found {
+            if let Some(progress) = osc.strip_prefix(b"9;4")
+                && let Ok(mut last) = self.progress.lock()
+            {
+                *last = format!("4{}", String::from_utf8_lossy(progress).chars().take(32).collect::<String>());
+            }
             if let Some(report) = status::parse(&osc) {
                 if report == status::Report::Query {
                     self.reply(status::QUERY_REPLY.into());
@@ -271,6 +280,8 @@ pub struct Session {
     commands: Arc<Mutex<status::Commands>>,
     /// For a handed-over console (see [`Pipes::keep_alive`]).
     _keep_alive: Vec<File>,
+    /// See [`Listener::progress`].
+    progress: Arc<Mutex<String>>,
 }
 
 impl Session {
@@ -292,6 +303,7 @@ impl Session {
             reported_ssh: Default::default(),
             statuses: Default::default(),
             commands: Default::default(),
+            progress: Default::default(),
         };
 
         let config = Config {
@@ -364,7 +376,7 @@ impl Session {
 
         let reported_cwd = listener.reported_cwd.clone();
         let reported_ssh = listener.reported_ssh.clone();
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh, statuses: listener.statuses.clone(), commands: listener.commands.clone(), _keep_alive: Vec::new() })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh, statuses: listener.statuses.clone(), commands: listener.commands.clone(), progress: listener.progress.clone(), _keep_alive: Vec::new() })
     }
 
     /// A session on a console Windows handed over (see [`Pipes`]): a thread
@@ -425,7 +437,7 @@ impl Session {
         // The console host starts at its own default size.
         io.resize(size);
         let reported_cwd = listener.reported_cwd.clone();
-        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh: listener.reported_ssh.clone(), statuses: listener.statuses.clone(), commands: listener.commands.clone(), _keep_alive: keep_alive })
+        Ok(Session { term, io, size: shared_size, profile: profile.clone(), pid, reported_cwd, last_output: listener.last_output.clone(), reported_ssh: listener.reported_ssh.clone(), statuses: listener.statuses.clone(), commands: listener.commands.clone(), progress: listener.progress.clone(), _keep_alive: keep_alive })
     }
 
     /// A session for a program that couldn't be started: a terminal to say
@@ -434,7 +446,7 @@ impl Session {
         let (term, listener, shared_size) = Self::new_term(profile, size, on_event);
         let reported_cwd = listener.reported_cwd.clone();
         let last_output = listener.last_output.clone();
-        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, last_output, reported_ssh: listener.reported_ssh.clone(), statuses: listener.statuses.clone(), commands: listener.commands.clone(), _keep_alive: Vec::new() }
+        Session { term, io: Io::None, size: shared_size, profile: profile.clone(), pid: None, reported_cwd, last_output, reported_ssh: listener.reported_ssh.clone(), statuses: listener.statuses.clone(), commands: listener.commands.clone(), progress: listener.progress.clone(), _keep_alive: Vec::new() }
     }
 
     /// What the program says it's doing, its most pressing status if it
@@ -457,6 +469,28 @@ impl Session {
     /// [`status::Commands::current`]).
     pub fn command_status(&self) -> (Option<status::State>, Option<Duration>) {
         self.commands.lock().map(|c| c.current(Instant::now())).unwrap_or_default()
+    }
+
+    /// Is the shell at its prompt, with nothing entered since (see
+    /// [`status::Commands`])?
+    pub fn at_prompt(&self) -> bool {
+        self.commands.lock().is_ok_and(|c| c.at_prompt())
+    }
+
+    /// How many times the shell has come back to its prompt.
+    pub fn prompts(&self) -> u64 {
+        self.commands.lock().map(|c| c.prompts()).unwrap_or_default()
+    }
+
+    /// The last progress a program reported (OSC 9;4's text: `4;1;50`).
+    pub fn progress_text(&self) -> String {
+        self.progress.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    /// The command lines of what the shell runs in the foreground, the newest
+    /// first (see [`ssh::foreground_programs`]).
+    pub fn foreground_programs(&self) -> Vec<Vec<String>> {
+        self.pid.map(ssh::foreground_programs).unwrap_or_default()
     }
 
     /// Enter was pressed in the pane: true if that ran a command at the
@@ -1095,6 +1129,31 @@ mod ssh_tests {
 
     fn shows(session: &Session, text: &str) -> bool {
         screen(session).iter().any(|l| l == text)
+    }
+
+    /// A coding agent run from the prompt (here a script that only waits,
+    /// named like Codex) is found among the shell's programs, also when an
+    /// alias starts it, and not once it has ended.
+    #[cfg(unix)]
+    #[test]
+    fn agents_among_programs() {
+        let dir = scratch("agents");
+        let codex = dir.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let mut p = Profile::new("t", "/bin/bash", &["--norc", "--noprofile", "-i"]);
+        p.cwd = Some(dir.clone());
+        let session = Session::spawn(&p, SIZE, |_| {}).unwrap();
+        let agent = || session.foreground_programs().iter().find_map(|argv| agents::agent_in_argv(argv)).map(|a| a.id);
+        assert!(wait(10, || screen(&session).iter().any(|l| l.contains('$'))), "{:?}", screen(&session));
+        assert_eq!(agent(), None);
+        // (An alias is only there from the next line on.)
+        type_line(&session, &format!("alias cx={}", codex.display()));
+        type_line(&session, "cx");
+        assert!(wait(10, || agent() == Some("codex")), "{:?}", session.foreground_programs());
+        session.write(vec![3]);
+        assert!(wait(10, || agent().is_none()), "{:?}", session.foreground_programs());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A place for the test's files, short enough for socket paths.

@@ -655,6 +655,13 @@ impl<T> Term<T> {
         &self.grid
     }
 
+    /// The normal screen's grid, also while the alternate screen is shown
+    /// (wtpp patch: a command typed at the shell's prompt is read from it
+    /// after a full-screen program has started).
+    pub fn primary_grid(&self) -> &Grid<Cell> {
+        if self.mode.contains(TermMode::ALT_SCREEN) { &self.inactive_grid } else { &self.grid }
+    }
+
     /// Mutable access to the raw grid data structure.
     pub fn grid_mut(&mut self) -> &mut Grid<Cell> {
         &mut self.grid

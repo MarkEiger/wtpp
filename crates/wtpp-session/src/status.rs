@@ -187,6 +187,9 @@ pub struct Commands {
     running_since: Option<Instant>,
     /// How the last command ended.
     ended: Option<State>,
+    /// How many prompts there have been: one that's newer than something
+    /// means that something (a command, a program) has ended.
+    prompts: u64,
 }
 
 impl Commands {
@@ -203,6 +206,9 @@ impl Commands {
             }
             Mark::Prompt | Mark::Ended(_) => {
                 let was = (self.at_prompt, self.running_since, self.ended);
+                if !self.at_prompt || self.running_since.is_some() {
+                    self.prompts += 1;
+                }
                 self.at_prompt = true;
                 if self.running_since.take().is_some() {
                     let code = match mark {
@@ -243,7 +249,17 @@ impl Commands {
 
     /// Forget it all: the shell is gone.
     pub fn clear(&mut self) {
-        *self = Commands::default();
+        *self = Commands { prompts: self.prompts + 1, ..Commands::default() };
+    }
+
+    /// Is the shell at its prompt (it said so, and nothing was entered since)?
+    pub fn at_prompt(&self) -> bool {
+        self.at_prompt
+    }
+
+    /// How many times the shell came back to its prompt (see `prompts`).
+    pub fn prompts(&self) -> u64 {
+        self.prompts
     }
 }
 

@@ -72,6 +72,60 @@ pub(crate) struct Pane {
     pub(crate) status: Option<ProgramStatus>,
     /// What its title's status prefix says (see `title_status`).
     title_status: Option<ProgramState>,
+    /// Its title as its program set it, status prefix and all.
+    raw_title: String,
+    /// The coding agent running in it, and what it's doing (see `on_agents`).
+    agent: wtpp_session::agents::Tracker,
+    /// How the agent was found: typed at the prompt (it ends when the
+    /// prompt is back: after this many prompts), or among the shell's
+    /// programs (`None`: it ends when it's no longer among them).
+    agent_until_prompt: Option<u64>,
+    /// Where typing at the shell's prompt began: after how many prompts, and
+    /// where (an absolute line: scrollback and screen, and a column).
+    input_start: Option<(u64, i64, usize)>,
+    /// When its programs were last looked at for an agent; whether a look
+    /// is under way.
+    agent_scan: (Option<Instant>, bool),
+    /// Its agent and state as the Agents view last saw them, and since when.
+    agent_since: Option<(&'static str, Option<ProgramState>, Instant)>,
+    /// It shows the Agents view rather than a program (see `agents_view`).
+    agents_view: Option<crate::agents_view::View>,
+    /// What the Agents view calls its agent, as renamed there (otherwise
+    /// its tab's title).
+    pub(crate) agent_name: Option<String>,
+}
+
+impl Pane {
+    fn new(session: Session, profile: ResolvedProfile, theme: Theme, rect: Rect, started_in: Option<StartIn>) -> Pane {
+        Pane {
+            session,
+            profile,
+            started_in,
+            theme,
+            title: None,
+            rect,
+            target: None,
+            selecting: false,
+            emulate_kill_word: false,
+            exited: false,
+            last_click: None,
+            scroll_remainder: 0.0,
+            wheel_lines: 0,
+            last_key: None,
+            waiting: Default::default(),
+            failure: None,
+            status: None,
+            title_status: None,
+            raw_title: String::new(),
+            agent: Default::default(),
+            agent_until_prompt: None,
+            input_start: None,
+            agent_scan: (None, false),
+            agent_since: None,
+            agents_view: None,
+            agent_name: None,
+        }
+    }
 }
 
 /// Input for a pane waiting its turn (see `App::word_edit`).
@@ -514,6 +568,13 @@ impl App {
             .collect();
         entries.push(MenuEntry {
             icon: Default::default(),
+            icon_text: crate::agents_view::ICON.into(),
+            label: crate::agents_view::TITLE.into(),
+            shortcut: self.keymap.chord_label(&Action::OpenAgents).unwrap_or_default().into(),
+            enabled: true,
+        });
+        entries.push(MenuEntry {
+            icon: Default::default(),
             icon_text: "⚙".into(),
             label: "Settings".into(),
             shortcut: self.keymap.chord_label(&Action::OpenSettings).unwrap_or_default().into(),
@@ -707,32 +768,22 @@ impl App {
         match session {
             Ok(session) => {
                 log::info!("started {} ({})", profile.name, profile.commandline);
+                // A profile that runs an agent itself (`codex`, `wsl.exe -- claude`).
+                let argv: Vec<String> = std::iter::once(session_profile.program.clone()).chain(session_profile.args.iter().cloned()).collect();
+                let own_agent = wtpp_session::agents::agent_in_argv(&argv).or_else(|| wtpp_session::agents::agent_in_command(&profile.commandline));
                 self.ensure_icon(&profile);
                 let theme = theme_for(&self.settings, &profile);
                 let emulate_kill_word = cfg!(windows) && is_cmd(&session_profile.program);
-                self.panes.insert(
-                    id,
-                    Pane {
-                        session,
-                        profile,
-                        started_in: start_in,
-                        theme,
-                        title: None,
-                        rect,
-                        target: None,
-                        selecting: false,
-                        emulate_kill_word,
-                        exited: false,
-                        last_click: None,
-                        scroll_remainder: 0.0,
-                        wheel_lines: 0,
-                        last_key: None,
-                        waiting: Default::default(),
-                        failure: None,
-                        status: None,
-                        title_status: None,
-                    },
-                );
+                let mut pane = Pane::new(session, profile, theme, rect, start_in);
+                pane.emulate_kill_word = emulate_kill_word;
+                self.panes.insert(id, pane);
+                if let Some(agent) = own_agent
+                    && let Some(pane) = self.panes.get_mut(&id)
+                {
+                    // It's the pane's program: it lasts as long as the pane.
+                    pane.agent.start(agent);
+                    pane.agent_until_prompt = Some(u64::MAX);
+                }
                 true
             }
             Err(e) => {
@@ -747,29 +798,10 @@ impl App {
                 session.feed(failure.as_bytes());
                 self.ensure_icon(&profile);
                 let theme = theme_for(&self.settings, &profile);
-                self.panes.insert(
-                    id,
-                    Pane {
-                        session,
-                        profile,
-                        started_in: start_in,
-                        theme,
-                        title: None,
-                        rect,
-                        target: None,
-                        selecting: false,
-                        emulate_kill_word: false,
-                        exited: true,
-                        last_click: None,
-                        scroll_remainder: 0.0,
-                        wheel_lines: 0,
-                        last_key: None,
-                        waiting: Default::default(),
-                        failure: Some(failure),
-                        status: None,
-                        title_status: None,
-                    },
-                );
+                let mut pane = Pane::new(session, profile, theme, rect, start_in);
+                pane.exited = true;
+                pane.failure = Some(failure);
+                self.panes.insert(id, pane);
                 true
             }
         }
@@ -1146,12 +1178,14 @@ impl App {
         self.relayout();
     }
 
-    /// A click in the new-tab dropdown: profiles first, then "Settings" and
-    /// "Keyboard shortcuts".
+    /// A click in the new-tab dropdown: profiles first, then "Agents",
+    /// "Settings" and "Keyboard shortcuts".
     pub fn on_menu(&mut self, index: usize) {
         if index < self.profiles.len() {
             self.new_tab(index);
         } else if index == self.profiles.len() {
+            self.open_agents();
+        } else if index == self.profiles.len() + 1 {
             self.open_settings();
         } else {
             self.open_shortcuts();
@@ -1206,15 +1240,8 @@ impl App {
     /// the program finishes, fails or starts waiting for you, until it is.
     pub fn on_status(&mut self, id: PaneId) {
         let Some(pane) = self.panes.get_mut(&id) else { return };
-        // What a program says outright (OSC 7501, 9;4), over what its title
-        // says (Claude Code's prefix), over what the shell says of the
-        // command it runs.
         let (command, recheck) = pane.session.command_status();
-        let new = pane
-            .session
-            .status()
-            .or_else(|| pane.title_status.map(ProgramStatus::of))
-            .or_else(|| command.map(ProgramStatus::of));
+        let new = pane_status(pane.session.status(), pane.title_status, pane.agent.status(), command);
         if let Some(after) = recheck {
             slint::Timer::single_shot(after + Duration::from_millis(20), move || {
                 crate::with_pane(id, |app| app.on_status(id));
@@ -1233,6 +1260,242 @@ impl App {
             self.tabs[tab].attention = true;
         }
         self.refresh_chrome();
+    }
+
+    /// Coding agents in plain tabs (see `wtpp_session::agents`), on a timer:
+    /// one typed at the prompt ends when the prompt is back; the shell's
+    /// programs are looked at for one now and then (not where the system
+    /// can't see them: in WSL); a running one's screen says what it's doing.
+    pub fn on_agents(&mut self) {
+        const SCAN_EVERY: Duration = Duration::from_secs(2);
+        let now = Instant::now();
+        let ids: Vec<PaneId> = self.panes.keys().copied().collect();
+        for id in ids {
+            let Some(pane) = self.panes.get_mut(&id) else { continue };
+            if pane.exited || pane.agents_view.is_some() {
+                continue;
+            }
+            let mut changed = false;
+            if let Some(until) = pane.agent_until_prompt
+                && pane.session.prompts() > until
+            {
+                pane.agent_until_prompt = None;
+                changed |= pane.agent.stop();
+            }
+            // One found among the shell's programs: gone with the prompt.
+            if pane.agent_until_prompt.is_none() && pane.session.at_prompt() {
+                changed |= pane.agent.stop();
+            }
+            let program = &pane.session.profile().program;
+            let visible = !wtpp_config::settings::is_wsl_program(program);
+            let (last, running) = pane.agent_scan;
+            if visible
+                && !running
+                && pane.agent_until_prompt.is_none()
+                && !pane.session.at_prompt()
+                && last.is_none_or(|l| now.saturating_duration_since(l) >= SCAN_EVERY)
+                && let Some(pid) = pane.session.pid()
+            {
+                pane.agent_scan = (Some(now), true);
+                std::thread::spawn(move || {
+                    let programs = wtpp_session::ssh::foreground_programs(pid);
+                    let found = programs.iter().find_map(|argv| wtpp_session::agents::agent_in_argv(argv));
+                    slint::invoke_from_event_loop(move || {
+                        crate::with_pane(id, |app| app.on_agent_found(id, found));
+                    })
+                    .ok();
+                });
+            }
+            if changed {
+                self.on_status(id);
+            }
+            self.on_agents_of(id);
+        }
+    }
+
+    /// Look at what a pane's coding agent is doing (see `on_agents`).
+    fn on_agents_of(&mut self, id: PaneId) {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        if pane.agent.agent().is_none() {
+            return;
+        }
+        let screen = screen_text(&pane.session);
+        let progress = pane.session.progress_text();
+        if pane.agent.update(&screen, &pane.raw_title, &progress, Instant::now()) {
+            self.on_status(id);
+        }
+    }
+
+    /// A command was entered at a pane's prompt (after `prompts` prompts),
+    /// starting at `start` (see `Pane::input_start`): it may be a coding
+    /// agent (see `on_agents`).
+    fn on_command_entered(&mut self, id: PaneId, prompts: u64, start: (i64, usize)) {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        // It ended already, or another was entered meanwhile.
+        if pane.session.prompts() != prompts || pane.exited {
+            return;
+        }
+        let typed = typed_command(&pane.session, start);
+        let Some(agent) = wtpp_session::agents::agent_in_command(&typed) else { return };
+        pane.agent.start(agent);
+        pane.agent_until_prompt = Some(prompts);
+        self.on_agents_of(id);
+    }
+
+    /// What a look at a pane's programs found (see `on_agents`).
+    fn on_agent_found(&mut self, id: PaneId, found: Option<&'static wtpp_session::agents::Agent>) {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        pane.agent_scan.1 = false;
+        // Typed meanwhile: that one counts.
+        if pane.agent_until_prompt.is_some() || pane.exited {
+            return;
+        }
+        let changed = match found {
+            Some(agent) => pane.agent.start(agent),
+            None => pane.agent.stop(),
+        };
+        if changed {
+            self.on_status(id);
+        }
+    }
+
+    /// The Agents view (see `agents_view`): this window's, if it has one;
+    /// otherwise a new tab, styled like the default profile.
+    pub(crate) fn open_agents(&mut self) {
+        let showing = self.panes.iter().find(|(_, p)| p.agents_view.is_some()).map(|(&id, _)| id);
+        if let Some(id) = showing {
+            self.show_pane(id);
+            return;
+        }
+        let mut profile = self.profiles.get(self.settings.default_profile_index()).cloned().unwrap_or_else(|| self.settings.fallback_profile());
+        profile.name = crate::agents_view::TITLE.into();
+        profile.tab_title = None;
+        profile.icon = Some(crate::agents_view::ICON.into());
+        let rect = self.content_area();
+        let Some(size) = self.grid_size(&profile, rect) else { return };
+        let session = Session::failed(&self.session_profile(&profile, None, None), size, |_| {});
+        session.feed(crate::agents_view::View::START);
+        self.ensure_icon(&profile);
+        let theme = theme_for(&self.settings, &profile);
+        let id = self.alloc_id();
+        let mut pane = Pane::new(session, profile, theme, rect, None);
+        pane.agents_view = Some(Default::default());
+        self.panes.insert(id, pane);
+        self.tabs.push(Tab::new(TabKind::Terminal { root: Node::Leaf(id), focused: id, zoomed: false }));
+        self.active = self.tabs.len() - 1;
+        self.draw_agents();
+        self.relayout();
+    }
+
+    /// This window's coding agents, in tab order, for the Agents view.
+    pub(crate) fn agent_rows(&mut self) -> Vec<crate::agents_view::Row> {
+        let now = Instant::now();
+        let mut rows = Vec::new();
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let TabKind::Terminal { root, .. } = &tab.kind else { continue };
+            let title = self.tab_title(tab);
+            let start = rows.len();
+            for id in root.panes() {
+                let Some(pane) = self.panes.get_mut(&id) else { continue };
+                let agent = pane.agent.agent().filter(|_| !pane.exited && pane.agents_view.is_none());
+                let Some(agent) = agent else {
+                    pane.agent_since = None;
+                    continue;
+                };
+                // What its tab shows, which may be what it says itself.
+                let state = pane.status.as_ref().map(|s| s.state).or_else(|| pane.agent.status().map(|s| s.state));
+                let since = match pane.agent_since {
+                    Some((a, s, since)) if a == agent.id && s == state => since,
+                    _ => now,
+                };
+                pane.agent_since = Some((agent.id, state, since));
+                let dir = pane.session.reported_cwd().map(|d| crate::agents_view::short_dir(&d)).unwrap_or_default();
+                let name = pane.agent_name.clone().unwrap_or_default();
+                rows.push(crate::agents_view::Row {
+                    window: self.id,
+                    pane: id,
+                    name,
+                    agent: agent.id,
+                    state,
+                    since,
+                    window_number: None,
+                    tab: index + 1,
+                    profile: pane.profile.name.clone(),
+                    dir,
+                    preview: std::sync::Arc::new(crate::agents_view::capture(&pane.session)),
+                });
+            }
+            // Not renamed: the tab's title, numbered when it has several.
+            let several = rows.len() - start > 1;
+            for (n, row) in rows[start..].iter_mut().enumerate() {
+                if row.name.is_empty() {
+                    row.name = if several { format!("{title} #{}", n + 1) } else { title.clone() };
+                }
+            }
+        }
+        rows
+    }
+
+    /// Show every window's agents (see `crate::on_agents`) in this window's
+    /// Agents views.
+    pub(crate) fn draw_agents(&mut self) {
+        let rows = crate::agents_view::rows();
+        let now = Instant::now();
+        let frame = crate::agents_view::frame(now);
+        let mut drew = false;
+        for pane in self.panes.values_mut() {
+            let Some(view) = &mut pane.agents_view else { continue };
+            let size = pane.session.size();
+            if let Some(text) = view.draw(&rows, size.cols as usize, size.rows as usize, now, frame) {
+                pane.session.feed(text.as_bytes());
+                drew = true;
+            }
+        }
+        if drew {
+            self.render();
+        }
+    }
+
+    /// The agent the focused Agents view is typing into, if any (see
+    /// `agents_view::View::click`).
+    fn agents_typing(&self) -> Option<(crate::WindowId, PaneId)> {
+        let (_, id) = self.active_terminal()?;
+        self.panes.get(&id)?.agents_view.as_ref()?.typing()
+    }
+
+    /// A key for the focused pane, if it shows the Agents view: the view's.
+    fn agents_view_key(&mut self, key: Key, mods: Mods) -> bool {
+        let Some((_, id)) = self.active_terminal() else { return false };
+        let Some(view) = self.panes.get_mut(&id).and_then(|p| p.agents_view.as_mut()) else { return false };
+        let outcome = view.key(key, mods);
+        self.agents_view_outcome(outcome);
+        true
+    }
+
+    fn agents_view_outcome(&mut self, outcome: crate::agents_view::Outcome) {
+        match outcome {
+            crate::agents_view::Outcome::None => {}
+            crate::agents_view::Outcome::Moved => self.draw_agents(),
+            // After this event: it may be this window, busy now.
+            crate::agents_view::Outcome::Go(window, pane) => {
+                slint::Timer::single_shot(Duration::ZERO, move || crate::go_to_pane(window, pane));
+            }
+            crate::agents_view::Outcome::Rename(window, pane, name) => {
+                slint::Timer::single_shot(Duration::ZERO, move || crate::rename_agent(window, pane, name));
+            }
+        }
+    }
+
+    /// Bring pane `id` into view: its tab, focused, and seen.
+    pub(crate) fn show_pane(&mut self, id: PaneId) {
+        let Some(index) = self.tabs.iter().position(|t| matches!(&t.kind, TabKind::Terminal { root, .. } if root.contains(id))) else { return };
+        self.active = index;
+        if let TabKind::Terminal { focused, .. } = &mut self.tabs[index].kind {
+            *focused = id;
+        }
+        self.tabs[index].seen();
+        self.refresh_chrome();
+        self.relayout();
     }
 
     /// The working tabs' spinners turn (every window's, on a timer).
@@ -1311,6 +1574,7 @@ impl App {
         // Nothing is going on in it any more, whatever its program last said.
         pane.session.clear_status();
         pane.title_status = None;
+        pane.agent.stop();
         self.on_status(id);
         let Some(pane) = self.panes.get_mut(&id) else { return };
         let success = code.is_none_or(|c| c == 0);
@@ -1341,6 +1605,7 @@ impl App {
 
     pub fn on_title(&mut self, id: PaneId, title: Option<String>) {
         let Some(pane) = self.panes.get_mut(&id) else { return };
+        pane.raw_title = title.clone().unwrap_or_default();
         let (status, title) = match title {
             Some(title) => {
                 let (status, rest) = title_status(&title, pane.title_status);
@@ -1751,7 +2016,11 @@ impl App {
         if self.dialog.is_some() {
             return;
         }
-        let Some(pane) = self.focused_pane() else { return };
+        let target = match self.agents_typing() {
+            Some((window, target)) if window == self.id => self.panes.get(&target),
+            _ => self.focused_pane(),
+        };
+        let Some(pane) = target else { return };
         if pane.exited || text.is_empty() {
             return;
         }
@@ -1818,6 +2087,30 @@ impl App {
             _ => key,
         };
 
+        // Typing into an agent from the Agents view: the agent's keys.
+        if let Some((window, target)) = self.agents_typing() {
+            if window == self.id && self.panes.contains_key(&target) {
+                let typed = self.key_to_pane(target, key, text);
+                crate::refresh_agents_soon();
+                return typed;
+            }
+            // In another window: there, after this event.
+            let text = text.to_string();
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                crate::with_window(window, |app| app.key_to_pane(target, key, &text));
+                crate::refresh_agents_soon();
+            });
+            return true;
+        }
+
+        // The Agents view has no program: its keys are its own.
+        if let Some((k, m)) = key
+            && self.agents_view_key(k, m)
+        {
+            self.wake_cursor();
+            return true;
+        }
+
         // Escape with a selection clears it (like WT), rather than reaching
         // the shell.
         if key == Some((Key::Escape, Mods::NONE))
@@ -1837,6 +2130,11 @@ impl App {
             return false;
         }
         let Some(id) = self.active_terminal().map(|(_, f)| f) else { return false };
+        self.key_to_pane(id, key, text)
+    }
+
+    /// A key (or `text`, composed) for pane `id`: what it sends its program.
+    pub(crate) fn key_to_pane(&mut self, id: PaneId, key: Option<(Key, Mods)>, text: &str) -> bool {
         let Some(pane) = self.panes.get(&id) else { return false };
         if pane.exited {
             match key {
@@ -1891,9 +2189,28 @@ impl App {
             self.send_keys(id, newline);
             return true;
         }
-        // Enter at the shell's prompt runs a command: its tab shows it running.
-        if key == Some((Key::Enter, Mods::NONE)) && pane.session.entered() {
-            self.on_status(id);
+        // Enter at the shell's prompt runs a command: its tab shows it
+        // running. It may be a coding agent (see `on_agents`).
+        if key == Some((Key::Enter, Mods::NONE)) {
+            let prompts = pane.session.prompts();
+            // Where the command is: from where typing began, or (not seen)
+            // the cursor's line, prompt and all.
+            let start = pane.input_start.filter(|s| s.0 == prompts).map(|s| (s.1, s.2)).unwrap_or_else(|| {
+                let term = pane.session.term().lock();
+                let grid = term.grid();
+                (grid.history_size() as i64 + grid.cursor.point.line.0 as i64, 0)
+            });
+            if pane.session.entered() {
+                if let Some(pane) = self.panes.get_mut(&id) {
+                    pane.input_start = None;
+                }
+                // Read once the shell has echoed all of it (it may lag what
+                // was typed): before the program's output, which comes later.
+                slint::Timer::single_shot(Duration::from_millis(150), move || {
+                    crate::with_pane(id, |app| app.on_command_entered(id, prompts, start));
+                });
+                self.on_status(id);
+            }
         }
         let Some(pane) = self.panes.get(&id) else { return false };
         let bytes = match key {
@@ -1923,6 +2240,14 @@ impl App {
         }
         pane.session.term().lock().selection = None;
         pane.last_key = Some(Instant::now());
+        // The first key at the prompt: what's typed starts where the cursor is.
+        let prompts = pane.session.prompts();
+        if pane.input_start.is_none_or(|s| s.0 != prompts) && pane.session.at_prompt() {
+            let term = pane.session.term().lock();
+            let grid = term.grid();
+            let at = grid.cursor.point;
+            pane.input_start = Some((prompts, grid.history_size() as i64 + at.line.0 as i64, at.column.0));
+        }
         pane.session.write(bytes);
     }
 
@@ -2052,6 +2377,7 @@ impl App {
             }
             Action::OpenNewTabDropdown => self.ui().invoke_open_new_tab_menu(),
             Action::OpenSettings => self.open_settings(),
+            Action::OpenAgents => self.open_agents(),
             Action::NewWindow => crate::request_window(None, crate::Placement::Default),
             Action::MarkMode => self.toggle_mark_mode(),
             Action::SelectAll => self.select_all(),
@@ -2132,7 +2458,12 @@ impl App {
 
     fn paste(&mut self) {
         let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else { return };
-        let Some(id) = self.active_terminal().map(|(_, id)| id) else { return };
+        // Typing into an agent from the Agents view: into the agent.
+        let target = match self.agents_typing() {
+            Some((window, target)) if window == self.id => Some(target),
+            _ => self.active_terminal().map(|(_, id)| id),
+        };
+        let Some(id) = target else { return };
         let Some(pane) = self.panes.get(&id) else { return };
         let bracketed = pane.session.term().lock().mode().contains(TermMode::BRACKETED_PASTE);
         match paste_warning(&text, bracketed, &self.settings) {
@@ -2272,6 +2603,19 @@ impl App {
         let Some(&id) = self.visible.get(index) else { return };
         if down {
             self.focus_pane(id);
+        }
+        // A click in the Agents view: see `View::click`.
+        if (button, down) == (0, true)
+            && let Some(point) = self.panes.get(&id).filter(|p| p.agents_view.is_some()).and_then(|p| self.cell_at(p, x, y)).map(|(p, _)| p)
+            && let Some(pane) = self.panes.get_mut(&id)
+            && let Some(view) = pane.agents_view.as_mut()
+        {
+            // The second click on the same line, soon after the first.
+            let double = matches!(pane.last_click, Some((at, p, 1)) if at.elapsed() < DOUBLE_CLICK && p.line == point.line);
+            pane.last_click = Some((Instant::now(), point, if double { 2 } else { 1 }));
+            let outcome = view.click(usize::try_from(point.line.0).unwrap_or(usize::MAX), double);
+            self.agents_view_outcome(outcome);
+            return;
         }
         let Some(pane) = self.panes.get(&id) else { return };
         let mode = *pane.session.term().lock().mode();
@@ -2779,6 +3123,67 @@ fn cursor_line(session: &Session) -> Vec<char> {
     out
 }
 
+/// What was typed at the prompt: from where typing began (`start`: an
+/// absolute line, scrollback and screen, and a column; see
+/// `Pane::input_start`) to the end of its line, following soft wraps. Read
+/// from the normal screen, also once a full-screen program has the other.
+fn typed_command(session: &Session, start: (i64, usize)) -> String {
+    use wtpp_session::alacritty_terminal::index::Line;
+    use wtpp_session::alacritty_terminal::term::cell::Flags;
+
+    let term = session.term().lock();
+    let grid = term.primary_grid();
+    let last = grid.columns() - 1;
+    let history = grid.history_size() as i64;
+    if start.0 < 0 || start.0 >= history + grid.screen_lines() as i64 {
+        return String::new();
+    }
+    let (mut line, mut col) = (Line((start.0 - history) as i32), start.1.min(last));
+    let mut out = String::new();
+    while line.0 < grid.screen_lines() as i32 {
+        let row = &grid[line];
+        for c in col..=last {
+            let cell = &row[Column(c)];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                out.push(cell.c);
+            }
+        }
+        if !row[Column(last)].flags.contains(Flags::WRAPLINE) {
+            break;
+        }
+        line = Line(line.0 + 1);
+        col = 0;
+    }
+    out.trim().to_string()
+}
+
+/// The screen's text, its rows top to bottom (blanks at their ends and
+/// empty rows at the bottom left out), as a coding agent's rules read it.
+fn screen_text(session: &Session) -> String {
+    use wtpp_session::alacritty_terminal::index::Line;
+    use wtpp_session::alacritty_terminal::term::cell::Flags;
+
+    let term = session.term().lock();
+    let grid = term.grid();
+    let mut out = String::new();
+    for line in 0..grid.screen_lines() as i32 {
+        let row = &grid[Line(line)];
+        let start = out.len();
+        for c in 0..grid.columns() {
+            let cell = &row[Column(c)];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                out.push(cell.c);
+            }
+        }
+        let end = out[start..].trim_end().len() + start;
+        out.truncate(end);
+        out.push('\n');
+    }
+    let end = out.trim_end().len();
+    out.truncate(end);
+    out
+}
+
 /// macOS: Option word editing, as in Terminal and iTerm. ⌥←/⌥→ move by word
 /// (ESC b / f) and ⌥⌦ (⌥fn⌫) deletes the next word (ESC d); ⌥⌫ already sends
 /// ESC DEL from the encoder.
@@ -2821,6 +3226,21 @@ fn chars_to_next_word(line: &[char]) -> usize {
 fn home_dir() -> PathBuf {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// What a pane shows: what its program says outright (OSC 7501, 9;4), over
+/// what its title says (Claude Code's prefix), over what its screen says (a
+/// coding agent's, see `App::on_agents`), over what the shell says of the
+/// command it runs. But a question or permission prompt on a coding agent's
+/// screen comes first: its title says nothing of those (Claude Code's `✳`
+/// reads as done while it asks you something), so it's only seen there.
+fn pane_status(said: Option<ProgramStatus>, title: Option<ProgramState>, agent: Option<ProgramStatus>, command: Option<ProgramState>) -> Option<ProgramStatus> {
+    if let Some(asking) = agent.as_ref().filter(|a| a.state == ProgramState::Blocked)
+        && said.as_ref().is_none_or(|s| s.state < ProgramState::Blocked)
+    {
+        return Some(asking.clone());
+    }
+    said.or_else(|| title.map(ProgramStatus::of)).or(agent).or_else(|| command.map(ProgramStatus::of))
 }
 
 /// The status a title's prefix shows, and the title without it. Claude Code
@@ -3021,6 +3441,23 @@ mod tests {
         assert_eq!(title_status("✳", None), (None, "✳"));
         assert_eq!(title_status("◐x", None), (None, "◐x"));
         assert_eq!(title_status("", None), (None, ""));
+    }
+
+    #[test]
+    fn agent_asking_beats_title() {
+        use ProgramState::*;
+        let agent = |state| Some(ProgramStatus { app: Some("claude".into()), ..ProgramStatus::of(state) });
+        let state = |s: Option<ProgramStatus>| s.map(|s| s.state);
+        // Claude Code asking a question under ConPTY: `✳` in its title, the form on screen.
+        assert_eq!(state(pane_status(None, Some(Done), agent(Blocked), None)), Some(Blocked));
+        assert_eq!(state(pane_status(Some(ProgramStatus::of(Done)), Some(Done), agent(Blocked), None)), Some(Blocked));
+        assert_eq!(state(pane_status(None, Some(Idle), agent(Blocked), Some(Working))), Some(Blocked));
+        // Otherwise the title still comes before the screen, and what's said before both.
+        assert_eq!(state(pane_status(None, Some(Working), agent(Done), None)), Some(Working));
+        assert_eq!(state(pane_status(Some(ProgramStatus::of(Error)), Some(Done), agent(Working), None)), Some(Error));
+        assert_eq!(state(pane_status(None, None, agent(Done), Some(Working))), Some(Done));
+        assert_eq!(state(pane_status(None, None, None, Some(Working))), Some(Working));
+        assert_eq!(pane_status(None, None, None, None), None);
     }
 
     #[test]

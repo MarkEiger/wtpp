@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.331
+▝▜██████▀  Haiku 5.5 · Claude Pro
+ ▝▝   ▝▝   /home/me/project
+
+
+❯ Use the AskUserQuestion tool right away (no other tools) to ask me two questions: first, pick a color, with 3 options
+  each having a short ascii preview; second, pick a fruit with 2 options and no previews. Then stop.
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Color  ☐ Fruit  ✔ Submit  →
+
+Pick a fruit.
+
+❯ 1. Apple
+     A crisp, common fruit.
+  2. Mango
+     A sweet, tropical fruit.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+
+

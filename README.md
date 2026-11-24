@@ -155,6 +155,33 @@ or Windows Terminal's progress, OSC 9;4 (`9;4;1;50`: 50%, `9;4;3`: working,
 `9;4;2`: error, `9;4;0`: done). A status goes away when the program's pane
 exits.
 
+## Coding agents
+
+A coding agent in a tab shows on it: Claude
+Code, Codex, OpenCode, Pi, OMP, Gemini, Cursor (`cursor-agent`), Copilot,
+Amp, Droid, Antigravity (`agy`), Cline, Devin, Grok, Hermes, Kilo, Kimi,
+Kiro, Letta, Maki, Muse, Qoder and Qwen. wt++ knows which one runs by the
+command you type at the prompt (`codex`, `npx @openai/codex`, `wsl -- pi`),
+in any shell with wt++'s prompt hooks, WSL included; by a profile that runs
+it; and on Linux, macOS and Windows (not inside WSL) by the programs the
+shell runs, which also finds one started by an alias or a script. What it's
+doing comes from its screen, title and progress, matched against herdr's
+detection rules for each agent (`crates/wtpp-session/agents/`, from
+[herdr](https://herdr.dev), Apache-2.0): working, waiting for you, and done
+when it finishes. What an agent says itself (Claude Code's OSC 7501 or its
+title) comes first.
+
+**Agents** (🤖, in the new-tab menu; "Open agents" in the command palette;
+`openAgents` to bind a key) lists every agent in every wt++ window, the way
+herdr's sidebar does, as a table (state, name, harness, where, folder,
+time) with a live preview of the selected agent's screen under it. Each is called by its tab's title, with
+`#1`, `#2`, … when a tab has several in its panes; `r` or F2 renames the
+selected one (an empty name goes back to the tab's title). ↑/↓ (or j/k) or
+a click select one; Enter or a double click go to it, bringing its window to
+the front. A click on the preview types into that agent right there (paste
+too), without leaving the view; a click on the list stops. Split it beside
+your agents to keep it in view.
+
 ## Environment variables (Windows)
 
 New tabs and panes get the environment Windows has now, as Windows Terminal
@@ -229,4 +256,6 @@ It's built on [Slint](https://slint.dev) (used under its GPLv3 option;
 `vendor/i-slint-core` is a patched copy), [alacritty_terminal](https://github.com/alacritty/alacritty),
 [wgpu](https://wgpu.rs) and [cosmic-text](https://github.com/pop-os/cosmic-text).
 It bundles the [Cascadia Code](https://github.com/microsoft/cascadia-code)
-fonts (SIL Open Font License, see `assets/fonts/LICENSE-Cascadia.txt`).
+fonts (SIL Open Font License, see `assets/fonts/LICENSE-Cascadia.txt`), and
+[herdr](https://github.com/herdrdev/herdr)'s agent detection rules (Apache
+License 2.0, see `crates/wtpp-session/agents/LICENSE-herdr`).

@@ -81,6 +81,8 @@ pub enum Action {
     ToggleFullscreen,
     OpenNewTabDropdown,
     OpenSettings,
+    /// The Agents view: every coding agent in every window (wt++ extension).
+    OpenAgents,
     NewWindow,
     CommandPalette,
     Find,
@@ -136,6 +138,7 @@ impl Action {
             ToggleFullscreen => json!("toggleFullscreen"),
             OpenNewTabDropdown => json!("openNewTabDropdown"),
             OpenSettings => json!("openSettings"),
+            OpenAgents => json!("openAgents"),
             NewWindow => json!("newWindow"),
             CommandPalette => json!("commandPalette"),
             Find => json!("find"),
@@ -203,6 +206,7 @@ impl Action {
             "toggleFullscreen" => ToggleFullscreen,
             "openNewTabDropdown" => OpenNewTabDropdown,
             "openSettings" => OpenSettings,
+            "openAgents" => OpenAgents,
             "newWindow" => NewWindow,
             "commandPalette" | "toggleCommandPalette" => CommandPalette,
             "find" => Find,
@@ -267,6 +271,7 @@ impl Action {
             ToggleFullscreen => "Toggle fullscreen".into(),
             OpenNewTabDropdown => "Open new tab dropdown".into(),
             OpenSettings => "Open settings".into(),
+            OpenAgents => "Open agents".into(),
             NewWindow => "New window".into(),
             CommandPalette => "Command palette".into(),
             Find => "Find".into(),
@@ -323,6 +328,7 @@ impl Action {
             OpenNewTabDropdown,
             CommandPalette,
             OpenSettings,
+            OpenAgents,
             SendInput(String::new()),
         ]);
         all

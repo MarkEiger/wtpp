@@ -20,6 +20,10 @@ until some other event such as a keypress (`seq 1 20000` in WSL froze around
 line 12,000). While output is flowing, the event loop now wakes every 4 ms
 and reads anyway; when the shell is idle it waits as before.
 
+In `src/term/mod.rs`: `Term::primary_grid`, the normal screen's grid even
+while the alternate screen is shown, to read a command typed at the prompt
+after a full-screen program it started has taken over the screen.
+
 Also in `src/event_loop.rs`: when the program exits, its output is read until
 it has been quiet for 100 ms (2 s at most), not once, and the exit is
 reported after that. ConPTY paints a program's last output on its own

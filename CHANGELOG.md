@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- The Agents view (🤖 **Agents** in the new-tab menu, or "Open agents" in
+  the command palette and as `openAgents` for a key binding): every coding
+  agent in every wt++ window, as a table with titled columns: state
+  (working, waiting for you, done, idle), name, harness (claude, codex, …),
+  where (window, tab, profile), folder and for how long; under it, a live
+  preview of the selected agent's screen, in color. An agent is called by its tab's title (`#1`,
+  `#2`, … when a tab has several in its panes); `r` or F2 renames it (Enter
+  to keep, Esc to cancel, empty for the tab's title again), with a blinking
+  cursor. ↑/↓ (or j/k) or a click select one; Enter or a double click go to
+  the agent's pane, bringing its window to the front. A click on the preview
+  types into that agent from the view (keys and paste go to it, Esc too) so
+  you can answer several without switching; a click on the list stops. It's
+  a pane like any other: split it beside your agents to keep it in view.
+- Coding agents in plain tabs show on the tab too: Codex,
+  OpenCode, Pi, OMP, Gemini, Cursor's agent, Copilot, Amp, Droid,
+  Antigravity, Cline, Devin, Grok, Hermes, Kilo, Kimi, Kiro, Letta, Maki,
+  Muse, Qoder and Qwen, as well as Claude Code. wt++ knows one by the
+  command you typed at the prompt (`codex`, `npx @openai/codex`, in WSL
+  too), by a profile that runs it, and on Linux, macOS and Windows by the
+  programs the shell runs. What it's doing (working, waiting for you, done)
+  comes from its screen and title, read by herdr's rules for each agent.
+- A coding agent asking you something (Claude Code's questions and
+  permission prompts) shows as waiting for you, with the amber `!`, on its
+  tab and in the Agents view. In WSL and on Windows it showed as done: its
+  title still says `✳` then, and that came before its screen.
+
 ## 1.6.0 — 2026-11-22
 
 - Tabs show what their programs say they're doing: a spinner while working

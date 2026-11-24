@@ -1,6 +1,7 @@
 // A GUI app on Windows: don't open a console window alongside it.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod agents_view;
 mod app;
 mod background;
 mod cli;
@@ -203,6 +204,82 @@ pub(crate) fn give_tab(target: WindowId, moved: app::MovedTab, slot: usize) {
     if let Some(e) = entry(target) {
         use slint::winit_030::WinitWindowAccessor;
         e.ui.window().with_winit_window(|w| w.focus_window());
+    }
+}
+
+/// Look at every window's coding agents, and list them all in the Agents
+/// views (see `agents_view`), each with its window when there are several.
+fn on_agents() {
+    let windows = window_ids();
+    let mut rows = Vec::new();
+    for (n, &id) in windows.iter().enumerate() {
+        let found = with_window(id, |app| {
+            app.on_agents();
+            app.agent_rows()
+        });
+        for mut row in found.unwrap_or_default() {
+            if windows.len() > 1 {
+                row.window_number = Some(n + 1);
+            }
+            rows.push(row);
+        }
+    }
+    agents_view::set_rows(rows);
+    for_each_window(|app| app.draw_agents());
+}
+
+/// List the agents again shortly, for the Agents view's preview to show
+/// what was just typed into one (and its answer) sooner than the timer.
+pub(crate) fn refresh_agents_soon() {
+    thread_local! {
+        static PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if PENDING.with(|p| p.replace(true)) {
+        return;
+    }
+    slint::Timer::single_shot(std::time::Duration::from_millis(40), || {
+        PENDING.with(|p| p.set(false));
+        on_agents();
+    });
+}
+
+/// Rename a pane's agent (from the Agents view), wherever its window is
+/// now, and list the agents again.
+pub(crate) fn rename_agent(window: WindowId, pane: pane_tree::PaneId, name: Option<String>) {
+    let mut windows = window_ids();
+    // Its window first: it most likely is still there.
+    windows.sort_by_key(|&id| id != window);
+    for id in windows {
+        let renamed = with_window(id, |app| app.panes.get_mut(&pane).map(|p| p.agent_name = name.clone()).is_some());
+        if renamed == Some(true) {
+            break;
+        }
+    }
+    on_agents();
+}
+
+/// Go to a pane (from the Agents view): its window, in front, showing it.
+pub(crate) fn go_to_pane(window: WindowId, pane: pane_tree::PaneId) {
+    // It may have moved to another window since.
+    let window = if entry(window).is_some_and(|e| e.app.try_borrow().is_ok_and(|a| a.panes.contains_key(&pane))) {
+        Some(window)
+    } else {
+        window_ids().into_iter().find(|&id| entry(id).is_some_and(|e| e.app.try_borrow().is_ok_and(|a| a.panes.contains_key(&pane))))
+    };
+    let Some(window) = window else { return };
+    with_window(window, |app| app.show_pane(pane));
+    if let Some(e) = entry(window) {
+        let w = e.ui.window();
+        if w.is_minimized() {
+            w.set_minimized(false);
+        }
+        #[cfg(windows)]
+        platform::bring_to_front(w);
+        #[cfg(not(windows))]
+        {
+            use slint::winit_030::WinitWindowAccessor;
+            w.with_winit_window(|w| w.focus_window());
+        }
     }
 }
 
@@ -885,9 +962,13 @@ fn main() -> anyhow::Result<()> {
     blink.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(530), || {
         for_each_window(|app| app.on_blink());
     });
+    // Coding agents in plain tabs: which, and what they're doing.
+    let agents = slint::Timer::default();
+    agents.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(500), on_agents);
     // Spinners of tabs whose programs are working.
     let spin = slint::Timer::default();
     spin.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(120), || {
+        for_each_window(|app| app.draw_agents());
         for_each_window(|app| app.on_spin());
     });
 

@@ -27,6 +27,8 @@
 - [x] Unfocused window look (dimmed tab row)
 - [x] Bell indicator on tab; progress indicator (OSC 9;4)
 - [x] Program status on tab (beyond WT): working / waiting for you / done / idle / error, OSC 7501 (Claude Code's), marked while unseen
+- [x] Agents view (beyond WT): every window's coding agents in a table (state, name, harness, where, folder, time) with a live preview of the selected one; Enter/click goes to one, r/F2 renames one
+- [x] Coding agents in plain tabs (beyond WT): Codex, OpenCode, Pi, Gemini and 20 more, by typed command / profile / process, state from herdr's detection rules
 - [x] Launch position (`initialPosition`) and window size/position persisted
 
 ## Panes
