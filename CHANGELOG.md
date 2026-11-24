@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 — 2026-11-25
 
 - The Agents view (🤖 **Agents** in the new-tab menu, or "Open agents" in
   the command palette and as `openAgents` for a key binding): every coding
