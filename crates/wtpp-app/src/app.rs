@@ -34,9 +34,12 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Face, size (1/64 px), weight, line height (1/100), ligatures.
 type FontKey = (String, u32, u16, u32, bool);
 
-pub(crate) struct Gpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+/// What panes are drawn with.
+pub(crate) enum Gpu {
+    /// Slint's wgpu device and queue: panes are textures.
+    Wgpu { device: wgpu::Device, queue: wgpu::Queue },
+    /// No GPU (see `crate::cpu_rendering`): panes are pixel buffers.
+    Cpu,
 }
 
 pub(crate) struct Pane {
@@ -49,7 +52,7 @@ pub(crate) struct Pane {
     title: Option<String>,
     /// Logical rectangle inside the content area.
     rect: Rect,
-    /// Render target; recreated when the grid size changes.
+    /// Render target (GPU); recreated when the grid size changes.
     target: Option<(wgpu::Texture, u32, u32)>,
     selecting: bool,
     /// The shell is cmd, whose line editor lacks Ctrl+Delete.
@@ -272,8 +275,8 @@ pub struct App {
     geometry: Arc<crate::titlebar::Geometry>,
     pub(crate) ui: slint::Weak<MainWindow>,
     pub(crate) gpu: Option<Gpu>,
-    /// Slint's device and queue, held until the fonts finish loading.
-    pub(crate) gpu_pending: Option<(wgpu::Device, wgpu::Queue)>,
+    /// What to draw with, held until the fonts finish loading.
+    pub(crate) gpu_pending: Option<Gpu>,
     pub(crate) fonts: Option<SharedFonts>,
     pub(crate) font_families: Vec<String>,
     pub(crate) renderers: HashMap<FontKey, Renderer>,
@@ -346,6 +349,9 @@ pub struct App {
     /// The window can show what's behind it (see `platform::window_alpha_supported`).
     pub(crate) window_alpha: bool,
     pub(crate) gpu_backend: Option<wgpu::Backend>,
+    /// Updates the title bar's geometry when drawing with the CPU (see
+    /// `on_cpu_ready`).
+    titlebar_poll: slint::Timer,
     /// A pane's background is see-through, so the window's is too.
     see_through: bool,
 }
@@ -412,6 +418,7 @@ impl App {
             close_confirmed: false,
             window_alpha: false,
             gpu_backend: None,
+            titlebar_poll: slint::Timer::default(),
             see_through: false,
         };
         app.apply_chrome_settings();
@@ -485,12 +492,32 @@ impl App {
     // ---- startup ------------------------------------------------------------
 
     pub fn on_gpu_ready(&mut self, instance: wgpu::Instance, device: wgpu::Device, queue: wgpu::Queue) {
-        let backend = device.adapter_info().backend;
+        let info = device.adapter_info();
+        log::info!("GPU: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+        let backend = info.backend;
         self.window_alpha = crate::platform::window_alpha_supported(self.ui().window(), &instance, &device);
         self.gpu_backend = Some(backend);
         crate::background::set_max_dimension(device.limits().max_texture_dimension_2d);
-        log_window_alpha(self.window_alpha, backend, self.settings.wants_transparency());
-        self.gpu_pending = Some((device, queue));
+        log_window_alpha(self.window_alpha, Some(backend), self.settings.wants_transparency());
+        self.gpu_pending = Some(Gpu::Wgpu { device, queue });
+        self.try_start();
+    }
+
+    /// The window is up, drawn by the CPU (see `crate::cpu_rendering`).
+    /// Its frame has no alpha channel, so it can't be see-through.
+    pub fn on_cpu_ready(&mut self, custom_titlebar: bool) {
+        self.window_alpha = false;
+        self.gpu_backend = None;
+        log_window_alpha(false, None, self.settings.wants_transparency());
+        if custom_titlebar {
+            // The GPU path updates the title bar's geometry after each frame;
+            // the software renderer has no such hook, so poll.
+            let id = self.id;
+            self.titlebar_poll.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
+                crate::with_window(id, |app| app.update_titlebar_geometry());
+            });
+        }
+        self.gpu_pending = Some(Gpu::Cpu);
         self.try_start();
     }
 
@@ -509,8 +536,7 @@ impl App {
         if self.gpu.is_some() || self.fonts.is_none() || self.gpu_pending.is_none() {
             return;
         }
-        let (device, queue) = self.gpu_pending.take().unwrap();
-        self.gpu = Some(Gpu { device, queue });
+        self.gpu = self.gpu_pending.take();
         self.ui().set_loading(false);
         if let Some(moved) = self.adopt.take() {
             self.adopt_tab(moved);
@@ -661,7 +687,12 @@ impl App {
                 cell_height: key.3 as f32 / 100.0,
                 ligatures: key.4,
             };
-            Renderer::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, &spec, fonts.clone())
+            match gpu {
+                Gpu::Wgpu { device, queue } => {
+                    Renderer::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, &spec, fonts.clone())
+                }
+                Gpu::Cpu => Renderer::new_cpu(&spec, fonts.clone()),
+            }
         }))
     }
 
@@ -1915,8 +1946,10 @@ impl App {
             let size = pane.session.size();
             let width = (size.cols as f32 * cell.width) as u32;
             let height = (size.rows as f32 * cell.height) as u32;
-            if !matches!(&pane.target, Some((_, w, h)) if *w == width && *h == height) {
-                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            if let Gpu::Wgpu { device, .. } = gpu
+                && !matches!(&pane.target, Some((_, w, h)) if *w == width && *h == height)
+            {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("wtpp pane"),
                     size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
                     mip_level_count: 1,
@@ -1928,13 +1961,11 @@ impl App {
                 });
                 pane.target = Some((texture, width, height));
             }
-            let (texture, ..) = pane.target.as_ref().unwrap();
-            let view = texture.create_view(&Default::default());
             let has_focus = id == focused && self.window_active;
             let alpha = if self.window_alpha { pane.profile.opacity } else { 1.0 };
             let bg_image = pane.profile.background_image.as_deref().and_then(|raw| crate::background::image_for(self.id, raw));
             let transparent = alpha < 1.0 || bg_image.is_some();
-            let (history, offset, bg) = {
+            let (history, offset, bg, image) = {
                 let term = pane.session.term().lock();
                 let mut highlights = Vec::new();
                 if id == focused {
@@ -1953,19 +1984,36 @@ impl App {
                     highlights: &highlights,
                     transparent,
                 };
-                renderer.render(&gpu.device, &gpu.queue, &view, width, height, &frame);
+                // Re-setting the image (even the same texture) is what tells
+                // Slint the pane needs repainting.
+                let image = match gpu {
+                    Gpu::Wgpu { .. } => {
+                        let (texture, ..) = pane.target.as_ref().unwrap();
+                        renderer.render(&texture.create_view(&Default::default()), width, height, &frame);
+                        slint::Image::try_from(texture.clone()).unwrap_or_default()
+                    }
+                    Gpu::Cpu => {
+                        let mut pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(width, height);
+                        renderer.render_cpu(pixels.make_mut_bytes().as_chunks_mut::<4>().0, width, height, &frame);
+                        slint::Image::from_rgba8_premultiplied(pixels)
+                    }
+                };
                 // The default background, as the program may have set it (OSC 11).
                 let bg = term.colors()[ansi::NamedColor::Background].unwrap_or(pane.theme.background);
-                (term.grid().history_size(), term.grid().display_offset(), bg)
+                (term.grid().history_size(), term.grid().display_offset(), bg, image)
             };
             let (bg_fit, bg_halign, bg_valign) = crate::background::image_layout(
                 pane.profile.background_image_stretch_mode,
                 pane.profile.background_image_alignment,
             );
+            // The CPU renderer doesn't smooth what it scales.
+            let bg_image = match (gpu, bg_image, pane.profile.background_image.as_deref()) {
+                (Gpu::Cpu, Some(image), Some(raw)) => {
+                    Some(crate::background::shown_at(raw, image, bg_fit, (pane.rect.w * scale, pane.rect.h * scale)))
+                }
+                (_, image, _) => image,
+            };
             let [left, top, ..] = pane.profile.padding;
-            // Re-setting the image (even the same texture) is what tells
-            // Slint the pane needs repainting.
-            let image = slint::Image::try_from(texture.clone()).unwrap_or_default();
             rows.push(PaneData {
                 x: pane.rect.x,
                 y: pane.rect.y,
@@ -2928,6 +2976,9 @@ fn see_through(alphas: impl IntoIterator<Item = u8>) -> bool {
 
 /// Why `opacity` can't make the window see-through with this backend.
 pub(crate) fn opacity_unavailable_reason(backend: Option<wgpu::Backend>) -> &'static str {
+    if crate::cpu_rendering() {
+        return "There's no GPU to draw with (or Software is chosen under Rendering), and windows drawn without one can't be see-through, so the background stays opaque.";
+    }
     match backend {
         Some(wgpu::Backend::Gl) => "It isn't supported with OpenGL, so the background stays opaque.",
         // Only when WGPU_DX12_PRESENTATION_SYSTEM asked for another swapchain.
@@ -2942,7 +2993,7 @@ pub(crate) fn opacity_unavailable_reason(backend: Option<wgpu::Backend>) -> &'st
 }
 
 /// Say once whether `opacity` can work, and why not when a profile wants it.
-fn log_window_alpha(available: bool, backend: wgpu::Backend, wanted: bool) {
+fn log_window_alpha(available: bool, backend: Option<wgpu::Backend>, wanted: bool) {
     static LOGGED: AtomicBool = AtomicBool::new(false);
     if LOGGED.swap(true, Ordering::Relaxed) {
         return;
@@ -2950,7 +3001,7 @@ fn log_window_alpha(available: bool, backend: wgpu::Backend, wanted: bool) {
     let state = if available { "available" } else { "unavailable" };
     log::info!("background opacity: window transparency {state} ({backend:?})");
     if wanted && !available {
-        log::warn!("opacity: {}", opacity_unavailable_reason(Some(backend)));
+        log::warn!("opacity: {}", opacity_unavailable_reason(backend));
     }
 }
 

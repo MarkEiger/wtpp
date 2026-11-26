@@ -5,6 +5,7 @@
 //! atlas, then decorations and the cursor.
 
 mod atlas;
+mod cpu;
 pub mod theme;
 
 use std::collections::HashMap;
@@ -100,12 +101,7 @@ struct Glyph {
 
 
 pub struct Renderer {
-    pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
-    globals: wgpu::Buffer,
-    instances: wgpu::Buffer,
-    instance_capacity: usize,
-    atlas: Atlas,
+    backend: Backend,
     fonts: SharedFonts,
     swash: SwashCache,
     family: String,
@@ -120,6 +116,24 @@ pub struct Renderer {
     ligatures: bool,
     /// A glyph didn't fit: start the atlas over on the next frame.
     atlas_full: bool,
+}
+
+/// Where cells are drawn: by the GPU into a texture, or by the CPU into
+/// pixels (no GPU, see `cpu`).
+enum Backend {
+    Gpu(Box<GpuBackend>),
+    Cpu(cpu::Glyphs),
+}
+
+struct GpuBackend {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    globals: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    instance_capacity: usize,
+    atlas: Atlas,
     /// Turns the premultiplied drawing of a see-through frame into the
     /// straight alpha Slint expects of a texture.
     resolve_pipeline: wgpu::RenderPipeline,
@@ -211,11 +225,377 @@ impl Renderer {
     /// system fonts on Windows) that callers should run it off the UI thread.
     /// `face` is the preferred font family; if it isn't installed, a
     /// fallback monospace font is used.
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, font: &FontSpec, fonts: SharedFonts) -> Renderer {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+        font: &FontSpec,
+        fonts: SharedFonts,
+    ) -> Renderer {
+        Renderer::with_backend(Backend::Gpu(Box::new(GpuBackend::new(device, queue, target_format))), font, fonts)
+    }
+
+    /// A renderer that draws with the CPU, see [`Renderer::render_cpu`].
+    pub fn new_cpu(font: &FontSpec, fonts: SharedFonts) -> Renderer {
+        Renderer::with_backend(Backend::Cpu(cpu::Glyphs::default()), font, fonts)
+    }
+
+    fn with_backend(backend: Backend, font: &FontSpec, fonts: SharedFonts) -> Renderer {
         let family = pick_family(&fonts.borrow(), &font.face);
         log::info!("font {:?} → using {family:?}", font.face);
-        let font_size = font.size;
+        let mut renderer = Renderer {
+            backend,
+            cell: CellMetrics { width: 1.0, height: 1.0 },
+            swash: SwashCache::new(),
+            family,
+            font_size: font.size,
+            weight: font.weight,
+            cell_height: font.cell_height.clamp(0.8, 3.0),
+            glyphs: HashMap::new(),
+            runs: HashMap::new(),
+            ligatures: font.ligatures,
+            atlas_full: false,
+            fonts,
+        };
+        renderer.cell = renderer.measure_cell();
+        renderer
+    }
 
+    pub fn cell_metrics(&self) -> CellMetrics {
+        self.cell
+    }
+
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// Change the font size (physical pixels); drops all cached glyphs.
+    pub fn set_font_size(&mut self, font_size: f32) {
+        if font_size == self.font_size {
+            return;
+        }
+        self.font_size = font_size;
+        self.glyphs.clear();
+        self.runs.clear();
+        self.clear_glyph_store();
+        self.cell = self.measure_cell();
+    }
+
+    fn clear_glyph_store(&mut self) {
+        match &mut self.backend {
+            Backend::Gpu(gpu) => gpu.atlas.clear(),
+            Backend::Cpu(glyphs) => glyphs.clear(),
+        }
+    }
+
+    fn line_height(&self) -> f32 {
+        (self.font_size * self.cell_height).round()
+    }
+
+    fn shape(&mut self, text: &str, bold: bool, italic: bool) -> Buffer {
+        let metrics = Metrics::new(self.font_size, self.line_height());
+        let attrs = Attrs::new()
+            .family(Family::Name(&self.family))
+            .weight(if bold { Weight(self.weight.max(400).saturating_add(300).min(900)) } else { Weight(self.weight) })
+            .style(if italic { Style::Italic } else { Style::Normal });
+        let mut fonts = self.fonts.borrow_mut();
+        let mut buffer = Buffer::new(&mut fonts, metrics);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        buffer
+    }
+
+    fn measure_cell(&mut self) -> CellMetrics {
+        let buffer = self.shape("M", false, false);
+        let width = buffer
+            .layout_runs()
+            .next()
+            .and_then(|run| run.glyphs.first().map(|g| g.w))
+            .unwrap_or(self.font_size * 0.6);
+        CellMetrics { width: width.round().max(1.0), height: self.line_height() }
+    }
+
+    /// Shape a run of text (cached).
+    fn shape_run(&mut self, text: &str, bold: bool, italic: bool) -> Rc<[ShapedGlyph]> {
+        let key = (text.to_string(), bold, italic);
+        if let Some(run) = self.runs.get(&key) {
+            return run.clone();
+        }
+        if self.runs.len() >= MAX_CACHED_RUNS {
+            self.runs.clear();
+        }
+        let buffer = self.shape(text, bold, italic);
+        let shaped: Rc<[ShapedGlyph]> = buffer
+            .layout_runs()
+            .flat_map(|run| {
+                run.glyphs.iter().map(move |g| {
+                    // Position relative to where the glyph's cell starts:
+                    // the grid, not the shaper's advances, decides x.
+                    let physical = g.physical((-g.x, 0.0), 1.0);
+                    ShapedGlyph { start: g.start, key: physical.cache_key, x: physical.x, y: run.line_y as i32 + physical.y }
+                })
+            })
+            .collect();
+        self.runs.insert(key, shaped.clone());
+        shaped
+    }
+
+    fn glyph(&mut self, key: CacheKey) -> Option<Glyph> {
+        if let Some(cached) = self.glyphs.get(&key) {
+            return *cached;
+        }
+        let glyph = self.rasterize(key);
+        self.glyphs.insert(key, glyph);
+        glyph
+    }
+
+    fn rasterize(&mut self, key: CacheKey) -> Option<Glyph> {
+        let image = self.swash.get_image_uncached(&mut self.fonts.borrow_mut(), key)?;
+        let (w, h) = (image.placement.width, image.placement.height);
+        let rgba: Vec<u8> = match image.content {
+            SwashContent::Mask => image.data.iter().flat_map(|&a| [255, 255, 255, a]).collect(),
+            SwashContent::SubpixelMask => image
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [255, 255, 255, ((p[0] as u16 + p[1] as u16 + p[2] as u16) / 3) as u8])
+                .collect(),
+            SwashContent::Color => image.data.clone(),
+        };
+        let color = image.content == SwashContent::Color;
+        let stored = match &mut self.backend {
+            Backend::Gpu(gpu) => gpu.atlas.insert(&gpu.queue, w, h, &rgba),
+            // The slot, in place of an atlas position.
+            Backend::Cpu(glyphs) => glyphs.insert(w, h, &rgba, color).map(|slot| [slot, 0]),
+        };
+        let Some(atlas_pos) = stored else {
+            self.atlas_full = true;
+            return None;
+        };
+        Some(Glyph {
+            atlas_pos,
+            size: [w, h],
+            offset: [image.placement.left, -image.placement.top],
+            color,
+        })
+    }
+
+    /// Glyph quads for one row of cells, shaped in runs of the same style so
+    /// the font can form ligatures. Each glyph is drawn at the cell its
+    /// cluster starts in.
+    fn row_glyphs(&mut self, y: f32, cells: &[TextCell], out: &mut Vec<Instance>) {
+        let cw = self.cell.width;
+        let mut start = 0;
+        while start < cells.len() {
+            let style = (cells[start].bold, cells[start].italic);
+            let mut end = start + 1;
+            // Without ligatures every cell is its own run; the cursor cell
+            // always is, so a ligature never hides it.
+            if self.ligatures && !cells[start].breaks_run {
+                while end < cells.len()
+                    && (cells[end].bold, cells[end].italic) == style
+                    && cells[end].col == cells[end - 1].col + cells[end - 1].width
+                    && !cells[end].breaks_run
+                {
+                    end += 1;
+                }
+            }
+            let run = &cells[start..end];
+            // Byte offset → cell, for placing each glyph.
+            let mut text = String::new();
+            let mut starts = Vec::with_capacity(run.len());
+            for cell in run {
+                starts.push(text.len());
+                text.push_str(&cell.text);
+            }
+            if !text.trim().is_empty() {
+                let shaped = self.shape_run(&text, style.0, style.1);
+                for g in shaped.iter() {
+                    let i = starts.partition_point(|&s| s <= g.start).saturating_sub(1);
+                    let cell = &run[i];
+                    if let Some(glyph) = self.glyph(g.key) {
+                        out.push(Instance {
+                            pos: [
+                                cell.col as f32 * cw + (g.x + glyph.offset[0]) as f32,
+                                y + (g.y + glyph.offset[1]) as f32,
+                            ],
+                            size: [glyph.size[0] as f32, glyph.size[1] as f32],
+                            uv_pos: [glyph.atlas_pos[0] as f32, glyph.atlas_pos[1] as f32],
+                            color: theme::to_f32(cell.fg, 1.0),
+                            kind: if glyph.color { KIND_COLOR } else { KIND_MASK },
+                        });
+                    }
+                }
+            }
+            start = end;
+        }
+    }
+
+    /// Draw the terminal's current viewport into `target`, which is
+    /// `width`×`height` physical pixels. Needs a renderer made with
+    /// [`Renderer::new`].
+    pub fn render<T: EventListener>(&mut self, target: &wgpu::TextureView, width: u32, height: u32, frame: &Frame<'_, T>) {
+        let instances = self.build_instances(frame);
+        let Backend::Gpu(gpu) = &mut self.backend else {
+            debug_assert!(false, "render() on a CPU renderer");
+            return;
+        };
+        gpu.draw(target, width, height, frame.theme.background, frame.transparent, &instances);
+    }
+
+    /// Draw the terminal's current viewport into `pixels`, `width`×`height`
+    /// premultiplied RGBA, with the CPU. Needs a renderer made with
+    /// [`Renderer::new_cpu`].
+    pub fn render_cpu<T: EventListener>(&mut self, pixels: &mut [[u8; 4]], width: u32, height: u32, frame: &Frame<'_, T>) {
+        let instances = self.build_instances(frame);
+        let Backend::Cpu(glyphs) = &self.backend else {
+            debug_assert!(false, "render_cpu() on a GPU renderer");
+            return;
+        };
+        let clear = if frame.transparent { [0.0; 4] } else { theme::to_f32(frame.theme.background, 1.0) };
+        cpu::draw(pixels, width, height, clear, &instances, glyphs);
+    }
+
+    fn build_instances<T: EventListener>(&mut self, frame: &Frame<'_, T>) -> Vec<Instance> {
+        if self.atlas_full {
+            // Glyphs missing from the last frame get re-rasterized now.
+            self.atlas_full = false;
+            self.clear_glyph_store();
+            self.glyphs.clear();
+        }
+        let (theme, focused) = (frame.theme, frame.focused);
+        // Unfocused panes show a steady hollow cursor.
+        let cursor_visible = frame.cursor_visible || !focused;
+        let content = frame.term.renderable_content();
+        let CellMetrics { width: cw, height: ch } = self.cell;
+        let offset = content.display_offset as i32;
+        let cursor = content.cursor;
+        let block_cursor = focused && cursor_visible && cursor.shape == CursorShape::Block;
+        let selection = content.selection;
+        let colors = content.colors;
+
+        let mut backgrounds = Vec::new();
+        let mut glyphs = Vec::new();
+        let mut overlays = Vec::new();
+        // Cells of the row being collected, shaped together when it ends.
+        let mut row_cells: Vec<TextCell> = Vec::new();
+        let mut text_row = i32::MIN;
+
+        for indexed in content.display_iter {
+            let cell = &indexed.cell;
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let row = indexed.point.line.0 + offset;
+            let x = indexed.point.column.0 as f32 * cw;
+            let y = row as f32 * ch;
+            let cols = if cell.flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
+
+            let bold = cell.flags.contains(Flags::BOLD);
+            let mut fg = theme.resolve(cell.fg, colors, bold && theme.bold_is_bright);
+            let mut bg = theme.resolve(cell.bg, colors, false);
+            if cell.flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            if cell.flags.contains(Flags::DIM) {
+                fg = theme::dim(fg);
+            }
+            let is_block_cursor = block_cursor && indexed.point == cursor.point;
+            if is_block_cursor {
+                fg = theme.background;
+                bg = theme.cursor;
+            }
+
+            let inverse = cell.flags.contains(Flags::INVERSE);
+            if paints_background(cell.bg, inverse, is_block_cursor, bg, theme.background, frame.transparent) {
+                backgrounds.push(Instance::solid(x, y, cw * cols, ch, theme::to_f32(bg, 1.0)));
+            }
+            if selection.is_some_and(|s| s.contains(indexed.point)) {
+                backgrounds.push(Instance::solid(x, y, cw * cols, ch, theme::to_f32(theme.selection_background, 0.3)));
+            }
+            let mut link = false;
+            for h in frame.highlights {
+                if h.start <= indexed.point && indexed.point <= h.end {
+                    match h.kind {
+                        HighlightKind::Match => backgrounds.push(Instance::solid(
+                            x,
+                            y,
+                            cw * cols,
+                            ch,
+                            theme::to_f32(MATCH_HIGHLIGHT, 0.35),
+                        )),
+                        HighlightKind::Link => link = true,
+                    }
+                }
+            }
+
+            if row != text_row {
+                self.row_glyphs(text_row as f32 * ch, &row_cells, &mut glyphs);
+                row_cells.clear();
+                text_row = row;
+            }
+            let mut text = String::new();
+            if !cell.flags.contains(Flags::HIDDEN) {
+                text.push(if cell.c == '\t' { ' ' } else { cell.c });
+                // Combining marks belong to this cell's cluster.
+                text.extend(cell.zerowidth().into_iter().flatten());
+            } else {
+                text.push(' ');
+            }
+            row_cells.push(TextCell {
+                col: indexed.point.column.0,
+                width: cols as usize,
+                text,
+                fg,
+                bold: bold && theme.bold_font,
+                italic: cell.flags.contains(Flags::ITALIC),
+                breaks_run: indexed.point == cursor.point,
+            });
+
+            let thickness = (ch / 16.0).round().max(1.0);
+            let fg4 = theme::to_f32(fg, 1.0);
+            if link || cell.flags.intersects(Flags::ALL_UNDERLINES) {
+                overlays.push(Instance::solid(x, y + ch - 2.0 * thickness, cw * cols, thickness, fg4));
+            }
+            if cell.flags.contains(Flags::STRIKEOUT) {
+                overlays.push(Instance::solid(x, y + ch / 2.0, cw * cols, thickness, fg4));
+            }
+        }
+
+        self.row_glyphs(text_row as f32 * ch, &row_cells, &mut glyphs);
+
+        // Non-block cursors draw on top of the text.
+        let cursor_row = cursor.point.line.0 + offset;
+        let (cx, cy) = (cursor.point.column.0 as f32 * cw, cursor_row as f32 * ch);
+        let cursor_color = theme::to_f32(theme.cursor, 1.0);
+        let shape = match (focused, cursor_visible) {
+            (_, false) => CursorShape::Hidden,
+            (true, true) => cursor.shape,
+            (false, true) if cursor.shape == CursorShape::Hidden => CursorShape::Hidden,
+            (false, true) => CursorShape::HollowBlock,
+        };
+        let t = (cw / 8.0).round().max(1.0);
+        match shape {
+            CursorShape::Beam => overlays.push(Instance::solid(cx, cy, t, ch, cursor_color)),
+            CursorShape::Underline => overlays.push(Instance::solid(cx, cy + ch - 2.0 * t, cw, 2.0 * t, cursor_color)),
+            CursorShape::HollowBlock => {
+                overlays.push(Instance::solid(cx, cy, cw, t, cursor_color));
+                overlays.push(Instance::solid(cx, cy + ch - t, cw, t, cursor_color));
+                overlays.push(Instance::solid(cx, cy, t, ch, cursor_color));
+                overlays.push(Instance::solid(cx + cw - t, cy, t, ch, cursor_color));
+            }
+            CursorShape::Block | CursorShape::Hidden => {}
+        }
+
+        backgrounds.extend(glyphs);
+        backgrounds.extend(overlays);
+        backgrounds
+    }
+}
+
+impl GpuBackend {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, target_format: wgpu::TextureFormat) -> GpuBackend {
         let atlas = Atlas::new(device);
         let shader = device.create_shader_module(wgpu::include_wgsl!("shaders/cells.wgsl"));
 
@@ -358,212 +738,28 @@ impl Renderer {
         });
 
         let instance_capacity = 4096;
-        let instances = create_instance_buffer(device, instance_capacity);
-
-        let mut renderer = Renderer {
+        GpuBackend {
+            device: device.clone(),
+            queue: queue.clone(),
             pipeline,
             bind_group,
             globals,
-            instances,
+            instances: create_instance_buffer(device, instance_capacity),
             instance_capacity,
             atlas,
-            cell: CellMetrics { width: 1.0, height: 1.0 },
-            swash: SwashCache::new(),
-            family,
-            font_size,
-            weight: font.weight,
-            cell_height: font.cell_height.clamp(0.8, 3.0),
-            glyphs: HashMap::new(),
-            runs: HashMap::new(),
-            ligatures: font.ligatures,
-            atlas_full: false,
-            fonts,
             resolve_pipeline,
             resolve_layout,
             scratch: HashMap::new(),
-        };
-        renderer.cell = renderer.measure_cell();
-        renderer
-    }
-
-    pub fn cell_metrics(&self) -> CellMetrics {
-        self.cell
-    }
-
-    pub fn font_size(&self) -> f32 {
-        self.font_size
-    }
-
-    /// Change the font size (physical pixels); drops all cached glyphs.
-    pub fn set_font_size(&mut self, font_size: f32) {
-        if font_size == self.font_size {
-            return;
-        }
-        self.font_size = font_size;
-        self.glyphs.clear();
-        self.runs.clear();
-        self.atlas.clear();
-        self.cell = self.measure_cell();
-    }
-
-    fn line_height(&self) -> f32 {
-        (self.font_size * self.cell_height).round()
-    }
-
-    fn shape(&mut self, text: &str, bold: bool, italic: bool) -> Buffer {
-        let metrics = Metrics::new(self.font_size, self.line_height());
-        let attrs = Attrs::new()
-            .family(Family::Name(&self.family))
-            .weight(if bold { Weight(self.weight.max(400).saturating_add(300).min(900)) } else { Weight(self.weight) })
-            .style(if italic { Style::Italic } else { Style::Normal });
-        let mut fonts = self.fonts.borrow_mut();
-        let mut buffer = Buffer::new(&mut fonts, metrics);
-        buffer.set_text(text, &attrs, Shaping::Advanced, None);
-        buffer.shape_until_scroll(&mut fonts, false);
-        buffer
-    }
-
-    fn measure_cell(&mut self) -> CellMetrics {
-        let buffer = self.shape("M", false, false);
-        let width = buffer
-            .layout_runs()
-            .next()
-            .and_then(|run| run.glyphs.first().map(|g| g.w))
-            .unwrap_or(self.font_size * 0.6);
-        CellMetrics { width: width.round().max(1.0), height: self.line_height() }
-    }
-
-    /// Shape a run of text (cached).
-    fn shape_run(&mut self, text: &str, bold: bool, italic: bool) -> Rc<[ShapedGlyph]> {
-        let key = (text.to_string(), bold, italic);
-        if let Some(run) = self.runs.get(&key) {
-            return run.clone();
-        }
-        if self.runs.len() >= MAX_CACHED_RUNS {
-            self.runs.clear();
-        }
-        let buffer = self.shape(text, bold, italic);
-        let shaped: Rc<[ShapedGlyph]> = buffer
-            .layout_runs()
-            .flat_map(|run| {
-                run.glyphs.iter().map(move |g| {
-                    // Position relative to where the glyph's cell starts:
-                    // the grid, not the shaper's advances, decides x.
-                    let physical = g.physical((-g.x, 0.0), 1.0);
-                    ShapedGlyph { start: g.start, key: physical.cache_key, x: physical.x, y: run.line_y as i32 + physical.y }
-                })
-            })
-            .collect();
-        self.runs.insert(key, shaped.clone());
-        shaped
-    }
-
-    fn glyph(&mut self, queue: &wgpu::Queue, key: CacheKey) -> Option<Glyph> {
-        if let Some(cached) = self.glyphs.get(&key) {
-            return *cached;
-        }
-        let glyph = self.rasterize(queue, key);
-        self.glyphs.insert(key, glyph);
-        glyph
-    }
-
-    fn rasterize(&mut self, queue: &wgpu::Queue, key: CacheKey) -> Option<Glyph> {
-        let image = self.swash.get_image_uncached(&mut self.fonts.borrow_mut(), key)?;
-        let (w, h) = (image.placement.width, image.placement.height);
-        let rgba: Vec<u8> = match image.content {
-            SwashContent::Mask => image.data.iter().flat_map(|&a| [255, 255, 255, a]).collect(),
-            SwashContent::SubpixelMask => image
-                .data
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .flat_map(|p| [255, 255, 255, ((p[0] as u16 + p[1] as u16 + p[2] as u16) / 3) as u8])
-                .collect(),
-            SwashContent::Color => image.data.clone(),
-        };
-        let Some(atlas_pos) = self.atlas.insert(queue, w, h, &rgba) else {
-            self.atlas_full = true;
-            return None;
-        };
-        Some(Glyph {
-            atlas_pos,
-            size: [w, h],
-            offset: [image.placement.left, -image.placement.top],
-            color: image.content == SwashContent::Color,
-        })
-    }
-
-    /// Glyph quads for one row of cells, shaped in runs of the same style so
-    /// the font can form ligatures. Each glyph is drawn at the cell its
-    /// cluster starts in.
-    fn row_glyphs(&mut self, queue: &wgpu::Queue, y: f32, cells: &[TextCell], out: &mut Vec<Instance>) {
-        let cw = self.cell.width;
-        let mut start = 0;
-        while start < cells.len() {
-            let style = (cells[start].bold, cells[start].italic);
-            let mut end = start + 1;
-            // Without ligatures every cell is its own run; the cursor cell
-            // always is, so a ligature never hides it.
-            if self.ligatures && !cells[start].breaks_run {
-                while end < cells.len()
-                    && (cells[end].bold, cells[end].italic) == style
-                    && cells[end].col == cells[end - 1].col + cells[end - 1].width
-                    && !cells[end].breaks_run
-                {
-                    end += 1;
-                }
-            }
-            let run = &cells[start..end];
-            // Byte offset → cell, for placing each glyph.
-            let mut text = String::new();
-            let mut starts = Vec::with_capacity(run.len());
-            for cell in run {
-                starts.push(text.len());
-                text.push_str(&cell.text);
-            }
-            if !text.trim().is_empty() {
-                let shaped = self.shape_run(&text, style.0, style.1);
-                for g in shaped.iter() {
-                    let i = starts.partition_point(|&s| s <= g.start).saturating_sub(1);
-                    let cell = &run[i];
-                    if let Some(glyph) = self.glyph(queue, g.key) {
-                        out.push(Instance {
-                            pos: [
-                                cell.col as f32 * cw + (g.x + glyph.offset[0]) as f32,
-                                y + (g.y + glyph.offset[1]) as f32,
-                            ],
-                            size: [glyph.size[0] as f32, glyph.size[1] as f32],
-                            uv_pos: [glyph.atlas_pos[0] as f32, glyph.atlas_pos[1] as f32],
-                            color: theme::to_f32(cell.fg, 1.0),
-                            kind: if glyph.color { KIND_COLOR } else { KIND_MASK },
-                        });
-                    }
-                }
-            }
-            start = end;
         }
     }
 
-    /// Draw the terminal's current viewport into `target`, which is
-    /// `width`×`height` physical pixels.
-    pub fn render<T: EventListener>(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        target: &wgpu::TextureView,
-        width: u32,
-        height: u32,
-        frame: &Frame<'_, T>,
-    ) {
-        let theme = frame.theme;
-        let instances = self.build_instances(queue, frame);
-
+    fn draw(&mut self, target: &wgpu::TextureView, width: u32, height: u32, bg: Rgb, transparent: bool, instances: &[Instance]) {
         if instances.len() > self.instance_capacity {
             self.instance_capacity = instances.len().next_power_of_two();
-            self.instances = create_instance_buffer(device, self.instance_capacity);
+            self.instances = create_instance_buffer(&self.device, self.instance_capacity);
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-        queue.write_buffer(
+        self.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+        self.queue.write_buffer(
             &self.globals,
             0,
             bytemuck::bytes_of(&Globals {
@@ -572,15 +768,14 @@ impl Renderer {
             }),
         );
 
-        let bg = theme.background;
-        let mut encoder = device.create_command_encoder(&Default::default());
-        if frame.transparent {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        if transparent {
             // Draw premultiplied into a scratch texture, then write it out
             // as straight alpha (how Slint reads the pane's texture).
             if !self.scratch.contains_key(&(width, height)) && self.scratch.len() >= MAX_SCRATCH {
                 self.scratch.clear();
             }
-            let layout = &self.resolve_layout;
+            let (device, layout) = (&self.device, &self.resolve_layout);
             let (scratch, resolve_group) = self.scratch.entry((width, height)).or_insert_with(|| {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("wtpp scratch"),
@@ -611,7 +806,7 @@ impl Renderer {
             let clear = wgpu::Color { r: bg.r as f64 / 255.0, g: bg.g as f64 / 255.0, b: bg.b as f64 / 255.0, a: 1.0 };
             self.draw_cells(&mut encoder, target, clear, instances.len());
         }
-        queue.submit([encoder.finish()]);
+        self.queue.submit([encoder.finish()]);
     }
 
     fn draw_cells(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, clear: wgpu::Color, count: usize) {
@@ -620,142 +815,6 @@ impl Renderer {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
         pass.draw(0..4, 0..count as u32);
-    }
-
-    fn build_instances<T: EventListener>(&mut self, queue: &wgpu::Queue, frame: &Frame<'_, T>) -> Vec<Instance> {
-        if self.atlas_full {
-            // Glyphs missing from the last frame get re-rasterized now.
-            self.atlas_full = false;
-            self.atlas.clear();
-            self.glyphs.clear();
-        }
-        let (theme, focused) = (frame.theme, frame.focused);
-        // Unfocused panes show a steady hollow cursor.
-        let cursor_visible = frame.cursor_visible || !focused;
-        let content = frame.term.renderable_content();
-        let CellMetrics { width: cw, height: ch } = self.cell;
-        let offset = content.display_offset as i32;
-        let cursor = content.cursor;
-        let block_cursor = focused && cursor_visible && cursor.shape == CursorShape::Block;
-        let selection = content.selection;
-        let colors = content.colors;
-
-        let mut backgrounds = Vec::new();
-        let mut glyphs = Vec::new();
-        let mut overlays = Vec::new();
-        // Cells of the row being collected, shaped together when it ends.
-        let mut row_cells: Vec<TextCell> = Vec::new();
-        let mut text_row = i32::MIN;
-
-        for indexed in content.display_iter {
-            let cell = &indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                continue;
-            }
-            let row = indexed.point.line.0 + offset;
-            let x = indexed.point.column.0 as f32 * cw;
-            let y = row as f32 * ch;
-            let cols = if cell.flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
-
-            let bold = cell.flags.contains(Flags::BOLD);
-            let mut fg = theme.resolve(cell.fg, colors, bold && theme.bold_is_bright);
-            let mut bg = theme.resolve(cell.bg, colors, false);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.flags.contains(Flags::DIM) {
-                fg = theme::dim(fg);
-            }
-            let is_block_cursor = block_cursor && indexed.point == cursor.point;
-            if is_block_cursor {
-                fg = theme.background;
-                bg = theme.cursor;
-            }
-
-            let inverse = cell.flags.contains(Flags::INVERSE);
-            if paints_background(cell.bg, inverse, is_block_cursor, bg, theme.background, frame.transparent) {
-                backgrounds.push(Instance::solid(x, y, cw * cols, ch, theme::to_f32(bg, 1.0)));
-            }
-            if selection.is_some_and(|s| s.contains(indexed.point)) {
-                backgrounds.push(Instance::solid(x, y, cw * cols, ch, theme::to_f32(theme.selection_background, 0.3)));
-            }
-            let mut link = false;
-            for h in frame.highlights {
-                if h.start <= indexed.point && indexed.point <= h.end {
-                    match h.kind {
-                        HighlightKind::Match => backgrounds.push(Instance::solid(
-                            x,
-                            y,
-                            cw * cols,
-                            ch,
-                            theme::to_f32(MATCH_HIGHLIGHT, 0.35),
-                        )),
-                        HighlightKind::Link => link = true,
-                    }
-                }
-            }
-
-            if row != text_row {
-                self.row_glyphs(queue, text_row as f32 * ch, &row_cells, &mut glyphs);
-                row_cells.clear();
-                text_row = row;
-            }
-            let mut text = String::new();
-            if !cell.flags.contains(Flags::HIDDEN) {
-                text.push(if cell.c == '\t' { ' ' } else { cell.c });
-                // Combining marks belong to this cell's cluster.
-                text.extend(cell.zerowidth().into_iter().flatten());
-            } else {
-                text.push(' ');
-            }
-            row_cells.push(TextCell {
-                col: indexed.point.column.0,
-                width: cols as usize,
-                text,
-                fg,
-                bold: bold && theme.bold_font,
-                italic: cell.flags.contains(Flags::ITALIC),
-                breaks_run: indexed.point == cursor.point,
-            });
-
-            let thickness = (ch / 16.0).round().max(1.0);
-            let fg4 = theme::to_f32(fg, 1.0);
-            if link || cell.flags.intersects(Flags::ALL_UNDERLINES) {
-                overlays.push(Instance::solid(x, y + ch - 2.0 * thickness, cw * cols, thickness, fg4));
-            }
-            if cell.flags.contains(Flags::STRIKEOUT) {
-                overlays.push(Instance::solid(x, y + ch / 2.0, cw * cols, thickness, fg4));
-            }
-        }
-
-        self.row_glyphs(queue, text_row as f32 * ch, &row_cells, &mut glyphs);
-
-        // Non-block cursors draw on top of the text.
-        let cursor_row = cursor.point.line.0 + offset;
-        let (cx, cy) = (cursor.point.column.0 as f32 * cw, cursor_row as f32 * ch);
-        let cursor_color = theme::to_f32(theme.cursor, 1.0);
-        let shape = match (focused, cursor_visible) {
-            (_, false) => CursorShape::Hidden,
-            (true, true) => cursor.shape,
-            (false, true) if cursor.shape == CursorShape::Hidden => CursorShape::Hidden,
-            (false, true) => CursorShape::HollowBlock,
-        };
-        let t = (cw / 8.0).round().max(1.0);
-        match shape {
-            CursorShape::Beam => overlays.push(Instance::solid(cx, cy, t, ch, cursor_color)),
-            CursorShape::Underline => overlays.push(Instance::solid(cx, cy + ch - 2.0 * t, cw, 2.0 * t, cursor_color)),
-            CursorShape::HollowBlock => {
-                overlays.push(Instance::solid(cx, cy, cw, t, cursor_color));
-                overlays.push(Instance::solid(cx, cy + ch - t, cw, t, cursor_color));
-                overlays.push(Instance::solid(cx, cy, t, ch, cursor_color));
-                overlays.push(Instance::solid(cx + cw - t, cy, t, ch, cursor_color));
-            }
-            CursorShape::Block | CursorShape::Hidden => {}
-        }
-
-        backgrounds.extend(glyphs);
-        backgrounds.extend(overlays);
-        backgrounds
     }
 }
 

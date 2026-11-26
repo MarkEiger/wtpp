@@ -477,25 +477,31 @@ fn wgpu_configuration(api: wtpp_config::GraphicsApi) -> WGPUConfiguration {
         GraphicsApi::Vulkan => wgpu::Backends::VULKAN,
         GraphicsApi::Metal => wgpu::Backends::METAL,
         GraphicsApi::OpenGl => wgpu::Backends::GL,
-        GraphicsApi::Software => {
-            // Slint skips CPU adapters unless told; wgpu picks the adapter
-            // named here first (WARP on Windows, llvmpipe with Mesa).
-            // SAFETY: single-threaded at this point in startup.
-            unsafe {
-                std::env::set_var("SLINT_WGPU_CPU", "1");
-                std::env::set_var("WGPU_ADAPTER_NAME", if cfg!(windows) { "Microsoft Basic Render Driver" } else { "llvmpipe" });
-            }
-            if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::VULKAN | wgpu::Backends::GL }
-        }
+        // Not wgpu: see `select_backend`.
+        GraphicsApi::Software => settings.backends,
     };
     WGPUConfiguration::Automatic(settings)
 }
 
+/// Drawing with the CPU (Slint's software renderer, `Renderer::new_cpu`)
+/// rather than wgpu; decided once, at startup.
+static CPU_RENDERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn cpu_rendering() -> bool {
+    CPU_RENDERING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Slint's backend, for the user's `rendering.graphicsAPI`.
+/// `GraphicsApi::Software` is the CPU renderer.
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 fn backend_selector(settings: &wtpp_config::Settings, api: wtpp_config::GraphicsApi) -> slint::BackendSelector {
+    let cpu = api == wtpp_config::GraphicsApi::Software;
     #[allow(unused_mut)]
-    let mut backend = slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(api));
+    let mut backend = if cpu {
+        slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into())
+    } else {
+        slint::BackendSelector::new().require_wgpu_30(wgpu_configuration(api))
+    };
     // Windows, with the DirectComposition swapchain: no GDI redirection
     // surface under it. That surface is opaque and DWM manages it on its own:
     // it kept the old size after a resize and, depending on the monitor (GPU)
@@ -504,10 +510,7 @@ fn backend_selector(settings: &wtpp_config::Settings, api: wtpp_config::Graphics
     #[cfg(windows)]
     if platform::DX12_VISUAL.load(std::sync::atomic::Ordering::Relaxed)
         && std::env::var_os("WGPU_BACKEND").is_none()
-        && matches!(
-            api,
-            wtpp_config::GraphicsApi::Automatic | wtpp_config::GraphicsApi::Direct3d12 | wtpp_config::GraphicsApi::Software
-        )
+        && matches!(api, wtpp_config::GraphicsApi::Automatic | wtpp_config::GraphicsApi::Direct3d12)
     {
         use slint::winit_030::winit::platform::windows::WindowAttributesExtWindows;
         backend = backend.with_winit_window_attributes_hook(|attributes| attributes.with_no_redirection_bitmap(true));
@@ -552,19 +555,31 @@ fn backend_selector(settings: &wtpp_config::Settings, api: wtpp_config::Graphics
 }
 
 /// Select the graphics backend. With the graphics API on automatic and no
-/// GPU that works (a VM, a remote session, a broken driver), the software
-/// renderer (`"rendering.graphicsAPI": "software"`) rather than no window.
-/// If even that fails, say so: on Windows there's nowhere else to see it.
+/// GPU that works (a VM, a remote session, a broken driver), the CPU renderer
+/// (`"rendering.graphicsAPI": "software"`). Slint passes over software GPUs
+/// (llvmpipe, WARP): emulating a GPU on the CPU is many times slower than
+/// drawing with the CPU directly. `WTPP_RENDERER=cpu` forces the CPU
+/// renderer, for testing. If nothing works, say so: on Windows there's
+/// nowhere else to see it.
 fn select_backend(settings: &wtpp_config::Settings) -> anyhow::Result<()> {
     use wtpp_config::GraphicsApi;
-    let api = settings.graphics_api;
-    let selected = match backend_selector(settings, api).select() {
-        Err(e) if api == GraphicsApi::Automatic => {
-            log::warn!("no GPU to draw with ({e}); using the software renderer");
-            backend_selector(settings, GraphicsApi::Software).select()
-        }
-        selected => selected,
+    let api = match std::env::var("WTPP_RENDERER").as_deref() {
+        Ok("cpu") => GraphicsApi::Software,
+        _ => settings.graphics_api,
     };
+    let (selected, cpu) = match backend_selector(settings, api).select() {
+        Err(e) if api == GraphicsApi::Automatic => {
+            log::warn!("no GPU to draw with ({e}); drawing with the CPU");
+            (backend_selector(settings, GraphicsApi::Software).select(), true)
+        }
+        selected => (selected, api == GraphicsApi::Software),
+    };
+    if selected.is_ok() {
+        CPU_RENDERING.store(cpu, std::sync::atomic::Ordering::Relaxed);
+        if cpu {
+            log::info!("renderer: CPU");
+        }
+    }
     if let Err(e) = &selected {
         log::error!("no graphics backend: {e}");
         let path = wtpp_config::settings::settings_path();
@@ -575,7 +590,7 @@ fn select_backend(settings: &wtpp_config::Settings) -> anyhow::Result<()> {
                  If this computer has no working graphics driver, the software renderer may still work: in {}, \
                  set\n\n    \"rendering.graphicsAPI\": \"software\",\n\n\
                  (add the line inside the outer braces if it isn't there). Or set the environment variable \
-                 SLINT_WGPU_CPU=1 before starting wt++.",
+                 WTPP_RENDERER=cpu before starting wt++.",
                 path.display()
             ),
         );
@@ -1157,6 +1172,45 @@ fn macos_allow_input_method(window: &slint::Window) {
 }
 
 fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::Result<()> {
+    if cpu_rendering() {
+        // Slint's software renderer has no rendering notifier: start once
+        // the window is up.
+        slint::invoke_from_event_loop(move || when_window_exists(id, 0, move || start_cpu_window(id, custom_titlebar)))
+            .ok();
+    } else {
+        wire_gpu_notifier(ui, id, custom_titlebar)?;
+    }
+    wire_callbacks(ui, id)
+}
+
+/// Run `f` once winit has made the window: `show()` only asks for it, and
+/// for a window opened while the event loop runs, it comes a little later.
+fn when_window_exists(id: WindowId, tries: u32, f: impl FnOnce() + 'static) {
+    use slint::winit_030::WinitWindowAccessor;
+    let exists = entry(id).is_some_and(|e| e.ui.window().with_winit_window(|_| ()).is_some());
+    if exists || tries >= 200 {
+        if !exists {
+            log::warn!("window {id}: no native window after {tries} tries");
+        }
+        f();
+        return;
+    }
+    slint::Timer::single_shot(std::time::Duration::from_millis(10), move || when_window_exists(id, tries + 1, f));
+}
+
+/// What the GPU path does on its first frame (see `wire_gpu_notifier`).
+fn start_cpu_window(id: WindowId, custom_titlebar: bool) {
+    #[cfg(target_os = "macos")]
+    macos_titlebar_clicks();
+    with_window(id, |app| {
+        if custom_titlebar {
+            app.install_titlebar();
+        }
+        app.on_cpu_ready(custom_titlebar);
+    });
+}
+
+fn wire_gpu_notifier(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::Result<()> {
     ui.window().set_rendering_notifier(move |state, api| {
         if custom_titlebar && matches!(state, slint::RenderingState::AfterRendering) {
             slint::invoke_from_event_loop(move || {
@@ -1184,7 +1238,10 @@ fn wire_window(ui: &MainWindow, id: WindowId, custom_titlebar: bool) -> anyhow::
             .ok();
         }
     })?;
+    Ok(())
+}
 
+fn wire_callbacks(ui: &MainWindow, id: WindowId) -> anyhow::Result<()> {
     ui.on_start_window_drag(move || {
         if let Some(e) = entry(id) {
             use slint::winit_030::WinitWindowAccessor;

@@ -31,6 +31,8 @@ slint = { version = "~1.18.1", default-features = false, features = [
     "accessibility",
     "backend-winit",
     "renderer-femtovg-wgpu",
+    # No GPU: drawing with the CPU (see select_backend).
+    "renderer-software",
     "unstable-wgpu-30",
     "unstable-winit-030",
 ] }

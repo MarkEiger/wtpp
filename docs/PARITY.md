@@ -72,7 +72,7 @@
 - [x] Profile icon (dropdown + tab): program icons, image files, emoji
 - [x] Profile: tab title, suppress app title, environment, bell style, close on exit, opacity, background image
 - [x] Appearance: theme (dark/light/system), tab width mode (equal/title/compact), always show tabs
-- [x] Rendering page (graphics API incl. software rendering)
+- [x] Rendering page (graphics API incl. software rendering: CPU drawing, picked automatically without a GPU)
 
 ## Platform & integration
 - [x] Native Windows build + Start Menu shortcut; Linux build

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Fast without a GPU: in a virtual machine (VMware, ESXi, Hyper-V without a
+  GPU) or a remote session, wt++ draws with the CPU instead of on an emulated
+  GPU (llvmpipe, WARP), which managed about 10 frames a second; it now keeps
+  up at 60. Automatic picks it when there's no GPU; "Software" under
+  Rendering (`"rendering.graphicsAPI": "software"`) asks for it anywhere.
+  Everything works as with a GPU, apart from a see-through window
+  (`opacity`), which needs one, and the faint shadow under menus and the
+  command palette.
+
 ## 1.7.0 — 2026-11-25
 
 - The Agents view (🤖 **Agents** in the new-tab menu, or "Open agents" in

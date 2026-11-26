@@ -696,7 +696,7 @@ component RenderingPage inherits VerticalLayout {
     spacing: 4px;
     Card {
         title: "Graphics API";
-        description: "Takes effect on restart. Software rendering is slower but works without a GPU driver (e.g. in some remote sessions).";
+        description: "Takes effect on restart. Software draws with the CPU: Automatic picks it when there's no GPU (a virtual machine, some remote sessions). Windows drawn that way can't be see-through.";
         ComboBox {
             width: 260px;
             model: ["Automatic", "Direct3D 12", "Vulkan", "Metal", "OpenGL", "Software"];

@@ -20,7 +20,13 @@ struct Entry {
     stamp: Option<Stamp>,
     image: Option<slint::Image>,
     loading: bool,
+    /// Copies scaled to the size they're shown at (CPU drawing, see
+    /// `shown_at`), by size, or `None` while one is being made.
+    scaled: HashMap<(u32, u32), Option<slint::Image>>,
 }
+
+/// Scaled copies kept per image (a few pane sizes).
+const MAX_SCALED: usize = 6;
 
 thread_local! {
     /// By the setting's value as written (UI thread only).
@@ -54,7 +60,7 @@ pub fn image_for(window: crate::WindowId, raw: &str) -> Option<slint::Image> {
     let path = resolve_path(raw);
     CACHE.with(|c| {
         c.borrow_mut()
-            .insert(raw.to_string(), Entry { path: path.clone(), stamp: None, image: None, loading: path.is_some() })
+            .insert(raw.to_string(), Entry { path: path.clone(), stamp: None, image: None, loading: path.is_some(), scaled: HashMap::new() })
     });
     if let Some(path) = path {
         load(raw.to_string(), path);
@@ -130,6 +136,7 @@ fn load(raw: String, path: PathBuf) {
                     // A failed decode shows no image, and isn't retried until
                     // the file changes.
                     entry.image = decoded.map(slint::Image::from_rgba8);
+                    entry.scaled.clear();
                 }
             });
             crate::for_each_window(|app| app.render());
@@ -191,6 +198,73 @@ fn resolve_path_with(
     Some(PathBuf::from(wtpp_config::settings::expand_env_with(raw, var)))
 }
 
+/// `image` (the one `image_for` gave for `raw`) as it's shown in a `pane`
+/// of physical pixels with image-fit `fit` (see `image_layout`), scaled
+/// beforehand with a smoothing filter. For the CPU renderer, which scales
+/// images by picking the nearest pixel: shown smaller, a picture turns
+/// jagged. Scaling happens off the UI thread; until it's done, the image as
+/// given.
+pub fn shown_at(raw: &str, image: slint::Image, fit: i32, pane: (f32, f32)) -> slint::Image {
+    let size = image.size();
+    let Some(target) = shown_size(fit, (size.width, size.height), pane) else { return image };
+    if target == (size.width, size.height) {
+        return image;
+    }
+    let start = CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        let entry = cache.get_mut(raw)?;
+        if let Some(scaled) = entry.scaled.get(&target) {
+            return Some(scaled.clone().ok_or(false));
+        }
+        if entry.scaled.len() >= MAX_SCALED {
+            entry.scaled.clear();
+        }
+        entry.scaled.insert(target, None);
+        Some(Err(true))
+    });
+    match start {
+        Some(Ok(scaled)) => return scaled,
+        Some(Err(true)) => scale(raw.to_string(), &image, target),
+        _ => {}
+    }
+    image
+}
+
+/// The size an image of `size` is drawn at in `pane`, if it's scaled.
+fn shown_size(fit: i32, (w, h): (u32, u32), (pw, ph): (f32, f32)) -> Option<(u32, u32)> {
+    if w == 0 || h == 0 || pw < 1.0 || ph < 1.0 {
+        return None;
+    }
+    let (sx, sy) = (pw / w as f32, ph / h as f32);
+    let (sx, sy) = match fit {
+        1 => (sx, sy),
+        2 => (sx.min(sy), sx.min(sy)),
+        3 => (sx.max(sy), sx.max(sy)),
+        _ => return None,
+    };
+    Some((((w as f32 * sx).round() as u32).max(1), ((h as f32 * sy).round() as u32).max(1)))
+}
+
+fn scale(raw: String, image: &slint::Image, (w, h): (u32, u32)) {
+    let Some(pixels) = image.to_rgba8() else { return };
+    std::thread::spawn(move || {
+        let source = image::RgbaImage::from_raw(pixels.width(), pixels.height(), pixels.as_bytes().to_vec());
+        let scaled = source.map(|source| image::imageops::resize(&source, w, h, image::imageops::FilterType::Triangle));
+        slint::invoke_from_event_loop(move || {
+            let scaled = scaled.map(|s| slint::Image::from_rgba8(SharedPixelBuffer::clone_from_slice(s.as_raw(), w, h)));
+            CACHE.with(|c| {
+                if let Some(entry) = c.borrow_mut().get_mut(&raw)
+                    && let Some(slot) = entry.scaled.get_mut(&(w, h))
+                {
+                    *slot = scaled;
+                }
+            });
+            crate::for_each_window(|app| app.render());
+        })
+        .ok();
+    });
+}
+
 /// Slint `Image` placement for WT's stretch mode and alignment:
 /// image-fit (0 none, 1 fill, 2 uniform, 3 uniform to fill) and the
 /// horizontal and vertical alignment (-1 start, 0 centre, 1 end).
@@ -223,7 +297,7 @@ mod tests {
 
     /// A pending entry: `refresh` leaves it alone apart from pruning.
     fn cache_loading(raw: &str) {
-        let entry = Entry { path: None, stamp: None, image: None, loading: true };
+        let entry = Entry { path: None, stamp: None, image: None, loading: true, scaled: HashMap::new() };
         CACHE.with(|c| c.borrow_mut().insert(raw.to_string(), entry));
     }
 
@@ -292,6 +366,18 @@ mod tests {
         assert_eq!(image_layout(S::None, A::TopLeft), (0, -1, -1));
         assert_eq!(image_layout(S::Fill, A::Right), (1, 1, 0));
         assert_eq!(image_layout(S::Uniform, A::BottomRight), (2, 1, 1));
+    }
+
+    #[test]
+    fn shown_sizes() {
+        // None: drawn as is.
+        assert_eq!(shown_size(0, (100, 50), (400.0, 400.0)), None);
+        assert_eq!(shown_size(1, (100, 50), (400.0, 300.0)), Some((400, 300)));
+        // Uniform: fits inside; uniform to fill: covers.
+        assert_eq!(shown_size(2, (100, 50), (400.0, 300.0)), Some((400, 200)));
+        assert_eq!(shown_size(3, (100, 50), (400.0, 300.0)), Some((600, 300)));
+        assert_eq!(shown_size(2, (1000, 1000), (470.0, 620.0)), Some((470, 470)));
+        assert_eq!(shown_size(2, (0, 50), (400.0, 300.0)), None);
     }
 
     #[test]
