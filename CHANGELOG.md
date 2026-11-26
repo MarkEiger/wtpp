@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 — 2026-11-27
 
 - Fast without a GPU: in a virtual machine (VMware, ESXi, Hyper-V without a
   GPU) or a remote session, wt++ draws with the CPU instead of on an emulated
